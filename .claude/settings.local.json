@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./android/gradlew -p android :app:assembleDebug)",
+      "Bash(adb install:*)"
+    ]
+  }
+}
