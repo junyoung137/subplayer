@@ -19,12 +19,17 @@ export default function SettingsScreen() {
 
   const [gemmaMeta, setGemmaMeta] = useState<ModelMeta | null | undefined>(undefined);
 
-  // Check whether Gemma model is downloaded
   useEffect(() => {
     getModelMeta().then(setGemmaMeta);
   }, []);
 
   const whisperModels = ["tiny", "small", "medium", "large-v3"] as const;
+
+  const subtitleStyles = [
+    { key: "outline",  label: "외곽선형",   desc: "갈매기 스타일"   },
+    { key: "pill",     label: "박스형",     desc: "현재 스타일"     },
+    { key: "bar",      label: "바형",       desc: "넷플릭스 스타일" },
+  ] as const;
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
@@ -100,6 +105,44 @@ export default function SettingsScreen() {
 
       {/* ── Subtitle appearance ──────────────────────────────────────────────── */}
       <Section title="자막 스타일">
+
+        {/* 자막 스타일 종류 선택 */}
+        <Text style={styles.subLabel}>자막 디자인</Text>
+        <View style={styles.styleCardRow}>
+          {subtitleStyles.map((s) => {
+            const isActive = settings.subtitleStyle === s.key;
+            return (
+              <TouchableOpacity
+                key={s.key}
+                style={[styles.styleCard, isActive && styles.styleCardActive]}
+                onPress={() => update({ subtitleStyle: s.key })}
+                activeOpacity={0.75}
+              >
+                {/* 미리보기 */}
+                <View style={styles.stylePreview}>
+                  {s.key === "outline" && (
+                    <Text style={styles.previewOutline}>자막</Text>
+                  )}
+                  {s.key === "pill" && (
+                    <View style={styles.previewPillBox}>
+                      <Text style={styles.previewPillText}>자막</Text>
+                    </View>
+                  )}
+                  {s.key === "bar" && (
+                    <View style={styles.previewBarBox}>
+                      <Text style={styles.previewBarText}>자막</Text>
+                    </View>
+                  )}
+                </View>
+                <Text style={[styles.styleCardLabel, isActive && styles.styleCardLabelActive]}>
+                  {s.label}
+                </Text>
+                <Text style={styles.styleCardDesc}>{s.desc}</Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+
         <Row label={`글자 크기: ${settings.subtitleFontSize}px`}>
           <Slider
             style={{ flex: 1 }}
@@ -209,6 +252,11 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
     textTransform: "uppercase",
   },
+  subLabel: {
+    color: "#888",
+    fontSize: 12,
+    fontWeight: "600",
+  },
 
   row: {
     flexDirection: "row",
@@ -228,6 +276,85 @@ const styles = StyleSheet.create({
   chipActive:     { backgroundColor: "#2563eb" },
   chipText:       { color: "#aaa", fontSize: 13 },
   chipTextActive: { color: "#fff", fontWeight: "600" },
+
+  // ── 스타일 카드 ──────────────────────────────────────────────────────────
+  styleCardRow: {
+    flexDirection: "row",
+    gap: 8,
+  },
+  styleCard: {
+    flex: 1,
+    backgroundColor: "#1a1a1a",
+    borderRadius: 10,
+    padding: 10,
+    alignItems: "center",
+    gap: 6,
+    borderWidth: 1.5,
+    borderColor: "#2a2a2a",
+  },
+  styleCardActive: {
+    borderColor: "#2563eb",
+    backgroundColor: "#0f1f3d",
+  },
+  stylePreview: {
+    width: "100%",
+    height: 40,
+    backgroundColor: "#333",
+    borderRadius: 6,
+    justifyContent: "center",
+    alignItems: "center",
+    overflow: "hidden",
+  },
+  // outline 미리보기
+  previewOutline: {
+    color: "#fff",
+    fontSize: 14,
+    fontWeight: "800",
+    textShadowColor: "rgba(0,0,0,1)",
+    textShadowOffset: { width: 2, height: 2 },
+    textShadowRadius: 4,
+  },
+  // pill 미리보기
+  previewPillBox: {
+    backgroundColor: "rgba(0,0,0,0.65)",
+    borderRadius: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+  },
+  previewPillText: {
+    color: "#fff",
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  // bar 미리보기
+  previewBarBox: {
+    position: "absolute",
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: "rgba(0,0,0,0.75)",
+    paddingVertical: 4,
+    alignItems: "center",
+  },
+  previewBarText: {
+    color: "#fff",
+    fontSize: 13,
+    fontWeight: "700",
+  },
+
+  styleCardLabel: {
+    color: "#aaa",
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  styleCardLabelActive: {
+    color: "#60a5fa",
+  },
+  styleCardDesc: {
+    color: "#555",
+    fontSize: 10,
+    textAlign: "center",
+  },
 
   manageBtn: {
     backgroundColor: "#1e3a5f",

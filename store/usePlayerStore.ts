@@ -19,8 +19,6 @@ interface PlayerStore {
   processingError: string | null;
   processingPercent: number;
   processingMessage: string;
-  /** Incremented each time the user seeks. Subscribers can bypass min-display
-   *  gating to snap instantly to the subtitle at the new position. */
   seekVersion: number;
 
   setVideo: (uri: string, name: string) => void;
@@ -34,6 +32,8 @@ interface PlayerStore {
   setProcessingProgress: (percent: number, message: string) => void;
   bumpSeek: () => void;
   reset: () => void;
+  /** 특정 자막 세그먼트의 번역/원문을 수동으로 수정 */
+  updateSubtitle: (id: string, patch: Partial<Pick<SubtitleSegment, "original" | "translated">>) => void;
 }
 
 export const usePlayerStore = create<PlayerStore>((set) => ({
@@ -49,9 +49,6 @@ export const usePlayerStore = create<PlayerStore>((set) => ({
   processingMessage: "",
   seekVersion: 0,
 
-  // Reset playback state when a new video is selected so the player always
-  // starts from a clean slate (isPlaying is set to true later by the
-  // processing screen once subtitles are ready).
   setVideo: (uri, name) =>
     set({ videoUri: uri, videoName: name, subtitles: [], isPlaying: false, currentTime: 0, duration: 0 }),
 
@@ -67,6 +64,13 @@ export const usePlayerStore = create<PlayerStore>((set) => ({
   setProcessingError: (processingError) => set({ processingError }),
   setProcessingProgress: (processingPercent, processingMessage) => set({ processingPercent, processingMessage }),
   bumpSeek: () => set((s) => ({ seekVersion: s.seekVersion + 1 })),
+
+  updateSubtitle: (id, patch) =>
+    set((s) => ({
+      subtitles: s.subtitles.map((seg) =>
+        seg.id === id ? { ...seg, ...patch } : seg
+      ),
+    })),
 
   reset: () =>
     set({

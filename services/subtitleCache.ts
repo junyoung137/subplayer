@@ -14,20 +14,25 @@ export interface SubtitleCacheEntry {
   createdAt: number;
 }
 
-/** AsyncStorage key for a given video URI. */
-function cacheKey(videoUri: string): string {
-  return PREFIX + videoUri;
+/**
+ * AsyncStorage key for a given video URI + target language.
+ * Each language gets its own cache slot so switching languages is instant
+ * after the first translation.
+ */
+function cacheKey(videoUri: string, language: string): string {
+  return `${PREFIX}${language}_${videoUri}`;
 }
 
 /**
- * Returns the raw cache entry for a video URI, or null if nothing is stored.
- * Does NOT filter by language — callers decide what to do with a mismatch.
+ * Returns the raw cache entry for a video URI + language, or null if nothing
+ * is stored for that combination.
  */
 export async function getCacheEntry(
-  videoUri: string
+  videoUri: string,
+  targetLanguage: string
 ): Promise<SubtitleCacheEntry | null> {
   try {
-    const raw = await AsyncStorage.getItem(cacheKey(videoUri));
+    const raw = await AsyncStorage.getItem(cacheKey(videoUri, targetLanguage));
     if (!raw) return null;
     return JSON.parse(raw) as SubtitleCacheEntry;
   } catch {
@@ -37,21 +42,21 @@ export async function getCacheEntry(
 
 /**
  * Returns cached subtitles for the given video URI + target language,
- * or null if nothing is cached / the stored language doesn't match.
+ * or null if nothing is cached for that combination.
  */
 export async function getCachedSubtitles(
   videoUri: string,
   targetLanguage: string
 ): Promise<SubtitleSegment[] | null> {
-  const entry = await getCacheEntry(videoUri);
+  const entry = await getCacheEntry(videoUri, targetLanguage);
   if (!entry) return null;
-  // Invalidate if the user changed target language since the cache was written.
-  if (entry.language !== targetLanguage) return null;
   return entry.subtitles;
 }
 
 /**
  * Persists subtitles for a video + language pair.
+ * Each language is stored under its own key so switching languages never
+ * overwrites a previously translated result.
  * Silently swallows storage errors — cache is best-effort.
  */
 export async function saveSubtitleCache(
@@ -68,16 +73,33 @@ export async function saveSubtitleCache(
       sourceLanguage,
       createdAt: Date.now(),
     };
-    await AsyncStorage.setItem(cacheKey(videoUri), JSON.stringify(entry));
+    await AsyncStorage.setItem(
+      cacheKey(videoUri, targetLanguage),
+      JSON.stringify(entry)
+    );
   } catch (e) {
     console.warn("[subtitleCache] Failed to save:", e);
   }
 }
 
-/** Removes the cached subtitles for a video URI. */
-export async function clearCacheForUri(videoUri: string): Promise<void> {
+/** Removes the cached subtitles for a specific video URI + language. */
+export async function clearCacheForUri(
+  videoUri: string,
+  targetLanguage?: string
+): Promise<void> {
   try {
-    await AsyncStorage.removeItem(cacheKey(videoUri));
+    if (targetLanguage) {
+      await AsyncStorage.removeItem(cacheKey(videoUri, targetLanguage));
+    } else {
+      // targetLanguage 미지정 시 전체 언어 캐시 삭제
+      const allKeys = await AsyncStorage.getAllKeys();
+      const toDelete = allKeys.filter((k) =>
+        k.startsWith(PREFIX) && k.endsWith(videoUri)
+      );
+      if (toDelete.length > 0) {
+        await AsyncStorage.multiRemove(toDelete);
+      }
+    }
   } catch {
     // ignore
   }

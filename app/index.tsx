@@ -1,8 +1,4 @@
-import { NativeModules } from "react-native";
-console.log("[DEBUG] NativeModules keys:", Object.keys(NativeModules).filter(k => k.toLowerCase().includes('llama')));
-console.log("[DEBUG] RNLlama:", NativeModules.RNLlama);
-
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import {
   View,
   Text,
@@ -10,65 +6,94 @@ import {
   FlatList,
   StyleSheet,
   Alert,
+  Modal,
+  ScrollView,
+  Pressable,
+  TextInput,
+  Image,
+  Animated,
+  ActivityIndicator,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as DocumentPicker from "expo-document-picker";
+import * as ImagePicker from "expo-image-picker";
 import * as FileSystem from "expo-file-system/legacy";
 import { router } from "expo-router";
 import { usePlayerStore } from "../store/usePlayerStore";
+import { useSettingsStore } from "../store/useSettingsStore";
+import { LANGUAGES } from "../constants/languages";
 
-const SUPPORTED_TYPES = [
-  "video/mp4",
-  "video/x-matroska",
-  "video/x-msvideo",
-  "video/quicktime",
-  "video/*",
-];
+// ── Thumbnail helper (graceful fallback if expo-video-thumbnails not installed) ──
+let getThumbnailAsync: ((uri: string, opts: { time: number }) => Promise<{ uri: string }>) | null = null;
+try {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const mod = require("expo-video-thumbnails");
+  getThumbnailAsync = mod.getThumbnailAsync ?? null;
+} catch {}
 
-const RECENT_KEY = "realtimesub_recent_files";
+// ── Storage keys ─────────────────────────────────────────────────────────────
+const RECENT_KEY    = "realtimesub_recent_files_v2";
+const CATEGORY_KEY  = "realtimesub_categories_v2";
+const DEFAULT_CATEGORY = "전체";
 
-interface RecentFile {
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+export type SubtitleStatus = "none" | "processing" | "done";
+export type SortOrder = "recent" | "name" | "size";
+
+export interface RecentFile {
   uri: string;
   name: string;
+  category?: string;       // category id
+  addedAt: number;         // timestamp ms
+  duration?: number;       // seconds
+  fileSize?: number;       // bytes
+  thumbnailUri?: string;
+  subtitleStatus?: SubtitleStatus;
+  subtitlePercent?: number;
+  language?: string;       // detected lang code e.g. "en"
+  targetLanguage?: string; // translated lang code e.g. "ko"
+  isFavorite?: boolean;
+  lastPlayedAt?: number;
 }
 
-// ── Persistence helpers ───────────────────────────────────────────────────────
+export interface Category {
+  id: string;
+  name: string;
+  parentId?: string;       // undefined = root category
+}
+
+// ── Persistence ───────────────────────────────────────────────────────────────
 
 async function loadRecent(): Promise<RecentFile[]> {
   try {
     const raw = await AsyncStorage.getItem(RECENT_KEY);
     return raw ? (JSON.parse(raw) as RecentFile[]) : [];
-  } catch {
-    return [];
-  }
+  } catch { return []; }
 }
-
-async function saveRecent(files: RecentFile[]): Promise<void> {
+async function saveRecent(files: RecentFile[]) {
+  try { await AsyncStorage.setItem(RECENT_KEY, JSON.stringify(files)); } catch {}
+}
+async function loadCategories(): Promise<Category[]> {
   try {
-    await AsyncStorage.setItem(RECENT_KEY, JSON.stringify(files));
-  } catch {
-    // best-effort
-  }
+    const raw = await AsyncStorage.getItem(CATEGORY_KEY);
+    return raw ? (JSON.parse(raw) as Category[]) : [];
+  } catch { return []; }
+}
+async function saveCategories(cats: Category[]) {
+  try { await AsyncStorage.setItem(CATEGORY_KEY, JSON.stringify(cats)); } catch {}
 }
 
-// ── URI helpers ──────────────────────────────────────────────────────────────
+// ── URI & file helpers ────────────────────────────────────────────────────────
 
-/**
- * Ensure a URI is a stable file:// path by copying content:// URIs to the
- * app cache directory. Returns the file:// URI on success or null on failure.
- */
 async function ensureFileUri(uri: string, filename: string): Promise<string | null> {
   if (uri.startsWith("file://")) return uri;
-
   try {
     const cacheDir = FileSystem.cacheDirectory + "videos/";
     await FileSystem.makeDirectoryAsync(cacheDir, { intermediates: true });
-    const dest     = cacheDir + filename;
-    const info     = await FileSystem.getInfoAsync(dest);
-    if (!info.exists) {
-      await FileSystem.copyAsync({ from: uri, to: dest });
-    }
-    console.log("[FILE] Copied content:// → file://:", dest);
+    const dest = cacheDir + filename;
+    const info = await FileSystem.getInfoAsync(dest);
+    if (!info.exists) await FileSystem.copyAsync({ from: uri, to: dest });
     return dest;
   } catch (e) {
     console.error("[FILE] Copy failed:", e);
@@ -76,23 +101,629 @@ async function ensureFileUri(uri: string, filename: string): Promise<string | nu
   }
 }
 
-// ── Screen ────────────────────────────────────────────────────────────────────
+async function getFileSize(uri: string): Promise<number | undefined> {
+  try {
+    const info = await FileSystem.getInfoAsync(uri);
+    return (info as any).size ?? undefined;
+  } catch { return undefined; }
+}
+
+function formatSize(bytes?: number): string {
+  if (!bytes) return "";
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function formatDuration(sec?: number): string {
+  if (!sec) return "";
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = Math.floor(sec % 60);
+  if (h > 0) return `${h}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+function flagEmoji(code?: string): string {
+  if (!code) return "";
+  const map: Record<string, string> = {
+    en: "🇺🇸", ko: "🇰🇷", ja: "🇯🇵", zh: "🇨🇳",
+    fr: "🇫🇷", de: "🇩🇪", es: "🇪🇸", pt: "🇵🇹",
+    ru: "🇷🇺", ar: "🇸🇦", hi: "🇮🇳", it: "🇮🇹",
+  };
+  return map[code] ?? code.toUpperCase();
+}
+
+// ── Thumbnail cache ───────────────────────────────────────────────────────────
+
+const thumbCache: Record<string, string> = {};
+
+/**
+ * Smart thumbnail extraction — avoids black opening frames.
+ * Tries: 10% of duration → 10s → 5s → 3s → 1s
+ * Android: ensures uri starts with file:// before calling getThumbnailAsync
+ */
+async function fetchThumbnail(
+  uri: string,
+  durationSec?: number,
+): Promise<string | null> {
+  if (!getThumbnailAsync) return null;
+  if (thumbCache[uri]) return thumbCache[uri];
+
+  // Android requires file:// scheme — content:// URIs will fail
+  const safeUri = uri.startsWith("file://") || uri.startsWith("http")
+    ? uri
+    : "file://" + uri;
+
+  const candidates: number[] = [];
+  if (durationSec && durationSec > 0) {
+    const tenPct = Math.max(Math.floor(durationSec * 0.1) * 1000, 3000);
+    candidates.push(tenPct);
+  }
+  // Fixed fallbacks — avoids black intro frames
+  candidates.push(10000, 5000, 3000, 1000, 500);
+
+  for (const timeMs of candidates) {
+    try {
+      const result = await getThumbnailAsync(safeUri, { time: timeMs });
+      if (result?.uri) {
+        thumbCache[uri] = result.uri;
+        return result.uri;
+      }
+    } catch { /* try next candidate */ }
+  }
+  return null;
+}
+
+// ── Sub-components ────────────────────────────────────────────────────────────
+
+/**
+ * FileThumbnail
+ * - Auto-extracts on mount (smart multi-point, avoids black frames)
+ * - Fades in smoothly once ready
+ * - Shows camera edit-overlay badge so user knows it's tappable
+ * - Empty state: clean placeholder with camera icon
+ * - Tap (empty) or tap camera badge (filled) → onPickManual
+ * - All images: center crop via resizeMode="cover"
+ */
+function FileThumbnail({
+  uri,
+  thumbUri,
+  duration,
+  onPickManual,
+}: {
+  uri: string;
+  thumbUri?: string;
+  duration?: number;
+  onPickManual?: () => void;
+}) {
+  const [thumb, setThumb] = useState<string | null>(thumbUri ?? null);
+  const [loading, setLoading] = useState(!thumbUri);
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    if (thumbUri) {
+      setThumb(thumbUri);
+      setLoading(false);
+      fadeAnim.setValue(1);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    fadeAnim.setValue(0);
+    fetchThumbnail(uri, duration).then((t) => {
+      if (cancelled) return;
+      setThumb(t);
+      setLoading(false);
+      if (t) {
+        Animated.timing(fadeAnim, {
+          toValue: 1,
+          duration: 350,
+          useNativeDriver: true,
+        }).start();
+      }
+    });
+    return () => { cancelled = true; };
+  }, [uri, thumbUri, duration]);
+
+  // ── Skeleton / loading state ──────────────────────────────────────────────
+  if (loading) {
+    return (
+      <View style={thumbStyles.wrap}>
+        <View style={thumbStyles.skeleton} />
+        <ActivityIndicator size="small" color="#444" style={{ position: "absolute" }} />
+      </View>
+    );
+  }
+
+  // ── Filled: thumbnail present ─────────────────────────────────────────────
+  if (thumb) {
+    return (
+      <View style={thumbStyles.wrap}>
+        {/* Center-crop image with fade-in */}
+        <Animated.Image
+          source={{ uri: thumb }}
+          style={[thumbStyles.img, { opacity: fadeAnim }]}
+          resizeMode="cover"
+        />
+        {/* Subtle play overlay */}
+        <View style={thumbStyles.playOverlay} pointerEvents="none">
+          <Text style={thumbStyles.playIcon}>▶</Text>
+        </View>
+        {/* Camera badge — bottom-right corner — signals "tap to change" */}
+        <TouchableOpacity
+          style={thumbStyles.camBadge}
+          onPress={onPickManual}
+          hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+          activeOpacity={0.7}
+        >
+          <Text style={thumbStyles.camIcon}>📷</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
+  // ── Empty: no thumbnail yet ───────────────────────────────────────────────
+  return (
+    <TouchableOpacity
+      style={[thumbStyles.wrap, thumbStyles.wrapEmpty]}
+      onPress={onPickManual}
+      activeOpacity={0.7}
+    >
+      <Text style={thumbStyles.emptyIcon}>🎞</Text>
+      <Text style={thumbStyles.emptyLabel}>사진 추가</Text>
+    </TouchableOpacity>
+  );
+}
+
+const thumbStyles = StyleSheet.create({
+  wrap: {
+    width: 80,
+    height: 52,
+    borderRadius: 8,
+    backgroundColor: "#1a1a1a",
+    alignItems: "center",
+    justifyContent: "center",
+    overflow: "hidden",
+    borderWidth: 1,
+    borderColor: "#2a2a2a",
+  },
+  wrapEmpty: {
+    borderStyle: "dashed",
+    borderColor: "#3a3a3a",
+    backgroundColor: "#111",
+    gap: 3,
+  },
+  skeleton: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "#1e1e1e",
+  },
+  // center-crop: fill the container completely
+  img: {
+    width: "100%",
+    height: "100%",
+  },
+  playOverlay: {
+    position: "absolute",
+    backgroundColor: "rgba(0,0,0,0.35)",
+    width: "100%",
+    height: "100%",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  playIcon: { color: "#fff", fontSize: 13, opacity: 0.85 },
+  // Camera badge — bottom-right corner
+  camBadge: {
+    position: "absolute",
+    bottom: 3,
+    right: 3,
+    backgroundColor: "rgba(0,0,0,0.65)",
+    borderRadius: 4,
+    paddingHorizontal: 3,
+    paddingVertical: 1,
+  },
+  camIcon: { fontSize: 9 },
+  // Empty placeholder
+  emptyIcon: { fontSize: 18, opacity: 0.4 },
+  emptyLabel: { color: "#444", fontSize: 9, fontWeight: "600", letterSpacing: 0.2 },
+});
+
+// Subtitle status badge
+function SubBadge({ status, percent }: { status?: SubtitleStatus; percent?: number }) {
+  if (!status || status === "none") return null;
+  if (status === "processing") {
+    return (
+      <View style={[badgeStyles.badge, badgeStyles.processing]}>
+        <Text style={badgeStyles.text}>⚙️ {percent ?? 0}%</Text>
+      </View>
+    );
+  }
+  return (
+    <View style={[badgeStyles.badge, badgeStyles.done]}>
+      <Text style={badgeStyles.text}>✓ 자막 완료</Text>
+    </View>
+  );
+}
+
+const badgeStyles = StyleSheet.create({
+  badge: {
+    borderRadius: 4,
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+    alignSelf: "flex-start",
+    marginTop: 3,
+  },
+  processing: { backgroundColor: "#7c3aed22", borderWidth: 1, borderColor: "#7c3aed" },
+  done:       { backgroundColor: "#16653422", borderWidth: 1, borderColor: "#22c55e" },
+  text: { fontSize: 10, color: "#aaa", fontWeight: "600" },
+});
+
+// ── Language Setup Modal ──────────────────────────────────────────────────────
+interface LangSetupModalProps {
+  visible: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}
+function LangSetupModal({ visible, onConfirm, onCancel }: LangSetupModalProps) {
+  const targetLanguage = useSettingsStore((s) => s.targetLanguage);
+  const update         = useSettingsStore((s) => s.update);
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onCancel}>
+      <Pressable style={modalStyles.backdrop} onPress={onCancel}>
+        <Pressable style={modalStyles.sheet} onPress={() => {}}>
+          <Text style={modalStyles.title}>🌐 번역 언어 선택</Text>
+          <Text style={modalStyles.subtitle}>어떤 언어로 번역할까요?</Text>
+          <ScrollView style={modalStyles.langList} nestedScrollEnabled>
+            {LANGUAGES.map((lang) => {
+              const isSelected = targetLanguage === lang.code;
+              return (
+                <TouchableOpacity
+                  key={lang.code}
+                  style={[modalStyles.langOption, isSelected && modalStyles.langOptionSelected]}
+                  onPress={() => update({ targetLanguage: lang.code })}
+                >
+                  <Text style={modalStyles.langOptionNative}>{lang.nativeName}</Text>
+                  <Text style={modalStyles.langOptionCode}>{lang.name}</Text>
+                  {isSelected && <Text style={modalStyles.checkmark}>✓</Text>}
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+          <Text style={modalStyles.hint}>💡 원본 언어는 자동 감지됩니다</Text>
+          <View style={modalStyles.btnRow}>
+            <TouchableOpacity style={modalStyles.cancelBtn} onPress={onCancel}>
+              <Text style={modalStyles.cancelBtnText}>취소</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={modalStyles.confirmBtn} onPress={onConfirm}>
+              <Text style={modalStyles.confirmBtnText}>처리 시작 →</Text>
+            </TouchableOpacity>
+          </View>
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
+// ── Category Name Modal ───────────────────────────────────────────────────────
+interface CategoryNameModalProps {
+  visible: boolean;
+  initial?: string;
+  parentName?: string;
+  onConfirm: (name: string) => void;
+  onCancel: () => void;
+}
+function CategoryNameModal({ visible, initial = "", parentName, onConfirm, onCancel }: CategoryNameModalProps) {
+  const [name, setName] = useState(initial);
+  useEffect(() => { if (visible) setName(initial); }, [visible, initial]);
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onCancel}>
+      <Pressable style={catModalStyles.backdrop} onPress={onCancel}>
+        <Pressable style={catModalStyles.card} onPress={() => {}}>
+          <Text style={catModalStyles.title}>
+            {initial ? "폴더 이름 변경" : parentName ? `'${parentName}' 안에 하위 폴더 만들기` : "새 폴더 만들기"}
+          </Text>
+          <TextInput
+            style={catModalStyles.input}
+            value={name}
+            onChangeText={setName}
+            placeholder="폴더 이름"
+            placeholderTextColor="#555"
+            autoFocus
+            maxLength={20}
+            selectionColor="#2563eb"
+          />
+          <View style={catModalStyles.btnRow}>
+            <TouchableOpacity style={catModalStyles.cancelBtn} onPress={onCancel}>
+              <Text style={catModalStyles.cancelText}>취소</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[catModalStyles.confirmBtn, !name.trim() && catModalStyles.confirmDisabled]}
+              onPress={() => { if (name.trim()) onConfirm(name.trim()); }}
+              disabled={!name.trim()}
+            >
+              <Text style={catModalStyles.confirmText}>확인</Text>
+            </TouchableOpacity>
+          </View>
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
+// ── Move Category Modal ───────────────────────────────────────────────────────
+interface MoveCategoryModalProps {
+  visible: boolean;
+  categories: Category[];
+  currentCategory?: string;
+  onSelect: (categoryId: string | undefined) => void;
+  onCancel: () => void;
+}
+function MoveCategoryModal({ visible, categories, currentCategory, onSelect, onCancel }: MoveCategoryModalProps) {
+  const roots = categories.filter((c) => !c.parentId);
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onCancel}>
+      <Pressable style={modalStyles.backdrop} onPress={onCancel}>
+        <Pressable style={modalStyles.sheet} onPress={() => {}}>
+          <Text style={modalStyles.title}>폴더로 이동</Text>
+          <ScrollView style={{ maxHeight: 360 }} nestedScrollEnabled>
+            <TouchableOpacity
+              style={[moveStyles.option, !currentCategory && moveStyles.optionActive]}
+              onPress={() => onSelect(undefined)}
+            >
+              <Text style={moveStyles.optionIcon}>📂</Text>
+              <Text style={moveStyles.optionName}>미분류</Text>
+              {!currentCategory && <Text style={moveStyles.check}>✓</Text>}
+            </TouchableOpacity>
+            {roots.map((cat) => {
+              const children = categories.filter((c) => c.parentId === cat.id);
+              return (
+                <React.Fragment key={cat.id}>
+                  <TouchableOpacity
+                    style={[moveStyles.option, currentCategory === cat.id && moveStyles.optionActive]}
+                    onPress={() => onSelect(cat.id)}
+                  >
+                    <Text style={moveStyles.optionIcon}>📁</Text>
+                    <Text style={moveStyles.optionName}>{cat.name}</Text>
+                    {currentCategory === cat.id && <Text style={moveStyles.check}>✓</Text>}
+                  </TouchableOpacity>
+                  {children.map((child) => (
+                    <TouchableOpacity
+                      key={child.id}
+                      style={[moveStyles.option, moveStyles.childOption, currentCategory === child.id && moveStyles.optionActive]}
+                      onPress={() => onSelect(child.id)}
+                    >
+                      <Text style={moveStyles.optionIcon}>  📂</Text>
+                      <Text style={moveStyles.optionName}>{child.name}</Text>
+                      {currentCategory === child.id && <Text style={moveStyles.check}>✓</Text>}
+                    </TouchableOpacity>
+                  ))}
+                </React.Fragment>
+              );
+            })}
+          </ScrollView>
+          <TouchableOpacity style={moveStyles.cancelBtn} onPress={onCancel}>
+            <Text style={moveStyles.cancelText}>취소</Text>
+          </TouchableOpacity>
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
+// ── Sort picker modal ─────────────────────────────────────────────────────────
+interface SortModalProps {
+  visible: boolean;
+  current: SortOrder;
+  onSelect: (s: SortOrder) => void;
+  onCancel: () => void;
+}
+function SortModal({ visible, current, onSelect, onCancel }: SortModalProps) {
+  const options: { key: SortOrder; label: string; icon: string }[] = [
+    { key: "recent", label: "최신순", icon: "🕐" },
+    { key: "name",   label: "이름순", icon: "🔤" },
+    { key: "size",   label: "용량순", icon: "📦" },
+  ];
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onCancel}>
+      <Pressable style={catModalStyles.backdrop} onPress={onCancel}>
+        <Pressable style={[catModalStyles.card, { gap: 4 }]} onPress={() => {}}>
+          <Text style={catModalStyles.title}>정렬 방식</Text>
+          {options.map((o) => (
+            <TouchableOpacity
+              key={o.key}
+              style={[moveStyles.option, { borderRadius: 10, marginVertical: 2 }, current === o.key && moveStyles.optionActive]}
+              onPress={() => onSelect(o.key)}
+            >
+              <Text style={{ fontSize: 18 }}>{o.icon}</Text>
+              <Text style={moveStyles.optionName}>{o.label}</Text>
+              {current === o.key && <Text style={moveStyles.check}>✓</Text>}
+            </TouchableOpacity>
+          ))}
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
+// ── HomeScreen ────────────────────────────────────────────────────────────────
 
 export default function HomeScreen() {
-  const [recentFiles, setRecentFiles] = useState<RecentFile[]>([]);
-  const setVideo = usePlayerStore((s) => s.setVideo);
+  const [recentFiles,      setRecentFiles]      = useState<RecentFile[]>([]);
+  const [categories,       setCategories]       = useState<Category[]>([]);
+  const [selectedCat,      setSelectedCat]      = useState<string>(DEFAULT_CATEGORY);
+  const [langModalVisible, setLangModalVisible] = useState(false);
+  const [searchQuery,      setSearchQuery]      = useState("");
+  const [searchActive,     setSearchActive]     = useState(false);
+  const [sortOrder,        setSortOrder]        = useState<SortOrder>("recent");
+  const [sortModalVisible, setSortModalVisible] = useState(false);
+  const [multiSelect,      setMultiSelect]      = useState(false);
+  const [selectedUris,     setSelectedUris]     = useState<Set<string>>(new Set());
+  const [batchMoveVisible, setBatchMoveVisible] = useState(false);
 
-  // Load persisted recent files on mount
+  const [catNameModal, setCatNameModal] = useState<{
+    visible: boolean;
+    editId?: string;
+    parentId?: string;
+  }>({ visible: false });
+  const [moveModal, setMoveModal] = useState<{ visible: boolean; file?: RecentFile }>({ visible: false });
+
+  const setVideo = usePlayerStore((s) => s.setVideo);
+  const pendingFileRef = useRef<{ uri: string; name: string } | null>(null);
+
+  // ── Load on mount ──────────────────────────────────────────────────────────
   useEffect(() => {
     loadRecent().then(setRecentFiles);
+    loadCategories().then(setCategories);
   }, []);
 
-  // Persist whenever the list changes
-  useEffect(() => {
-    saveRecent(recentFiles);
+  useEffect(() => { saveRecent(recentFiles); }, [recentFiles]);
+  useEffect(() => { saveCategories(categories); }, [categories]);
+
+  // ── Sorted + filtered files ────────────────────────────────────────────────
+  const filteredFiles = useMemo(() => {
+    let files = recentFiles.filter((f) => {
+      if (selectedCat === DEFAULT_CATEGORY) return true;
+      if (selectedCat === "__uncat__") return !f.category;
+      if (selectedCat === "__fav__") return f.isFavorite;
+      // check if selectedCat or its sub-cats match
+      const subCatIds = categories
+        .filter((c) => c.parentId === selectedCat)
+        .map((c) => c.id);
+      return f.category === selectedCat || subCatIds.includes(f.category ?? "");
+    });
+
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      files = files.filter((f) => f.name.toLowerCase().includes(q));
+    }
+
+    files = [...files].sort((a, b) => {
+      if (sortOrder === "recent") return (b.addedAt ?? 0) - (a.addedAt ?? 0);
+      if (sortOrder === "name")   return a.name.localeCompare(b.name);
+      if (sortOrder === "size")   return (b.fileSize ?? 0) - (a.fileSize ?? 0);
+      return 0;
+    });
+
+    return files;
+  }, [recentFiles, categories, selectedCat, searchQuery, sortOrder]);
+
+  // Recent played (last 5, has lastPlayedAt)
+  const recentlyPlayed = useMemo(() => {
+    return [...recentFiles]
+      .filter((f) => f.lastPlayedAt)
+      .sort((a, b) => (b.lastPlayedAt ?? 0) - (a.lastPlayedAt ?? 0))
+      .slice(0, 5);
   }, [recentFiles]);
 
-  // ── File picker (unchanged logic) ─────────────────────────────────────────
+  // ── Category helpers ───────────────────────────────────────────────────────
+
+  const createCategory = (name: string, parentId?: string) => {
+    const id = Date.now().toString();
+    setCategories((prev) => [...prev, { id, name, parentId }]);
+    setCatNameModal({ visible: false });
+    setSelectedCat(id);
+  };
+
+  const renameCategory = (id: string, name: string) => {
+    setCategories((prev) => prev.map((c) => c.id === id ? { ...c, name } : c));
+    setCatNameModal({ visible: false });
+  };
+
+  const deleteCategory = (id: string) => {
+    // also delete all sub-categories
+    const toDelete = new Set<string>([id]);
+    categories.filter((c) => c.parentId === id).forEach((c) => toDelete.add(c.id));
+    Alert.alert("폴더 삭제", "하위 폴더도 함께 삭제됩니다. 파일은 미분류로 이동합니다.", [
+      { text: "취소", style: "cancel" },
+      {
+        text: "삭제",
+        style: "destructive",
+        onPress: () => {
+          setCategories((prev) => prev.filter((c) => !toDelete.has(c.id)));
+          setRecentFiles((prev) =>
+            prev.map((f) => toDelete.has(f.category ?? "") ? { ...f, category: undefined } : f)
+          );
+          if (toDelete.has(selectedCat)) setSelectedCat(DEFAULT_CATEGORY);
+        },
+      },
+    ]);
+  };
+
+  const moveFileToCategory = (file: RecentFile, categoryId: string | undefined) => {
+    setRecentFiles((prev) =>
+      prev.map((f) => f.uri === file.uri ? { ...f, category: categoryId } : f)
+    );
+    setMoveModal({ visible: false });
+  };
+
+  const batchMoveToCategory = (categoryId: string | undefined) => {
+    setRecentFiles((prev) =>
+      prev.map((f) => selectedUris.has(f.uri) ? { ...f, category: categoryId } : f)
+    );
+    setSelectedUris(new Set());
+    setMultiSelect(false);
+    setBatchMoveVisible(false);
+  };
+
+  const toggleFavorite = (uri: string) => {
+    setRecentFiles((prev) =>
+      prev.map((f) => f.uri === uri ? { ...f, isFavorite: !f.isFavorite } : f)
+    );
+  };
+
+  // ── Manual thumbnail picker ────────────────────────────────────────────────
+  const pickManualThumbnail = useCallback(async (fileUri: string) => {
+    Alert.alert(
+      "썸네일 변경",
+      "갤러리에서 이미지를 선택하세요.\n(재생 중 캡처는 플레이어 화면에서 가능합니다)",
+      [
+        { text: "취소", style: "cancel" },
+        {
+          text: "갤러리에서 선택",
+          onPress: async () => {
+            try {
+              const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+              if (!perm.granted) {
+                Alert.alert("권한 필요", "사진 라이브러리 접근 권한이 필요합니다.");
+                return;
+              }
+              const result = await ImagePicker.launchImageLibraryAsync({
+                mediaTypes: ImagePicker.MediaTypeOptions.Images,
+                allowsEditing: true,
+                aspect: [3, 2],   // enforce 3:2 crop — matches thumbStyles wrap ratio
+                quality: 0.8,
+              });
+              if (result.canceled || !result.assets[0]) return;
+              const picked = result.assets[0].uri;
+              // Persist to cache dir so uri survives app restarts
+              const cacheDir = FileSystem.cacheDirectory + "thumbs/";
+              await FileSystem.makeDirectoryAsync(cacheDir, { intermediates: true });
+              const dest = cacheDir + Date.now() + ".jpg";
+              await FileSystem.copyAsync({ from: picked, to: dest });
+              thumbCache[fileUri] = dest;
+              setRecentFiles((prev) =>
+                prev.map((f) => f.uri === fileUri ? { ...f, thumbnailUri: dest } : f)
+              );
+            } catch (e) {
+              Alert.alert("오류", "썸네일을 설정할 수 없습니다: " + String(e));
+            }
+          },
+        },
+      ]
+    );
+  }, []);
+
+  // ── File open helpers ──────────────────────────────────────────────────────
+
+  const goToProcessing = useCallback(() => {
+    setLangModalVisible(false);
+    router.push("/processing");
+  }, []);
+
+  const handleCancelModal = useCallback(() => {
+    setLangModalVisible(false);
+    pendingFileRef.current = null;
+  }, []);
 
   const pickVideo = async () => {
     try {
@@ -100,198 +731,516 @@ export default function HomeScreen() {
         type: ["video/*"],
         copyToCacheDirectory: true,
       });
-
       if (result.canceled) return;
       const file = result.assets[0];
-
-      console.log("[FILE] Picker URI:", file.uri);
-
-      // Guarantee a stable file:// URI — copyToCacheDirectory may still return
-      // content:// on some Android versions, so copy manually as fallback.
       const stableUri = await ensureFileUri(file.uri, file.name);
       if (!stableUri) {
-        Alert.alert("오류", "파일을 캐시에 복사할 수 없습니다. 다시 시도해 주세요.");
+        Alert.alert("오류", "파일을 캐시에 복사할 수 없습니다.");
         return;
       }
+      const autoCategory =
+        selectedCat !== DEFAULT_CATEGORY && selectedCat !== "__uncat__" && selectedCat !== "__fav__"
+          ? selectedCat : undefined;
 
-      console.log("[FILE] Stable URI:", stableUri);
+      const fileSize = await getFileSize(stableUri);
+      // Duration is unknown at pick time; fetchThumbnail will try multiple time offsets
+      const thumbUri = await fetchThumbnail(stableUri, undefined) ?? undefined;
 
-      const entry: RecentFile = { uri: stableUri, name: file.name };
+      const entry: RecentFile = {
+        uri: stableUri,
+        name: file.name,
+        category: autoCategory,
+        addedAt: Date.now(),
+        fileSize,
+        thumbnailUri: thumbUri,
+        subtitleStatus: "none",
+      };
+
       setRecentFiles((prev) => {
         const filtered = prev.filter((f) => f.uri !== stableUri);
-        return [entry, ...filtered].slice(0, 10);
+        return [entry, ...filtered].slice(0, 50);
       });
-
       setVideo(stableUri, file.name);
-      router.push("/processing");
+      pendingFileRef.current = { uri: stableUri, name: file.name };
+      setLangModalVisible(true);
     } catch (e) {
       Alert.alert("오류", "파일을 열 수 없습니다: " + String(e));
     }
   };
 
   const openRecent = async (file: RecentFile) => {
-    // Ensure we have a stable file:// URI. content:// entries saved before
-    // the fix will fail to copy (expired permission), surfacing a clear error.
     const stableUri = await ensureFileUri(file.uri, file.name);
     if (!stableUri) {
-      Alert.alert(
-        "파일을 다시 선택하세요",
-        "이 파일의 접근 권한이 만료되었습니다. 파일 열기 버튼으로 다시 선택해 주세요.",
-        [
-          {
-            text: "목록에서 삭제",
-            style: "destructive",
-            onPress: () =>
-              setRecentFiles((prev) => prev.filter((f) => f.uri !== file.uri)),
-          },
-          { text: "확인", style: "cancel" },
-        ]
-      );
+      Alert.alert("파일을 다시 선택하세요", "접근 권한이 만료되었습니다.", [
+        { text: "목록에서 삭제", style: "destructive", onPress: () => setRecentFiles((prev) => prev.filter((f) => f.uri !== file.uri)) },
+        { text: "확인", style: "cancel" },
+      ]);
       return;
     }
-
-    // If the stable URI differs from what was saved, update the entry in-place
-    // so future opens skip the copy step.
     if (stableUri !== file.uri) {
-      setRecentFiles((prev) =>
-        prev.map((f) => f.uri === file.uri ? { ...f, uri: stableUri } : f)
-      );
+      setRecentFiles((prev) => prev.map((f) => f.uri === file.uri ? { ...f, uri: stableUri } : f));
     }
-
-    console.log("[FILE] Opening recent:", stableUri);
+    setRecentFiles((prev) => prev.map((f) => f.uri === stableUri ? { ...f, lastPlayedAt: Date.now() } : f));
     setVideo(stableUri, file.name);
-    router.push("/processing");
+    pendingFileRef.current = { uri: stableUri, name: file.name };
+    setLangModalVisible(true);
   };
 
-  // ── Delete helpers ────────────────────────────────────────────────────────
-
   const deleteOne = useCallback((uri: string) => {
-    Alert.alert(
-      "파일 삭제",
-      "이 파일을 목록에서 삭제하시겠습니까?",
-      [
-        { text: "취소", style: "cancel" },
-        {
-          text: "확인",
-          style: "destructive",
-          onPress: () =>
-            setRecentFiles((prev) => prev.filter((f) => f.uri !== uri)),
-        },
-      ]
-    );
+    Alert.alert("파일 삭제", "이 파일을 목록에서 삭제하시겠습니까?", [
+      { text: "취소", style: "cancel" },
+      { text: "확인", style: "destructive", onPress: () => setRecentFiles((prev) => prev.filter((f) => f.uri !== uri)) },
+    ]);
   }, []);
 
   const deleteAll = useCallback(() => {
-    Alert.alert(
-      "전체 삭제",
-      "최근 파일 목록을 모두 삭제하시겠습니까?",
-      [
-        { text: "취소", style: "cancel" },
-        {
-          text: "확인",
-          style: "destructive",
-          onPress: () => setRecentFiles([]),
+    const targets = selectedCat === DEFAULT_CATEGORY ? recentFiles : filteredFiles;
+    if (!targets.length) return;
+    Alert.alert("전체 삭제", "현재 폴더의 파일을 모두 삭제하시겠습니까?", [
+      { text: "취소", style: "cancel" },
+      {
+        text: "확인", style: "destructive",
+        onPress: () => {
+          const uris = new Set(targets.map((f) => f.uri));
+          setRecentFiles((prev) => prev.filter((f) => !uris.has(f.uri)));
         },
-      ]
-    );
-  }, []);
+      },
+    ]);
+  }, [recentFiles, filteredFiles, selectedCat]);
+
+  const deleteSelected = () => {
+    Alert.alert(`${selectedUris.size}개 삭제`, "선택한 파일을 삭제하시겠습니까?", [
+      { text: "취소", style: "cancel" },
+      {
+        text: "삭제", style: "destructive",
+        onPress: () => {
+          setRecentFiles((prev) => prev.filter((f) => !selectedUris.has(f.uri)));
+          setSelectedUris(new Set());
+          setMultiSelect(false);
+        },
+      },
+    ]);
+  };
 
   const handleLongPress = useCallback((file: RecentFile) => {
-    Alert.alert(
-      file.name,
-      undefined,
-      [
-        {
-          text: "재생",
-          onPress: () => { openRecent(file); },
-        },
-        {
-          text: "목록에서 삭제",
-          style: "destructive",
-          onPress: () =>
-            setRecentFiles((prev) => prev.filter((f) => f.uri !== file.uri)),
-        },
-        { text: "취소", style: "cancel" },
-      ]
+    if (multiSelect) return; // already in multi-select
+    // Enter multi-select and select this file
+    setMultiSelect(true);
+    setSelectedUris(new Set([file.uri]));
+  }, [multiSelect]);
+
+  const toggleSelectFile = (uri: string) => {
+    setSelectedUris((prev) => {
+      const next = new Set(prev);
+      if (next.has(uri)) next.delete(uri);
+      else next.add(uri);
+      return next;
+    });
+  };
+
+  // ── Current category obj ───────────────────────────────────────────────────
+  const currentCatObj = categories.find((c) => c.id === selectedCat);
+  const parentCatObj  = currentCatObj?.parentId
+    ? categories.find((c) => c.id === currentCatObj.parentId)
+    : undefined;
+
+  // Sub-categories of selected
+  const subCategories = categories.filter((c) => c.parentId === selectedCat);
+
+  // Root categories
+  const rootCategories = categories.filter((c) => !c.parentId);
+
+  // ── Render file item ───────────────────────────────────────────────────────
+  const renderFileItem = ({ item }: { item: RecentFile }) => {
+    const catName = item.category
+      ? categories.find((c) => c.id === item.category)?.name
+      : undefined;
+    const isSelected = selectedUris.has(item.uri);
+
+    return (
+      <TouchableOpacity
+        style={[styles.recentItem, isSelected && styles.recentItemSelected]}
+        onPress={() => {
+          if (multiSelect) { toggleSelectFile(item.uri); return; }
+          openRecent(item);
+        }}
+        onLongPress={() => handleLongPress(item)}
+        delayLongPress={400}
+        activeOpacity={0.75}
+      >
+        {/* Multi-select checkbox */}
+        {multiSelect && (
+          <View style={[styles.checkbox, isSelected && styles.checkboxSelected]}>
+            {isSelected && <Text style={styles.checkboxMark}>✓</Text>}
+          </View>
+        )}
+
+        {/* Thumbnail — auto-extracted (smart), tap camera badge to change */}
+        <FileThumbnail
+          uri={item.uri}
+          thumbUri={item.thumbnailUri}
+          duration={item.duration}
+          onPickManual={() => pickManualThumbnail(item.uri)}
+        />
+
+        {/* Info */}
+        <View style={{ flex: 1, gap: 2 }}>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+            {item.isFavorite && <Text style={styles.starIcon}>★</Text>}
+            <Text style={styles.recentName} numberOfLines={1}>{item.name}</Text>
+          </View>
+
+          {/* Duration + Size */}
+          <View style={styles.metaRow}>
+            {item.duration ? <Text style={styles.metaText}>⏱ {formatDuration(item.duration)}</Text> : null}
+            {item.fileSize ? <Text style={styles.metaText}>· {formatSize(item.fileSize)}</Text> : null}
+            {item.language ? (
+              <Text style={styles.langTag}>{flagEmoji(item.language)} {item.language.toUpperCase()}</Text>
+            ) : null}
+            {item.targetLanguage ? (
+              <Text style={styles.langTag}>→ {flagEmoji(item.targetLanguage)} {item.targetLanguage.toUpperCase()}</Text>
+            ) : null}
+          </View>
+
+          {/* Subtitle badge */}
+          <SubBadge status={item.subtitleStatus} percent={item.subtitlePercent} />
+
+          {/* Category badge in 전체 view */}
+          {catName && selectedCat === DEFAULT_CATEGORY && (
+            <Text style={styles.recentCatBadge}>📁 {catName}</Text>
+          )}
+        </View>
+
+        {/* Right actions — ☆ 즐겨찾기 + ⋯ 이동/삭제 메뉴 */}
+        {!multiSelect && (
+          <View style={styles.itemActions}>
+            <TouchableOpacity
+              onPress={() => toggleFavorite(item.uri)}
+              hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}
+            >
+              <Text style={[styles.actionIcon, item.isFavorite && styles.starActive]}>
+                {item.isFavorite ? "★" : "☆"}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() =>
+                Alert.alert(item.name, undefined, [
+                  { text: "재생", onPress: () => openRecent(item) },
+                  { text: "폴더로 이동", onPress: () => setMoveModal({ visible: true, file: item }) },
+                  { text: "썸네일 변경", onPress: () => pickManualThumbnail(item.uri) },
+                  { text: "삭제", style: "destructive", onPress: () => deleteOne(item.uri) },
+                  { text: "취소", style: "cancel" },
+                ])
+              }
+              hitSlop={{ top: 8, bottom: 8, left: 4, right: 8 }}
+            >
+              <Text style={styles.actionIcon}>⋯</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+      </TouchableOpacity>
     );
-  }, []); // openRecent is stable (doesn't depend on state)
+  };
 
-  // ── Render ────────────────────────────────────────────────────────────────
-
+  // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <View style={styles.container}>
+
+      {/* Hero */}
       <View style={styles.hero}>
         <Text style={styles.appName}>RealtimeSub</Text>
         <Text style={styles.tagline}>실시간 AI 자막 · 완전 무료</Text>
       </View>
 
+      {/* File open button */}
       <TouchableOpacity style={styles.pickButton} onPress={pickVideo}>
         <Text style={styles.pickIcon}>📂</Text>
         <Text style={styles.pickText}>동영상 파일 열기</Text>
         <Text style={styles.pickSub}>MP4, MKV, AVI, MOV</Text>
       </TouchableOpacity>
 
-      {recentFiles.length > 0 && (
-        <View style={styles.recentSection}>
-          {/* Section header with "전체 삭제" */}
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>최근 파일</Text>
-            <TouchableOpacity onPress={deleteAll} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-              <Text style={styles.clearAllText}>전체 삭제</Text>
-            </TouchableOpacity>
-          </View>
-
-          <FlatList
-            data={recentFiles}
-            keyExtractor={(item) => item.uri}
-            renderItem={({ item }) => (
+      {/* ── Recently played horizontal scroll ──────────────────────────────── */}
+      {recentlyPlayed.length > 0 && (
+        <View style={styles.recentPlaySection}>
+          <Text style={styles.recentPlayTitle}>최근 재생</Text>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.recentPlayRow}>
+            {recentlyPlayed.map((file) => (
               <TouchableOpacity
-                style={styles.recentItem}
-                onPress={() => openRecent(item)}
-                onLongPress={() => handleLongPress(item)}
-                delayLongPress={400}
+                key={file.uri}
+                style={styles.recentPlayCard}
+                onPress={() => openRecent(file)}
+                activeOpacity={0.75}
               >
-                <Text style={styles.recentIcon}>🎬</Text>
-                <Text style={styles.recentName} numberOfLines={1}>
-                  {item.name}
-                </Text>
-                {/* Per-item delete button */}
-                <TouchableOpacity
-                  style={styles.deleteBtn}
-                  onPress={() => deleteOne(item.uri)}
-                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 4 }}
-                >
-                  <Text style={styles.deleteBtnText}>🗑️</Text>
-                </TouchableOpacity>
+                <FileThumbnail uri={file.uri} thumbUri={file.thumbnailUri} duration={file.duration} />
+                <Text style={styles.recentPlayName} numberOfLines={2}>{file.name}</Text>
               </TouchableOpacity>
-            )}
-          />
+            ))}
+          </ScrollView>
         </View>
       )}
 
+      {/* ── Search bar ─────────────────────────────────────────────────────── */}
+      <View style={styles.searchRow}>
+        {searchActive ? (
+          <View style={styles.searchBar}>
+            <Text style={styles.searchIcon}>🔍</Text>
+            <TextInput
+              style={styles.searchInput}
+              value={searchQuery}
+              onChangeText={setSearchQuery}
+              placeholder="파일 검색..."
+              placeholderTextColor="#444"
+              autoFocus
+              selectionColor="#2563eb"
+            />
+            <TouchableOpacity onPress={() => { setSearchQuery(""); setSearchActive(false); }}>
+              <Text style={styles.searchClear}>✕</Text>
+            </TouchableOpacity>
+          </View>
+        ) : (
+          <TouchableOpacity style={styles.searchBarInactive} onPress={() => setSearchActive(true)}>
+            <Text style={styles.searchIcon}>🔍</Text>
+            <Text style={styles.searchPlaceholder}>파일 검색...</Text>
+          </TouchableOpacity>
+        )}
+        <TouchableOpacity style={styles.sortBtn} onPress={() => setSortModalVisible(true)}>
+          <Text style={styles.sortBtnText}>
+            {sortOrder === "recent" ? "🕐" : sortOrder === "name" ? "🔤" : "📦"}
+          </Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* ── Category tab bar ───────────────────────────────────────────────── */}
+      <View style={styles.catBarWrap}>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.catBar}>
+          {/* 전체 */}
+          <TouchableOpacity
+            style={[styles.catTab, selectedCat === DEFAULT_CATEGORY && styles.catTabActive]}
+            onPress={() => setSelectedCat(DEFAULT_CATEGORY)}
+          >
+            <Text style={[styles.catTabText, selectedCat === DEFAULT_CATEGORY && styles.catTabTextActive]}>전체</Text>
+          </TouchableOpacity>
+
+          {/* 즐겨찾기 */}
+          <TouchableOpacity
+            style={[styles.catTab, selectedCat === "__fav__" && styles.catTabActive]}
+            onPress={() => setSelectedCat("__fav__")}
+          >
+            <Text style={[styles.catTabText, selectedCat === "__fav__" && styles.catTabTextActive]}>★ 즐겨찾기</Text>
+          </TouchableOpacity>
+
+          {/* 미분류 */}
+          <TouchableOpacity
+            style={[styles.catTab, selectedCat === "__uncat__" && styles.catTabActive]}
+            onPress={() => setSelectedCat("__uncat__")}
+          >
+            <Text style={[styles.catTabText, selectedCat === "__uncat__" && styles.catTabTextActive]}>미분류</Text>
+          </TouchableOpacity>
+
+          {/* Root categories */}
+          {rootCategories.map((cat) => (
+            <TouchableOpacity
+              key={cat.id}
+              style={[styles.catTab, selectedCat === cat.id && styles.catTabActive]}
+              onPress={() => setSelectedCat(cat.id)}
+              onLongPress={() =>
+                Alert.alert(cat.name, undefined, [
+                  { text: "하위 폴더 만들기", onPress: () => setCatNameModal({ visible: true, parentId: cat.id }) },
+                  { text: "이름 변경", onPress: () => setCatNameModal({ visible: true, editId: cat.id }) },
+                  { text: "폴더 삭제", style: "destructive", onPress: () => deleteCategory(cat.id) },
+                  { text: "취소", style: "cancel" },
+                ])
+              }
+              delayLongPress={400}
+            >
+              <Text style={[styles.catTabText, selectedCat === cat.id && styles.catTabTextActive]}>
+                📁 {cat.name}
+              </Text>
+            </TouchableOpacity>
+          ))}
+
+          {/* New folder button */}
+          <TouchableOpacity style={styles.catTabNew} onPress={() => setCatNameModal({ visible: true })}>
+            <Text style={styles.catTabNewText}>＋ 새 폴더</Text>
+          </TouchableOpacity>
+        </ScrollView>
+      </View>
+
+      {/* ── Sub-category tabs (shown when a root folder is selected) ───────── */}
+      {currentCatObj && !currentCatObj.parentId && subCategories.length > 0 && (
+        <View style={styles.subCatBarWrap}>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.subCatBar}>
+            {/* Show parent-only files option */}
+            <TouchableOpacity
+              style={[styles.subCatTab, selectedCat === currentCatObj.id && styles.subCatTabActive]}
+              onPress={() => setSelectedCat(currentCatObj.id)}
+            >
+              <Text style={[styles.subCatText, selectedCat === currentCatObj.id && styles.subCatTextActive]}>
+                전체 ({recentFiles.filter((f) => {
+                  const ids = [currentCatObj.id, ...subCategories.map((c) => c.id)];
+                  return ids.includes(f.category ?? "");
+                }).length})
+              </Text>
+            </TouchableOpacity>
+            {subCategories.map((sub) => {
+              const count = recentFiles.filter((f) => f.category === sub.id).length;
+              return (
+                <TouchableOpacity
+                  key={sub.id}
+                  style={[styles.subCatTab, selectedCat === sub.id && styles.subCatTabActive]}
+                  onPress={() => setSelectedCat(sub.id)}
+                  onLongPress={() =>
+                    Alert.alert(sub.name, undefined, [
+                      { text: "이름 변경", onPress: () => setCatNameModal({ visible: true, editId: sub.id }) },
+                      { text: "폴더 삭제", style: "destructive", onPress: () => deleteCategory(sub.id) },
+                      { text: "취소", style: "cancel" },
+                    ])
+                  }
+                  delayLongPress={400}
+                >
+                  <Text style={[styles.subCatText, selectedCat === sub.id && styles.subCatTextActive]}>
+                    📂 {sub.name} ({count})
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+            {/* Add sub-folder button */}
+            <TouchableOpacity
+              style={styles.subCatTabNew}
+              onPress={() => setCatNameModal({ visible: true, parentId: currentCatObj.id })}
+            >
+              <Text style={styles.subCatTextNew}>＋</Text>
+            </TouchableOpacity>
+          </ScrollView>
+        </View>
+      )}
+
+      {/* ── Multi-select action bar ─────────────────────────────────────────── */}
+      {multiSelect && (
+        <View style={styles.multiBar}>
+          <Text style={styles.multiCount}>{selectedUris.size}개 선택됨</Text>
+          <TouchableOpacity style={styles.multiBtn} onPress={() => setBatchMoveVisible(true)} disabled={selectedUris.size === 0}>
+            <Text style={styles.multiBtnText}>📁 이동</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={[styles.multiBtn, styles.multiBtnDanger]} onPress={deleteSelected} disabled={selectedUris.size === 0}>
+            <Text style={styles.multiBtnText}>🗑️ 삭제</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.multiBtn} onPress={() => { setMultiSelect(false); setSelectedUris(new Set()); }}>
+            <Text style={styles.multiBtnText}>취소</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {/* ── File list ──────────────────────────────────────────────────────── */}
+      {recentFiles.length > 0 && (
+        <View style={styles.recentSection}>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>
+              {parentCatObj ? `📁 ${parentCatObj.name} › ` : ""}
+              {currentCatObj ? `📁 ${currentCatObj.name}` :
+               selectedCat === "__uncat__" ? "미분류" :
+               selectedCat === "__fav__"   ? "★ 즐겨찾기" : "최근 파일"}
+              <Text style={styles.fileCount}> {filteredFiles.length}개</Text>
+            </Text>
+            <View style={{ flexDirection: "row", gap: 12, alignItems: "center" }}>
+              {!multiSelect && (
+                <TouchableOpacity onPress={() => setMultiSelect(true)}>
+                  <Text style={styles.multiSelectText}>선택</Text>
+                </TouchableOpacity>
+              )}
+              {filteredFiles.length > 0 && (
+                <TouchableOpacity onPress={deleteAll} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                  <Text style={styles.clearAllText}>전체 삭제</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          </View>
+
+          {filteredFiles.length === 0 ? (
+            <View style={styles.emptyBox}>
+              <Text style={styles.emptyText}>
+                {searchQuery ? "검색 결과가 없습니다" : "이 폴더에 파일이 없습니다"}
+              </Text>
+              <Text style={styles.emptyHint}>파일을 길게 눌러 다중 선택하거나 폴더로 이동하세요</Text>
+            </View>
+          ) : (
+            <FlatList
+              data={filteredFiles}
+              keyExtractor={(item) => item.uri}
+              renderItem={renderFileItem}
+              showsVerticalScrollIndicator={false}
+            />
+          )}
+        </View>
+      )}
+
+      {recentFiles.length === 0 && (
+        <View style={styles.emptyBox}>
+          <Text style={styles.emptyText}>아직 파일이 없습니다</Text>
+          <Text style={styles.emptyHint}>위 버튼으로 동영상을 불러오세요</Text>
+        </View>
+      )}
+
+      {/* Bottom nav */}
       <View style={styles.navButtons}>
-        <TouchableOpacity
-          style={styles.navBtn}
-          onPress={() => router.push("/models")}
-        >
+        <TouchableOpacity style={styles.navBtn} onPress={() => router.push("/models")}>
           <Text style={styles.navBtnText}>🤖 모델 관리</Text>
         </TouchableOpacity>
-        <TouchableOpacity
-          style={styles.navBtn}
-          onPress={() => router.push("/settings")}
-        >
+        <TouchableOpacity style={styles.navBtn} onPress={() => router.push("/settings")}>
           <Text style={styles.navBtnText}>⚙️ 설정</Text>
         </TouchableOpacity>
       </View>
+
+      {/* ── Modals ────────────────────────────────────────────────────────── */}
+      <LangSetupModal visible={langModalVisible} onConfirm={goToProcessing} onCancel={handleCancelModal} />
+
+      <CategoryNameModal
+        visible={catNameModal.visible}
+        initial={catNameModal.editId ? (categories.find((c) => c.id === catNameModal.editId)?.name ?? "") : ""}
+        parentName={catNameModal.parentId ? categories.find((c) => c.id === catNameModal.parentId)?.name : undefined}
+        onConfirm={(name) => {
+          if (catNameModal.editId) renameCategory(catNameModal.editId, name);
+          else createCategory(name, catNameModal.parentId);
+        }}
+        onCancel={() => setCatNameModal({ visible: false })}
+      />
+
+      <MoveCategoryModal
+        visible={moveModal.visible}
+        categories={categories}
+        currentCategory={moveModal.file?.category}
+        onSelect={(catId) => { if (moveModal.file) moveFileToCategory(moveModal.file, catId); }}
+        onCancel={() => setMoveModal({ visible: false })}
+      />
+
+      {/* Batch move modal */}
+      <MoveCategoryModal
+        visible={batchMoveVisible}
+        categories={categories}
+        currentCategory={undefined}
+        onSelect={batchMoveToCategory}
+        onCancel={() => setBatchMoveVisible(false)}
+      />
+
+      <SortModal
+        visible={sortModalVisible}
+        current={sortOrder}
+        onSelect={(s) => { setSortOrder(s); setSortModalVisible(false); }}
+        onCancel={() => setSortModalVisible(false)}
+      />
     </View>
   );
 }
 
+// ── Styles ────────────────────────────────────────────────────────────────────
+
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#0a0a0a", padding: 20 },
-  hero: { alignItems: "center", paddingVertical: 32 },
+
+  hero: { alignItems: "center", paddingVertical: 20 },
   appName: { color: "#fff", fontSize: 32, fontWeight: "bold" },
   tagline: { color: "#888", fontSize: 14, marginTop: 4 },
+
   pickButton: {
     backgroundColor: "#1e1e1e",
     borderRadius: 16,
@@ -304,46 +1253,190 @@ const styles = StyleSheet.create({
   pickIcon: { fontSize: 40, marginBottom: 8 },
   pickText: { color: "#fff", fontSize: 18, fontWeight: "600" },
   pickSub: { color: "#666", fontSize: 12, marginTop: 4 },
-  recentSection: { marginTop: 28 },
+
+  // ── Recently played ─────────────────────────────────────────────────────────
+  recentPlaySection: { marginTop: 16 },
+  recentPlayTitle: { color: "#666", fontSize: 12, fontWeight: "600", letterSpacing: 0.5, marginBottom: 8 },
+  recentPlayRow: { flexDirection: "row", gap: 10 },
+  recentPlayCard: { width: 80, gap: 5 },
+  recentPlayName: { color: "#888", fontSize: 10, lineHeight: 13 },
+
+  // ── Search ──────────────────────────────────────────────────────────────────
+  searchRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 14 },
+  searchBar: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#1a1a1a",
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "#2563eb",
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    gap: 8,
+  },
+  searchBarInactive: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#1a1a1a",
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "#2a2a2a",
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    gap: 8,
+  },
+  searchIcon: { fontSize: 14 },
+  searchInput: { flex: 1, color: "#fff", fontSize: 14, padding: 0 },
+  searchClear: { color: "#555", fontSize: 14, paddingLeft: 4 },
+  searchPlaceholder: { color: "#444", fontSize: 14 },
+  sortBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 10,
+    backgroundColor: "#1a1a1a",
+    borderWidth: 1,
+    borderColor: "#2a2a2a",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  sortBtnText: { fontSize: 18 },
+
+  // ── Category tabs ───────────────────────────────────────────────────────────
+  catBarWrap: { marginTop: 14 },
+  catBar: { flexDirection: "row", gap: 8, paddingBottom: 4 },
+  catTab: {
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: 20,
+    backgroundColor: "#1a1a1a",
+    borderWidth: 1,
+    borderColor: "#2a2a2a",
+  },
+  catTabActive: { backgroundColor: "#1e3a5f", borderColor: "#2563eb" },
+  catTabText: { color: "#666", fontSize: 13, fontWeight: "600" },
+  catTabTextActive: { color: "#60a5fa" },
+  catTabNew: {
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: 20,
+    backgroundColor: "#111",
+    borderWidth: 1,
+    borderColor: "#2a2a2a",
+    borderStyle: "dashed",
+  },
+  catTabNewText: { color: "#444", fontSize: 13, fontWeight: "600" },
+
+  // ── Sub-category tabs ───────────────────────────────────────────────────────
+  subCatBarWrap: { marginTop: 8 },
+  subCatBar: { flexDirection: "row", gap: 6, paddingBottom: 4, paddingLeft: 8 },
+  subCatTab: {
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    borderRadius: 14,
+    backgroundColor: "#141414",
+    borderWidth: 1,
+    borderColor: "#222",
+  },
+  subCatTabActive: { backgroundColor: "#1a2d4a", borderColor: "#3b82f6" },
+  subCatText: { color: "#555", fontSize: 12, fontWeight: "600" },
+  subCatTextActive: { color: "#93c5fd" },
+  subCatTabNew: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 14,
+    backgroundColor: "#111",
+    borderWidth: 1,
+    borderColor: "#222",
+    borderStyle: "dashed",
+  },
+  subCatTextNew: { color: "#333", fontSize: 14, fontWeight: "600" },
+
+  // ── Multi-select bar ────────────────────────────────────────────────────────
+  multiBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#1a1a2e",
+    borderRadius: 12,
+    marginTop: 10,
+    padding: 10,
+    gap: 8,
+    borderWidth: 1,
+    borderColor: "#2563eb44",
+  },
+  multiCount: { color: "#60a5fa", fontSize: 13, fontWeight: "600", flex: 1 },
+  multiBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 8,
+    backgroundColor: "#1e3a5f",
+  },
+  multiBtnDanger: { backgroundColor: "#3f0000" },
+  multiBtnText: { color: "#fff", fontSize: 12, fontWeight: "600" },
+
+  // ── File list ───────────────────────────────────────────────────────────────
+  recentSection: { marginTop: 14, flex: 1 },
   sectionHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    marginBottom: 8,
+    marginBottom: 10,
   },
-  sectionTitle: {
-    color: "#aaa",
-    fontSize: 13,
-    fontWeight: "600",
-    letterSpacing: 0.5,
-  },
-  clearAllText: {
-    color: "#ef4444",
-    fontSize: 12,
-    fontWeight: "600",
-  },
+  sectionTitle: { color: "#aaa", fontSize: 13, fontWeight: "600", letterSpacing: 0.5 },
+  fileCount: { color: "#555", fontWeight: "400" },
+  clearAllText: { color: "#ef4444", fontSize: 12, fontWeight: "600" },
+  multiSelectText: { color: "#60a5fa", fontSize: 12, fontWeight: "600" },
+
   recentItem: {
     flexDirection: "row",
     alignItems: "center",
-    paddingVertical: 12,
+    paddingVertical: 10,
     gap: 10,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: "#222",
+    borderBottomColor: "#1e1e1e",
   },
-  recentIcon: { fontSize: 20 },
-  recentName: { color: "#ddd", fontSize: 14, flex: 1 },
-  deleteBtn: {
-    paddingLeft: 8,
+  recentItemSelected: {
+    backgroundColor: "#1e3a5f22",
+    borderRadius: 8,
+    paddingHorizontal: 6,
   },
-  deleteBtnText: {
-    fontSize: 18,
+  checkbox: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    borderWidth: 2,
+    borderColor: "#444",
+    alignItems: "center",
+    justifyContent: "center",
   },
-  navButtons: {
-    flexDirection: "row",
-    gap: 12,
-    marginTop: "auto",
-    paddingTop: 20,
+  checkboxSelected: { backgroundColor: "#2563eb", borderColor: "#2563eb" },
+  checkboxMark: { color: "#fff", fontSize: 12, fontWeight: "700" },
+
+  recentName: { color: "#ddd", fontSize: 13, fontWeight: "500", flex: 1 },
+  metaRow: { flexDirection: "row", alignItems: "center", gap: 5, flexWrap: "wrap" },
+  metaText: { color: "#555", fontSize: 11 },
+  langTag: {
+    color: "#4a9eff",
+    fontSize: 10,
+    fontWeight: "700",
+    backgroundColor: "#1a2d4a",
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    borderRadius: 4,
   },
+  recentCatBadge: { color: "#555", fontSize: 11, marginTop: 2 },
+  starIcon: { color: "#f59e0b", fontSize: 12 },
+
+  itemActions: { flexDirection: "row", gap: 6, alignItems: "center" },
+  actionIcon: { fontSize: 18, color: "#555" },
+  starActive: { color: "#f59e0b" },
+
+  emptyBox: { paddingVertical: 40, alignItems: "center", gap: 8 },
+  emptyText: { color: "#444", fontSize: 14 },
+  emptyHint: { color: "#333", fontSize: 12 },
+
+  navButtons: { flexDirection: "row", gap: 12, marginTop: "auto", paddingTop: 16 },
   navBtn: {
     flex: 1,
     backgroundColor: "#1a1a1a",
@@ -352,4 +1445,96 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   navBtnText: { color: "#ccc", fontSize: 14 },
+});
+
+const modalStyles = StyleSheet.create({
+  backdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.7)", justifyContent: "flex-end" },
+  sheet: {
+    backgroundColor: "#111",
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    paddingHorizontal: 20,
+    paddingTop: 20,
+    paddingBottom: 36,
+    gap: 12,
+  },
+  title: { color: "#fff", fontSize: 18, fontWeight: "700", textAlign: "center" },
+  subtitle: { color: "#666", fontSize: 13, textAlign: "center", marginBottom: 4 },
+  langList: {
+    maxHeight: 260,
+    backgroundColor: "#1a1a1a",
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "#2a2a2a",
+  },
+  langOption: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: "#2a2a2a",
+    gap: 8,
+  },
+  langOptionSelected: { backgroundColor: "#1e3a5f" },
+  langOptionNative: { color: "#fff", fontSize: 14, flex: 1 },
+  langOptionCode: { color: "#555", fontSize: 12 },
+  checkmark: { color: "#2563eb", fontSize: 15, fontWeight: "700" },
+  hint: { color: "#444", fontSize: 12, textAlign: "center", marginTop: 4 },
+  btnRow: { flexDirection: "row", gap: 10, marginTop: 4 },
+  cancelBtn: {
+    flex: 1, paddingVertical: 14, borderRadius: 12,
+    backgroundColor: "#1a1a1a", alignItems: "center",
+    borderWidth: 1, borderColor: "#2a2a2a",
+  },
+  cancelBtnText: { color: "#888", fontSize: 15 },
+  confirmBtn: {
+    flex: 2, paddingVertical: 14, borderRadius: 12,
+    backgroundColor: "#2563eb", alignItems: "center",
+  },
+  confirmBtnText: { color: "#fff", fontSize: 15, fontWeight: "700" },
+});
+
+const catModalStyles = StyleSheet.create({
+  backdrop: {
+    flex: 1, backgroundColor: "rgba(0,0,0,0.6)",
+    justifyContent: "center", paddingHorizontal: 32,
+  },
+  card: {
+    backgroundColor: "#1a1a1a", borderRadius: 16,
+    padding: 20, gap: 14, borderWidth: 1, borderColor: "#2a2a2a",
+  },
+  title: { color: "#fff", fontSize: 16, fontWeight: "700", textAlign: "center" },
+  input: {
+    backgroundColor: "#111", borderRadius: 10, borderWidth: 1.5,
+    borderColor: "#2563eb", color: "#fff", fontSize: 16,
+    paddingHorizontal: 14, paddingVertical: 10,
+  },
+  btnRow: { flexDirection: "row", gap: 10 },
+  cancelBtn: {
+    flex: 1, paddingVertical: 12, borderRadius: 10,
+    backgroundColor: "#222", alignItems: "center",
+  },
+  cancelText: { color: "#888", fontSize: 14, fontWeight: "600" },
+  confirmBtn: {
+    flex: 1, paddingVertical: 12, borderRadius: 10,
+    backgroundColor: "#2563eb", alignItems: "center",
+  },
+  confirmDisabled: { opacity: 0.35 },
+  confirmText: { color: "#fff", fontSize: 14, fontWeight: "700" },
+});
+
+const moveStyles = StyleSheet.create({
+  option: {
+    flexDirection: "row", alignItems: "center",
+    paddingHorizontal: 20, paddingVertical: 14,
+    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#2a2a2a", gap: 10,
+  },
+  childOption: { paddingLeft: 32, backgroundColor: "#0f0f0f" },
+  optionActive: { backgroundColor: "#1e3a5f" },
+  optionIcon: { fontSize: 18 },
+  optionName: { color: "#ddd", fontSize: 15, flex: 1 },
+  check: { color: "#2563eb", fontSize: 15, fontWeight: "700" },
+  cancelBtn: { margin: 16, paddingVertical: 13, borderRadius: 10, backgroundColor: "#222", alignItems: "center" },
+  cancelText: { color: "#aaa", fontSize: 14, fontWeight: "600" },
 });

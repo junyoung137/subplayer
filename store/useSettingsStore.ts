@@ -1,6 +1,8 @@
 import { create } from "zustand";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
+export type SubtitleStyleType = "outline" | "pill" | "bar";
+
 export interface Settings {
   whisperModel: "tiny" | "small" | "medium" | "large-v3";
   sourceLanguage: string;
@@ -16,6 +18,8 @@ export interface Settings {
   subtitlePositionPct: number;
   /** Pause between translation batches to prevent device overheating. */
   thermalProtection: boolean;
+  /** Visual style of the subtitle overlay. */
+  subtitleStyle: SubtitleStyleType;
 }
 
 interface SettingsStore extends Settings {
@@ -37,6 +41,7 @@ const DEFAULTS: Settings = {
   timingOffset: 0,
   subtitlePositionPct: 0.85,
   thermalProtection: true,
+  subtitleStyle: "outline",  // 기본값: 갈매기형
 };
 
 const STORAGE_KEY = "realtimesub_settings";
@@ -74,7 +79,8 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       subtitleMode: current.subtitleMode,
       timingOffset: current.timingOffset,
       subtitlePositionPct: current.subtitlePositionPct,
-      thermalProtection:   current.thermalProtection,
+      thermalProtection: current.thermalProtection,
+      subtitleStyle: current.subtitleStyle,
     };
     AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ ...toSave, ...partial }));
   },

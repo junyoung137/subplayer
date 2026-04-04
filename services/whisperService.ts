@@ -1,11 +1,8 @@
-// @ts-ignore - whisper.rn does not ship TypeScript declarations in this version
+// @ts-ignore
 import { initWhisper, WhisperContext } from "whisper.rn";
 
-/** A single subtitle segment returned by segmented transcription. */
 export interface TranscribeSegment {
-  /** Absolute start time in seconds (chunk offset + whisper t0). */
   startTime: number;
-  /** Absolute end time in seconds (chunk offset + whisper t1). */
   endTime: number;
   text: string;
   language: string;
@@ -13,24 +10,15 @@ export interface TranscribeSegment {
 
 let whisperContext: WhisperContext | null = null;
 let loadedModelPath: string | null = null;
-// Serialisation queue: whisper.rn throws if transcribe() is called concurrently.
 let transcribeQueue: Promise<unknown> = Promise.resolve(null);
 
-/**
- * Load Whisper model from local file. Reuses context if same model is already loaded.
- */
 export async function loadModel(modelPath: string): Promise<void> {
-  if (loadedModelPath === modelPath && whisperContext !== null) {
-    return;
-  }
+  if (loadedModelPath === modelPath && whisperContext !== null) return;
   await releaseModel();
   whisperContext = await initWhisper({ filePath: modelPath });
   loadedModelPath = modelPath;
 }
 
-/**
- * Release the current Whisper model from memory.
- */
 export async function releaseModel(): Promise<void> {
   if (whisperContext) {
     await whisperContext.release();
@@ -40,10 +28,6 @@ export async function releaseModel(): Promise<void> {
   }
 }
 
-/**
- * Transcribe a WAV chunk and return fine-grained segments with absolute timestamps.
- * @param chunkStartTime  The start time of this chunk within the original video (seconds).
- */
 export function transcribeChunkSegmented(
   chunkPath: string,
   chunkStartTime: number,
@@ -58,6 +42,84 @@ export function transcribeChunkSegmented(
 
 export function isModelLoaded(): boolean {
   return whisperContext !== null;
+}
+
+/**
+ * 문장 부호 기준으로 텍스트를 분할.
+ * 핵심: 문장 부호 없이 끝나는 마지막 조각도 반드시 포함.
+ */
+function splitIntoSentences(text: string): string[] {
+  const results: string[] = [];
+  // 문장 부호로 끝나는 덩어리 추출
+  const withPunct = text.match(/[^.!?]+[.!?]+/g) ?? [];
+  // 위에서 매칭된 전체 길이
+  const matched = withPunct.join("");
+  // 문장 부호 없이 남은 꼬리 (예: "The Sounds of Glass had me from its")
+  const tail = text.slice(matched.length).trim();
+
+  for (const s of withPunct) {
+    const trimmed = s.trim();
+    if (trimmed.length > 0) results.push(trimmed);
+  }
+  // 꼬리 부분도 버리지 않고 추가
+  if (tail.length > 0) results.push(tail);
+
+  return results;
+}
+
+function mergeShortSegments(segments: TranscribeSegment[]): TranscribeSegment[] {
+  if (segments.length === 0) return [];
+
+  const merged: TranscribeSegment[] = [];
+  let current: TranscribeSegment = { ...segments[0] };
+
+  for (let i = 1; i < segments.length; i++) {
+    const seg = segments[i];
+    const duration = seg.endTime - seg.startTime;
+    const isTooShort = duration < 0.8;
+    const isTooFewChars = seg.text.trim().length < 3;
+    const currentDuration = current.endTime - current.startTime;
+
+    if ((isTooShort || isTooFewChars) && currentDuration < 8) {
+      current.endTime = seg.endTime;
+      current.text = current.text + " " + seg.text.trim();
+    } else {
+      merged.push(current);
+      current = { ...seg };
+    }
+  }
+  merged.push(current);
+
+  // 문장 단위 분할
+  const result: TranscribeSegment[] = [];
+  for (const seg of merged) {
+    const duration = seg.endTime - seg.startTime;
+    const sentences = splitIntoSentences(seg.text);
+
+    // 문장이 1개 이하거나 너무 짧으면 통으로
+    if (sentences.length <= 1 || duration < 1.5) {
+      result.push(seg);
+      continue;
+    }
+
+    // 글자 수 비례로 시간 분배
+    const totalChars = sentences.reduce((sum, s) => sum + s.length, 0);
+    let cursor = seg.startTime;
+    for (let i = 0; i < sentences.length; i++) {
+      const sentence = sentences[i];
+      const sentDuration = (sentence.length / totalChars) * duration;
+      const isLast = i === sentences.length - 1;
+      result.push({
+        startTime: cursor,
+        endTime: isLast ? seg.endTime : cursor + sentDuration,
+        text: sentence.trim(),
+        language: seg.language,
+      });
+      cursor += sentDuration;
+    }
+  }
+
+  return result.filter((s) => s.text.trim().length > 0);
 }
 
 async function _doTranscribeSegmented(
@@ -76,8 +138,8 @@ async function _doTranscribeSegmented(
 
   const { promise } = (whisperContext as any).transcribe(chunkPath, {
     ...options,
-    maxLen: 1,
-    tokenTimestamps: true,
+    noSpeechThold: 0.6,
+    wordThold: 0.01,
   });
   const result = await promise;
 
@@ -85,9 +147,8 @@ async function _doTranscribeSegmented(
 
   console.log("[WHISPER] transcription result:", JSON.stringify(result));
 
-  // whisper.rn segments use t0/t1 in centiseconds relative to the chunk.
   if (result?.segments?.length) {
-    return result.segments
+    const rawSegments: TranscribeSegment[] = result.segments
       .filter((s: any) => s.text?.trim())
       .map((s: any) => ({
         startTime: chunkStartTime + s.t0 / 100,
@@ -95,9 +156,10 @@ async function _doTranscribeSegmented(
         text:      (s.text as string).trim(),
         language:  detectedLang,
       }));
+
+    return mergeShortSegments(rawSegments);
   }
 
-  // Fallback: treat whole chunk as single segment.
   const text = result?.result?.trim() ?? "";
   if (!text) return [];
   return [

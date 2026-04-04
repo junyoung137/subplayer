@@ -3,6 +3,7 @@ import { extractAndChunkAudio, clearChunkDir } from "./audioChunker";
 import { transcribeChunkSegmented, releaseModel as releaseWhisper } from "./whisperService";
 import { loadModel as loadGemma, unloadModel as unloadGemma, translateSegments } from "./gemmaTranslationService";
 import { getLocalModelPath } from "./modelDownloadService";
+import { getLanguageByCode } from "../constants/languages";
 
 export interface ProcessingProgress {
   step: "extracting" | "transcribing" | "unloading" | "translating" | "done" | "error";
@@ -25,8 +26,8 @@ const BAND_TRANSLATE_END  = 99;
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 const SENTENCE_END = /[.?!。]$/;
-const MAX_MERGE_DURATION = 4.0;  // seconds
-const MAX_MERGE_CHARS    = 80;
+const MAX_MERGE_DURATION = 2.5;  // seconds (4.0 → 2.5)
+const MAX_MERGE_CHARS    = 60;   // chars   (80 → 60)
 
 function cleanSegmentText(text: string): string {
   if (!text) return text;
@@ -40,16 +41,6 @@ function cleanSegmentText(text: string): string {
 
 type RawSegment = { startTime: number; endTime: number; text: string; language: string };
 
-/**
- * Merge consecutive short Whisper segments into sentence-level groups so
- * subtitles display for a natural reading duration instead of flickering
- * word-by-word.
- *
- * A merge is flushed when any of these conditions is met:
- *   a) The accumulated text ends with sentence-ending punctuation (. ? ! 。)
- *   b) Adding the next segment would exceed MAX_MERGE_DURATION seconds
- *   c) Adding the next segment would exceed MAX_MERGE_CHARS characters
- */
 function mergeSegmentsIntoSentences(segments: RawSegment[]): RawSegment[] {
   if (segments.length === 0) return [];
 
@@ -65,11 +56,9 @@ function mergeSegmentsIntoSentences(segments: RawSegment[]): RawSegment[] {
     const wouldExceedChars    = combinedText.length > MAX_MERGE_CHARS;
 
     if (wouldExceedDuration || wouldExceedChars) {
-      // Flush current group and start a new one.
       merged.push({ ...current, text: cleanSegmentText(current.text) });
       current = { ...next };
     } else {
-      // Absorb next segment into the current group.
       current = {
         startTime: current.startTime,
         endTime:   next.endTime,
@@ -77,35 +66,21 @@ function mergeSegmentsIntoSentences(segments: RawSegment[]): RawSegment[] {
         language:  current.language,
       };
 
-      // Flush after absorbing if the combined text forms a complete sentence.
       if (SENTENCE_END.test(current.text.trimEnd())) {
         merged.push({ ...current, text: cleanSegmentText(current.text) });
-        // Advance to the segment after next (loop will i++ again).
         if (i + 1 < segments.length) {
           current = { ...segments[++i] };
         } else {
-          // Nothing left — return early to avoid the final push below.
           return merged;
         }
       }
     }
   }
 
-  // Push whatever is still accumulating at end of input.
   merged.push({ ...current, text: cleanSegmentText(current.text) });
   return merged;
 }
 
-/**
- * Full offline pipeline: extract audio → transcribe all chunks → translate all segments.
- *
- * @param videoUri        Local file URI of the video.
- * @param sourceLanguage  BCP-47 language code or "auto".
- * @param targetLanguage  BCP-47 language code for translation output.
- * @param onProgress      Called on every meaningful state change.
- * @param isCancelled     Return true to abort the pipeline early.
- * @returns               ProcessingResult with subtitles and translation status.
- */
 export async function processVideo(
   videoUri: string,
   sourceLanguage: string,
@@ -114,15 +89,11 @@ export async function processVideo(
   isCancelled: () => boolean
 ): Promise<ProcessingResult> {
   try {
-    // ── Step 1: Extract audio as 30-second WAV chunks ─────────────────────
-    // The native AudioChunker module has no progress callback, so we drive a
-    // timer that walks the bar from 5 % up to just below BAND_EXTRACT_END
-    // while the call is in flight, then snap to BAND_EXTRACT_END on completion.
+    // ── Step 1: Extract audio ─────────────────────────────────────────────
     let extractPercent = 5;
     onProgress({ step: "extracting", current: 0, total: 0, percent: extractPercent, message: "오디오 추출 중..." });
 
     const extractTimer = setInterval(() => {
-      // Creep toward (BAND_EXTRACT_END - 1) so the snap on completion is visible.
       if (extractPercent < BAND_EXTRACT_END - 1) {
         extractPercent += 1;
         onProgress({ step: "extracting", current: 0, total: 0, percent: extractPercent, message: "오디오 추출 중..." });
@@ -143,7 +114,7 @@ export async function processVideo(
 
     onProgress({ step: "extracting", current: chunks.length, total: chunks.length, percent: BAND_EXTRACT_END, message: "오디오 추출 중..." });
 
-    // ── Step 2: Transcribe every chunk with Whisper ───────────────────────
+    // ── Step 2: Transcribe ────────────────────────────────────────────────
     const rawSegments: Array<{ startTime: number; endTime: number; text: string; language: string }> = [];
 
     for (let i = 0; i < chunks.length; i++) {
@@ -166,14 +137,12 @@ export async function processVideo(
 
     if (isCancelled()) return { subtitles: [], translationSkipped: false };
 
-    // ── Step 2.5: Merge short segments into sentence-level groups ─────────
     const sentences = mergeSegmentsIntoSentences(rawSegments);
 
-    // ── Step 3: Translate segments with Gemma (on-device) ───────────────
+    // ── Step 3: Translate ─────────────────────────────────────────────────
     const gemmaPath = await getLocalModelPath();
     let translationSkipped = false;
 
-    // Input shape expected by gemmaTranslationService
     const translationInput = sentences.map((seg) => ({
       start: seg.startTime,
       end:   seg.endTime,
@@ -187,7 +156,6 @@ export async function processVideo(
       console.warn('[TRANSLATE] Gemma model not downloaded — skipping translation');
       translationSkipped = true;
     } else {
-      // Memory ordering: Whisper must be released before Gemma loads.
       onProgress({ step: "unloading", current: 0, total: 0, percent: 91, message: "Whisper 언로드 중..." });
       await releaseWhisper();
 
@@ -199,7 +167,12 @@ export async function processVideo(
       onProgress({ step: "translating", current: 0, total: sentences.length, percent: 94, message: "Gemma 모델 로드 중..." });
       await loadGemma();
 
+      // 언어 코드(ko) → 언어명(Korean) 변환
+      const langMeta = getLanguageByCode(targetLanguage);
+      const langName = langMeta?.name ?? targetLanguage;
+
       console.log('[TRANSLATE] calling translation for segments:', translationInput.length);
+      console.log('[TRANSLATE] target language name:', langName);
 
       try {
         translated = await translateSegments(
@@ -216,17 +189,17 @@ export async function processVideo(
               message: `번역 중... (${completed}/${total})`,
             });
           },
-          videoUri
+          videoUri,
+          langName  // ← "Korean", "Japanese" 등 언어명으로 전달
         );
       } finally {
-        // Always unload Gemma, even on partial failure.
         await unloadGemma();
       }
     }
 
     if (isCancelled()) return { subtitles: [], translationSkipped: false };
 
-    // ── Step 4: Assemble final subtitle segments ──────────────────────────
+    // ── Step 4: Assemble subtitles ────────────────────────────────────────
     const subtitles: SubtitleSegment[] = sentences.map((seg, i) => ({
       id: `sub_${i}_${Math.round(seg.startTime * 1000)}`,
       startTime: seg.startTime,

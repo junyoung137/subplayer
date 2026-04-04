@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from "react";
+import React, { useState, useCallback, useEffect, useRef } from "react";
 import {
   View,
   Text,
@@ -12,23 +12,44 @@ import {
   Dimensions,
   ActivityIndicator,
   useWindowDimensions,
+  Alert,
 } from "react-native";
 import { router } from "expo-router";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as FileSystem from "expo-file-system/legacy";
 import { usePlayerStore } from "../store/usePlayerStore";
 import { useSettingsStore } from "../store/useSettingsStore";
 import { VideoPlayer } from "../components/VideoPlayer";
 import { SubtitleOverlay } from "../components/SubtitleOverlay";
+import { SubtitleQuickPanel } from "../components/SubtitleQuickPanel";
 import { LANGUAGES, getLanguageByCode } from "../constants/languages";
 import { useRetranslate } from "../hooks/useRetranslate";
 
-const SPEEDS = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
+// ── expo-video-thumbnails (optional) ─────────────────────────────────────────
+let getThumbnailAsync: ((uri: string, opts: { time: number }) => Promise<{ uri: string }>) | null = null;
+try {
+  const mod = require("expo-video-thumbnails");
+  getThumbnailAsync = mod.getThumbnailAsync ?? null;
+} catch {}
 
-/**
- * Approximate height of the landscape bottom overlay area:
- *   overlayControls row (~52px) + seek-bar bottomBar (~58px) = ~110px.
- * Used to offset subtitles so they never sit on top of controls.
- */
+const SPEEDS = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
 const LANDSCAPE_BOTTOM_HEIGHT = 110;
+const RECENT_KEY = "realtimesub_recent_files_v2";
+
+// ── Save captured thumbnail back to the shared file list ─────────────────────
+async function saveThumbnailToFileList(videoUri: string, thumbUri: string) {
+  try {
+    const raw = await AsyncStorage.getItem(RECENT_KEY);
+    if (!raw) return;
+    const files = JSON.parse(raw) as Array<{ uri: string; thumbnailUri?: string;[key: string]: any }>;
+    const updated = files.map((f) =>
+      f.uri === videoUri ? { ...f, thumbnailUri: thumbUri } : f
+    );
+    await AsyncStorage.setItem(RECENT_KEY, JSON.stringify(updated));
+  } catch (e) {
+    console.warn("[CAPTURE] Failed to save thumbnail to file list:", e);
+  }
+}
 
 export default function PlayerScreen() {
   const { width: screenWidth, height: screenHeight } = useWindowDimensions();
@@ -36,6 +57,7 @@ export default function PlayerScreen() {
 
   const videoUri   = usePlayerStore((s) => s.videoUri);
   const videoName  = usePlayerStore((s) => s.videoName);
+  const currentTime = usePlayerStore((s) => s.currentTime);
   const isPlaying  = usePlayerStore((s) => s.isPlaying);
   const setPlaying = usePlayerStore((s) => s.setPlaying);
 
@@ -45,9 +67,12 @@ export default function PlayerScreen() {
 
   const { isRetranslating, retranslate, cancelRetranslation } = useRetranslate();
 
-  const [langModalVisible, setLangModalVisible] = useState(false);
-  const [speedIdx, setSpeedIdx] = useState(2); // default 1.0x
+  const [langModalVisible,     setLangModalVisible]     = useState(false);
+  const [subtitlePanelVisible, setSubtitlePanelVisible] = useState(false);
+  const [speedIdx, setSpeedIdx] = useState(2);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isCapturing, setIsCapturing] = useState(false);
+  const [captureSuccess, setCaptureSuccess] = useState(false);
 
   const playbackRate = SPEEDS[speedIdx];
   const speedLabel = Number.isInteger(playbackRate)
@@ -61,17 +86,14 @@ export default function PlayerScreen() {
 
   const modeLabel = { both: "원문+번역", original: "원문만", translation: "번역만" }[subtitleMode];
 
-  // ── Status bar: hidden in landscape or portrait-fullscreen ───────────────
   useEffect(() => {
     StatusBar.setHidden(isLandscape || isFullscreen, "slide");
   }, [isLandscape, isFullscreen]);
 
-  // ── Portrait fullscreen toggle ────────────────────────────────────────────
   const toggleFullscreen = useCallback(() => {
     setIsFullscreen((prev) => !prev);
   }, []);
 
-  // ── Cleanup on unmount ────────────────────────────────────────────────────
   useEffect(() => {
     return () => {
       StatusBar.setHidden(false, "none");
@@ -79,16 +101,63 @@ export default function PlayerScreen() {
     };
   }, []);
 
+  // ── Frame capture ──────────────────────────────────────────────────────────
+  const captureFrame = useCallback(async () => {
+    if (!videoUri || !getThumbnailAsync || isCapturing) return;
+
+    setIsCapturing(true);
+    try {
+      // Capture current playback position (ms)
+      const timeMs = Math.max(Math.round(currentTime * 1000), 500);
+      const safeUri = videoUri.startsWith("file://") ? videoUri : "file://" + videoUri;
+      const result = await getThumbnailAsync(safeUri, { time: timeMs });
+
+      if (result?.uri) {
+        // Persist to cache so it survives app restarts
+        const cacheDir = FileSystem.cacheDirectory + "thumbs/";
+        await FileSystem.makeDirectoryAsync(cacheDir, { intermediates: true });
+        const dest = cacheDir + Date.now() + ".jpg";
+        await FileSystem.copyAsync({ from: result.uri, to: dest });
+
+        // Write back to the shared recent-files list
+        await saveThumbnailToFileList(videoUri, dest);
+
+        // Brief success flash
+        setCaptureSuccess(true);
+        setTimeout(() => setCaptureSuccess(false), 1800);
+      }
+    } catch (e) {
+      Alert.alert("캡처 실패", "현재 프레임을 캡처할 수 없습니다.\n" + String(e));
+    } finally {
+      setIsCapturing(false);
+    }
+  }, [videoUri, currentTime, isCapturing]);
+
   if (!videoUri) {
     router.back();
     return null;
   }
 
-  // ── Video wrapper height for portrait ────────────────────────────────────
-  // At least 16:9 for current width, or 50% of screen, whichever is larger.
   const videoHeight = Math.max(screenWidth * (9 / 16), screenHeight * 0.5);
 
-  // ── Language picker ───────────────────────────────────────────────────────
+  // ── Capture button (shared between portrait & landscape) ──────────────────
+  const captureBtn = getThumbnailAsync ? (
+    <TouchableOpacity
+      style={[styles.chipBtn, isCapturing && styles.chipBtnDisabled]}
+      onPress={captureFrame}
+      activeOpacity={isCapturing ? 1 : 0.75}
+      disabled={isCapturing}
+    >
+      {isCapturing ? (
+        <ActivityIndicator size="small" color="#ccc" />
+      ) : (
+        <Text style={[styles.chipBtnText, captureSuccess && styles.chipBtnSuccess]}>
+          {captureSuccess ? "✓" : "📷"}
+        </Text>
+      )}
+    </TouchableOpacity>
+  ) : null;
+
   const langBtn = (extraStyle?: object) => (
     <TouchableOpacity
       style={[styles.chipBtn, styles.chipBtnFlex, isRetranslating && styles.chipBtnDisabled, extraStyle]}
@@ -101,7 +170,16 @@ export default function PlayerScreen() {
     </TouchableOpacity>
   );
 
-  // ── Nodes passed into VideoPlayer's overlay in landscape ──────────────────
+  const subtitleStyleBtn = (
+    <TouchableOpacity
+      style={styles.chipBtn}
+      onPress={() => setSubtitlePanelVisible(true)}
+      activeOpacity={0.75}
+    >
+      <Text style={styles.chipBtnText}>Aa</Text>
+    </TouchableOpacity>
+  );
+
   const landscapeHeader = (
     <View style={styles.lsHeader}>
       <TouchableOpacity onPress={() => router.back()} style={styles.headerBtn}>
@@ -116,12 +194,9 @@ export default function PlayerScreen() {
 
   const landscapeControls = (
     <View style={styles.lsControlBar}>
-      {/* Play / Pause */}
       <TouchableOpacity style={styles.playBtn} onPress={() => setPlaying(!isPlaying)} activeOpacity={0.75}>
         <Text style={styles.playBtnText}>{isPlaying ? "⏸" : "▶"}</Text>
       </TouchableOpacity>
-
-      {/* Speed */}
       <TouchableOpacity
         style={styles.chipBtn}
         onPress={() => setSpeedIdx((i) => (i + 1) % SPEEDS.length)}
@@ -129,18 +204,16 @@ export default function PlayerScreen() {
       >
         <Text style={styles.chipBtnText}>{speedLabel}</Text>
       </TouchableOpacity>
-
-      {/* Subtitle mode */}
       <TouchableOpacity style={[styles.chipBtn, styles.chipBtnFlex]} onPress={cycleModes} activeOpacity={0.75}>
         <Text style={styles.chipBtnText} numberOfLines={1}>{modeLabel}</Text>
       </TouchableOpacity>
-
-      {/* Language */}
+      {subtitleStyleBtn}
+      {/* 📷 현재 프레임 캡처 */}
+      {captureBtn}
       {langBtn()}
     </View>
   );
 
-  // ── Shared language-picker modal ──────────────────────────────────────────
   const langModal = (
     <Modal
       visible={langModalVisible}
@@ -180,36 +253,39 @@ export default function PlayerScreen() {
 
   // ══════════════════════════════════════════════════════════════════════════
   // LANDSCAPE LAYOUT
-  // Video fills the entire SafeAreaView via absoluteFillObject.
-  // Header + controls live inside VideoPlayer's auto-hiding overlay.
   // ══════════════════════════════════════════════════════════════════════════
   if (isLandscape) {
     return (
       <View style={{ width: screenWidth, height: screenHeight, backgroundColor: "#000" }}>
-        {/* VideoPlayer fills 100% — flex:1 expands into the explicit-size root */}
         <VideoPlayer
           rate={playbackRate}
           overlayHeader={landscapeHeader}
           overlayControls={landscapeControls}
         />
-
-        {/* Subtitle and banners: position:absolute, relative to root View */}
         <SubtitleOverlay />
-
         {isRetranslating && (
           <View style={styles.lsRetranslateBanner}>
             <ActivityIndicator size="small" color="#2563eb" />
             <Text style={styles.retranslateText}>번역 중...</Text>
           </View>
         )}
-
+        {/* Capture success toast */}
+        {captureSuccess && (
+          <View style={styles.captureToast} pointerEvents="none">
+            <Text style={styles.captureToastText}>📷 썸네일로 저장됨</Text>
+          </View>
+        )}
         {langModal}
+        <SubtitleQuickPanel
+          visible={subtitlePanelVisible}
+          onClose={() => setSubtitlePanelVisible(false)}
+        />
       </View>
     );
   }
 
   // ══════════════════════════════════════════════════════════════════════════
-  // PORTRAIT LAYOUT  (unchanged from before)
+  // PORTRAIT LAYOUT
   // ══════════════════════════════════════════════════════════════════════════
   return (
     <SafeAreaView style={styles.safe}>
@@ -227,7 +303,7 @@ export default function PlayerScreen() {
         </TouchableOpacity>
       </View>
 
-      {/* Video wrapper: explicit height normally, absolute fullscreen on demand */}
+      {/* Video wrapper */}
       <View
         style={
           isFullscreen
@@ -239,7 +315,7 @@ export default function PlayerScreen() {
         <SubtitleOverlay />
       </View>
 
-      {/* External control bar */}
+      {/* Control bar */}
       <View style={styles.controlBar}>
         {/* Play / Pause */}
         <TouchableOpacity
@@ -259,7 +335,7 @@ export default function PlayerScreen() {
           <Text style={styles.chipBtnText}>{speedLabel}</Text>
         </TouchableOpacity>
 
-        {/* Fullscreen toggle */}
+        {/* Fullscreen */}
         <TouchableOpacity style={styles.chipBtn} onPress={toggleFullscreen} activeOpacity={0.75}>
           <Text style={styles.chipBtnText}>{isFullscreen ? "✕" : "⛶"}</Text>
         </TouchableOpacity>
@@ -273,6 +349,12 @@ export default function PlayerScreen() {
           <Text style={styles.chipBtnText} numberOfLines={1}>{modeLabel}</Text>
         </TouchableOpacity>
 
+        {/* 자막 스타일 */}
+        {subtitleStyleBtn}
+
+        {/* 📷 현재 프레임 캡처 */}
+        {captureBtn}
+
         {/* Language */}
         {langBtn()}
       </View>
@@ -285,7 +367,20 @@ export default function PlayerScreen() {
         </View>
       )}
 
+      {/* Capture success toast */}
+      {captureSuccess && (
+        <View style={styles.captureToast} pointerEvents="none">
+          <Text style={styles.captureToastText}>📷 썸네일로 저장됨</Text>
+        </View>
+      )}
+
       {langModal}
+
+      <SubtitleQuickPanel
+        visible={subtitlePanelVisible}
+        onClose={() => setSubtitlePanelVisible(false)}
+      />
+
     </SafeAreaView>
   );
 }
@@ -293,7 +388,6 @@ export default function PlayerScreen() {
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: "#000" },
 
-  // ── Portrait header ───────────────────────────────────────────────────────
   header: {
     flexDirection: "row",
     alignItems: "center",
@@ -311,7 +405,6 @@ const styles = StyleSheet.create({
     marginHorizontal: 8,
   },
 
-  // ── Portrait video wrapper ────────────────────────────────────────────────
   videoWrapper: {
     width: "100%",
     backgroundColor: "#000",
@@ -327,7 +420,6 @@ const styles = StyleSheet.create({
     backgroundColor: "#000",
   },
 
-  // ── Portrait control bar ──────────────────────────────────────────────────
   controlBar: {
     flexDirection: "row",
     alignItems: "center",
@@ -352,12 +444,15 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 8,
     flexShrink: 0,
+    minWidth: 36,
+    alignItems: "center",
+    justifyContent: "center",
   },
   chipBtnFlex: { flex: 1, alignItems: "center" },
   chipBtnText: { color: "#ccc", fontSize: 12 },
   chipBtnDisabled: { opacity: 0.4 },
+  chipBtnSuccess: { color: "#22c55e" },
 
-  // ── Portrait retranslate banner ───────────────────────────────────────────
   retranslateBanner: {
     flexDirection: "row",
     alignItems: "center",
@@ -370,7 +465,24 @@ const styles = StyleSheet.create({
   },
   retranslateText: { color: "#60a5fa", fontSize: 13, fontWeight: "600" },
 
-  // ── Landscape overlays (rendered inside VideoPlayer's auto-hiding overlay) ─
+  // ── Capture toast ──────────────────────────────────────────────────────────
+  captureToast: {
+    position: "absolute",
+    bottom: 90,
+    alignSelf: "center",
+    backgroundColor: "rgba(0,0,0,0.75)",
+    borderRadius: 20,
+    paddingHorizontal: 18,
+    paddingVertical: 9,
+    borderWidth: 1,
+    borderColor: "#22c55e44",
+  },
+  captureToastText: {
+    color: "#22c55e",
+    fontSize: 13,
+    fontWeight: "700",
+  },
+
   lsHeader: {
     flexDirection: "row",
     alignItems: "center",
@@ -394,7 +506,6 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(0,0,0,0.55)",
     gap: 8,
   },
-  // Retranslate banner in landscape: absolute so it's always visible above controls
   lsRetranslateBanner: {
     position: "absolute",
     bottom: LANDSCAPE_BOTTOM_HEIGHT + 4,
@@ -408,7 +519,6 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
   },
 
-  // ── Language picker modal ─────────────────────────────────────────────────
   modalBackdrop: {
     flex: 1,
     backgroundColor: "rgba(0,0,0,0.6)",
