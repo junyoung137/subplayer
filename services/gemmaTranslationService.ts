@@ -43,9 +43,9 @@ const CHECKPOINT_TTL_MS     = 24 * 60 * 60 * 1000;
 const PROPER_NOUN_MIN_COUNT = 3;
 
 // Fragment merge tuning
-const MERGE_MAX_GAP_S       = 1.0;   // gap ≥ this → force group split
-const MERGE_MAX_DURATION_S  = 4.0;   // Netflix single-screen max
-const MERGE_MAX_WORDS       = 12;    // ~2 subtitle lines
+const MERGE_MAX_GAP_S       = 0.5;   // gap ≥ this → force group split
+const MERGE_MAX_DURATION_S  = 2.5;   // Netflix single-screen max
+const MERGE_MAX_WORDS       = 8;    // ~2 subtitle lines
 const SHORT_WORD_MAX        = 2;     // "yes"/"no"/"right" threshold
 const SHORT_DURATION_MAX_S  = 1.5;   // absorb short lone segments into neighbours
 
@@ -53,17 +53,67 @@ const SHORT_DURATION_MAX_S  = 1.5;   // absorb short lone segments into neighbou
 const SECS_PER_CHAR_KO      = 0.065; // ~15 chars/sec reading speed
 const MAX_TIMING_OVERLAP    = 0.1;   // allowed forward overlap (seconds)
 
+// ── sanitizeTranslationOutput regex constants ─────────────────────────────────
+
+/** Korean stage-direction annotations the LLM sometimes hallucinates. */
+const RE_STAGE_DIRECTION_KO = /\(혼잣말\)|\(독백\)|\(방백\)|\(내레이션\)/g;
+
+/** Any parenthesised content — stripped when the source line has no parens. */
+const RE_PARENS_ANY = /\([^)]*\)/g;
+
+/** ASCII words of 3+ chars that are NOT pure numbers or timestamp tokens.
+ *  Used to detect leftover untranslated English in non-Latin target output. */
+const RE_ENGLISH_WORD = /\b([a-zA-Z]{3,})\b/g;
+
+/** Timestamp / numeric tokens to exclude from the leftover-English check. */
+const RE_NUMERIC_TOKEN = /^\d+([:.]\d+)*$/;
+
 /**
  * 장르별 페르소나 프롬프트 접두어.
  */
 const GENRE_PERSONA: Record<string, string> = {
-  "tech lecture":  "You specialize in technology and programming subtitles.",
-  "comedy":        "You specialize in comedy, preserving humor and casual speech.",
-  "news":          "You specialize in news subtitles, using formal and precise language.",
-  "documentary":   "You specialize in documentary narration, using descriptive language.",
-  "gaming":        "You specialize in gaming content, preserving gamer slang and terms.",
-  "education":     "You specialize in educational content for learners.",
-  "general":       "",
+  "comedy":
+    "You specialize in comedy subtitles. " +
+    "Use natural casual Korean (구어체). " +
+    "Preserve humor, sarcasm, and exaggeration. " +
+    "Translate emotional tone and comedic intent, not just literal words. " +
+    "Use -요/-어요 endings for polite casual speech. " +
+    "Use 반말 (-아/-어/-지) only when speakers are clearly close.",
+
+  "news":
+    "You specialize in news subtitles. " +
+    "Use formal declarative Korean (-습니다/-입니다). " +
+    "Every sentence must end in -습니다 or -입니다. " +
+    "Use precise, neutral vocabulary. No colloquial expressions.",
+
+  "documentary":
+    "You specialize in documentary narration. " +
+    "Use formal explanatory Korean. " +
+    "Alternate naturally between -습니다 endings for facts " +
+    "and -ㄴ다/-는다 plain style for descriptive narration. " +
+    "Tone should be calm, authoritative, and informative.",
+
+  "education":
+    "You specialize in educational and lecture subtitles. " +
+    "Use polite formal Korean (-습니다/-ㅂ니다). " +
+    "Technical terms should be preserved or transliterated precisely. " +
+    "Sentence structure should be clear and logical. " +
+    "Avoid casual fillers.",
+
+  "tech lecture":
+    "You specialize in technology and programming subtitles. " +
+    "Use polite formal Korean (-습니다/-ㅂ니다). " +
+    "Keep all technical terms, variable names, and code keywords in English. " +
+    "Explanatory sentences should end in -습니다 or -됩니다.",
+
+  "gaming":
+    "You specialize in gaming content subtitles. " +
+    "Use casual informal Korean (반말, -아/-어/-지 endings). " +
+    "Preserve gamer slang and exclamations naturally. " +
+    "Energy and enthusiasm should match the source tone.",
+
+  "general":
+    "",
 };
 
 const COMMON_WORDS = new Set([
@@ -147,6 +197,81 @@ export async function unloadModel(): Promise<void> {
 // ── Fragment merging ──────────────────────────────────────────────────────────
 
 /**
+ * Resolves heavily overlapping yt-dlp word-level segments into a clean,
+ * non-overlapping sequence before any merge logic runs.
+ *
+ * yt-dlp JSON3 output often produces segments where segment[i+1].start falls
+ * well inside segment[i]'s time range (negative or near-zero gap). Feeding
+ * overlapping segments straight into gap-based merging causes wrong groupings,
+ * duplicate words in merged text, and broken sentence boundaries.
+ *
+ * Algorithm (single forward pass, O(n)):
+ *   1. Sort by startTime ascending so relative order is guaranteed.
+ *   2. For each segment, compare its startTime against the accumulated group's
+ *      endTime. If startTime < groupEnd - 0.05 s (overlap threshold), the two
+ *      segments are concurrent speech variants of the same utterance.
+ *      - Union-merge their words: split both texts on whitespace, append only
+ *        words from the incoming segment that are not already present in the
+ *        accumulated text (case-insensitive, preserves original casing of first
+ *        occurrence). This avoids duplicated words while keeping word order.
+ *      - Extend endTime to max(groupEnd, segment.end).
+ *   3. If no overlap, flush the accumulated group as a clean segment and start
+ *      a new one.
+ *
+ * No LLM call: pure array/string manipulation over timestamp metadata.
+ *
+ * @param segments - Raw TranslationSegment[] from yt-dlp (may overlap).
+ * @returns A new array of non-overlapping segments sorted by startTime.
+ */
+function deduplicateOverlappingSegments(
+  segments: TranslationSegment[]
+): TranslationSegment[] {
+  if (segments.length === 0) return [];
+
+  // Step 1: sort by startTime
+  const sorted = [...segments].sort((a, b) => a.start - b.start);
+
+  const result: TranslationSegment[] = [];
+
+  // Accumulator for the current overlap group
+  let accStart  = sorted[0].start;
+  let accEnd    = sorted[0].end;
+  let accText   = sorted[0].text.trim();
+  let accWords  = accText.toLowerCase().split(/\s+/).filter(Boolean);
+
+  for (let i = 1; i < sorted.length; i++) {
+    const seg = sorted[i];
+    const OVERLAP_THRESHOLD = 0.05; // seconds — treat as overlapping if within this
+
+    if (seg.start < accEnd - OVERLAP_THRESHOLD) {
+      // Overlapping: union-merge words, extend end
+      const incomingWords = seg.text.trim().split(/\s+/).filter(Boolean);
+      const seen = new Set(accWords);
+      for (const w of incomingWords) {
+        if (!seen.has(w.toLowerCase())) {
+          accText  += " " + w;
+          accWords.push(w.toLowerCase());
+          seen.add(w.toLowerCase());
+        }
+      }
+      accEnd = Math.max(accEnd, seg.end);
+    } else {
+      // No overlap: flush accumulated group
+      result.push({ start: accStart, end: accEnd, text: accText.trim(), translated: "" });
+      accStart = seg.start;
+      accEnd   = seg.end;
+      accText  = seg.text.trim();
+      accWords = accText.toLowerCase().split(/\s+/).filter(Boolean);
+    }
+  }
+
+  // Flush final group
+  result.push({ start: accStart, end: accEnd, text: accText.trim(), translated: "" });
+
+  return result;
+}
+
+/**
  * Returns true for segments that are pure filler: empty, single punctuation,
  * or numbers-only. These are kept as 1-element groups and never merged.
  */
@@ -155,12 +280,22 @@ function isFillerText(text: string): boolean {
   return t.length === 0 || /^[\d\s.,;:!?'"()[\]-]+$/.test(t);
 }
 
+// Words that signal a clause continues from the previous segment.
+// When the next segment starts with one of these AND the current group has no
+// terminal punctuation, the gap threshold is relaxed to MERGE_CONTINUATION_GAP_S
+// so mid-clause splits like "I don't think we're" / "gonna be a good fit" stay
+// together and the LLM sees the full negated thought.
+const CONTINUATION_WORDS = /^(gonna|going|been|have|just|really|so|that|the|a|an|to|be|get)\b/i;
+const MERGE_CONTINUATION_GAP_S = 1.0; // relaxed gap for continuation-word merges
+
 /**
  * Merges consecutive short/fragment segments from yt-dlp word-level timestamps
  * into sentence-level groups for better LLM translation context.
  *
  * Merge stops when ANY condition is violated:
- *   • gap between seg[i].end and seg[i+1].start ≥ MERGE_MAX_GAP_S (1.0 s)
+ *   • gap ≥ MERGE_MAX_GAP_S (1.0 s) — unless next segment starts with a
+ *     continuation word AND current group has no terminal punctuation, in which
+ *     case the gap allowance is raised to MERGE_CONTINUATION_GAP_S (2.0 s)
  *   • projected group duration > MERGE_MAX_DURATION_S (4.0 s)
  *   • projected word count > MERGE_MAX_WORDS (12)
  *   • current group already ends with terminal punctuation (.!?)
@@ -197,10 +332,25 @@ function mergeFragments(segments: TranslationSegment[]): MergedGroup[] {
       const wordCount         = projectedText.split(/\s+/).filter(Boolean).length;
       const hasTerminal       = /[.!?]$/.test(group.text);
 
+      // Sentence-boundary check: stop merging when the accumulated text already
+      // contains a complete subject+verb clause AND the next segment opens a new
+      // clause with a fresh subject pronoun or capitalised noun. This prevents
+      // cross-sentence content bleed where two independent sentences end up in
+      // the same merge group and confuse the LLM's per-line boundary tracking.
+      const accHasCompleteClause = /\b(I|you|we|they|he|she|it)\b.{4,}/i.test(group.text);
+      const nextStartsNewClause  = /^(I|you|we|they|he|she|it|[A-Z][a-z])\b/i.test(next.text.trim());
+      if (accHasCompleteClause && nextStartsNewClause) break;
+
+      // Continuation-word override: relax the gap cap when the current group
+      // ends mid-clause (no terminal punctuation) and the next segment starts
+      // with a word that grammatically continues the clause (e.g. "gonna").
+      const isContinuation = !hasTerminal && CONTINUATION_WORDS.test(next.text.trim());
+      const effectiveGapCap = isContinuation ? MERGE_CONTINUATION_GAP_S : MERGE_MAX_GAP_S;
+
       if (
-        gap >= MERGE_MAX_GAP_S               ||
+        gap >= effectiveGapCap                 ||
         projectedDuration > MERGE_MAX_DURATION_S ||
-        wordCount > MERGE_MAX_WORDS          ||
+        wordCount > MERGE_MAX_WORDS            ||
         hasTerminal
       ) break;
 
@@ -315,6 +465,41 @@ function expandGroupTranslations(
         const count    = Math.max(1, Math.round(fraction * words.length));
         result[idx]    = words.slice(wordOffset, wordOffset + count).join(" ");
         wordOffset    += count;
+      }
+    }
+
+    // Post-expansion deduplication within the group:
+    // If two adjacent slots ended up identical, or one is a substring of the
+    // other, clear the shorter one so the viewer doesn't see the same phrase
+    // repeated. The longer slot keeps the translation; the shorter becomes "".
+    // Also strip any shared suffix/prefix overlap > 6 characters between
+    // consecutive slots in the same group.
+    for (let k = 0; k < originalIndices.length - 1; k++) {
+      const idxA = originalIndices[k];
+      const idxB = originalIndices[k + 1];
+      const a    = result[idxA].trim();
+      const b    = result[idxB].trim();
+
+      if (!a || !b) continue;
+
+      // Case 1: identical or one contains the other — keep the longer, clear the shorter.
+      if (a === b || a.includes(b) || b.includes(a)) {
+        if (a.length >= b.length) {
+          result[idxB] = "";
+        } else {
+          result[idxA] = "";
+        }
+        continue;
+      }
+
+      // Case 2: shared suffix/prefix overlap longer than 6 chars — strip from the later slot.
+      const OVERLAP_MIN = 6;
+      const maxCheck = Math.min(a.length, b.length);
+      for (let len = maxCheck; len >= OVERLAP_MIN; len--) {
+        if (a.endsWith(b.slice(0, len))) {
+          result[idxB] = b.slice(len).trimStart();
+          break;
+        }
       }
     }
   }
@@ -526,6 +711,81 @@ function buildBatchMessage(batch: TranslationSegment[], batchOffset: number): st
  *   Pass 3 — positional fallback (strip leading number/punct, exact line count)
  *   Last resort — use whatever numbered matches exist, fill gaps with source text
  */
+/**
+ * Cleans a single translated line of common LLM artefacts.
+ *
+ * Artefacts removed (no LLM call — pure regex/string operations):
+ *   1. Korean stage-direction annotations the model hallucinates
+ *      (혼잣말, 독백, 방백, 내레이션) — never present in yt-dlp subtitle source.
+ *   2. Any parenthesised content when the source line has no parentheses —
+ *      model often adds "(웃음)", "(한숨)", etc. that were not in the source.
+ *   3. Does NOT strip parens when the source itself contains them, so legitimate
+ *      screen-direction subtitles (e.g. "[Music]") are preserved.
+ *
+ * The function is pure and side-effect free: same inputs always produce the
+ * same output and no external state is read or mutated.
+ *
+ * @param text       - Raw translated string from the LLM.
+ * @param sourceText - Corresponding source English segment text.
+ * @returns Cleaned translation string.
+ */
+export function sanitizeTranslationOutput(text: string, sourceText: string): string {
+  let out = text;
+
+  // 1. Remove hallucinated Korean stage directions unconditionally.
+  out = out.replace(RE_STAGE_DIRECTION_KO, "");
+
+  // 2. If source has no parentheses, strip all (...) from translation.
+  if (!sourceText.includes("(") && !sourceText.includes(")")) {
+    out = out.replace(RE_PARENS_ANY, "");
+  }
+
+  // Collapse any double-spaces left by the removals and trim.
+  return out.replace(/\s{2,}/g, " ").trim();
+}
+
+/**
+ * Returns true when the translated text contains leftover English words (3+
+ * ASCII chars) that are neither in the proper-noun dictionary nor pure numeric
+ * tokens. For non-Latin target languages this signals a likely untranslated
+ * pass-through that should be retried.
+ *
+ * Pure function — no LLM call, no side effects.
+ *
+ * @param translated     - The translated string to inspect.
+ * @param sourceText     - Source English text (words appearing in source are allowed).
+ * @param patterns       - Compiled proper-noun patterns for the current video.
+ * @param targetLanguage - Used to skip the check for Latin-script targets.
+ * @returns true if leftover untranslated English tokens are detected.
+ */
+export function hasLeftoverEnglish(
+  translated: string,
+  sourceText: string,
+  patterns: CompiledNounPattern[],
+  targetLanguage: string
+): boolean {
+  const profile = getLanguageProfile(targetLanguage);
+  if (profile.isLatinScript) return false; // not applicable for Latin targets
+
+  const knownEnglish = new Set(
+    sourceText.toLowerCase().split(/\s+/).filter(Boolean)
+  );
+  const knownTranslit = new Set(
+    patterns.map(p => p.src.toLowerCase())
+  );
+
+  RE_ENGLISH_WORD.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = RE_ENGLISH_WORD.exec(translated)) !== null) {
+    const word = m[1];
+    if (RE_NUMERIC_TOKEN.test(word)) continue;           // skip timestamps/numbers
+    if (knownEnglish.has(word.toLowerCase())) continue;  // came from source — ok
+    if (knownTranslit.has(word.toLowerCase())) continue; // known proper noun transliteration
+    return true;
+  }
+  return false;
+}
+
 function parseBatchResponse(
   response: string,
   batch: TranslationSegment[],
@@ -543,7 +803,8 @@ function parseBatchResponse(
   if (translationMap.size === batch.length) {
     return batch.map((seg, i) => {
       const raw = translationMap.get(batchOffset + i + 1);
-      return raw ? applyProperNounFixes(raw, patterns) : seg.text;
+      if (!raw) return seg.text;
+      return sanitizeTranslationOutput(applyProperNounFixes(raw, patterns), seg.text);
     });
   }
 
@@ -563,7 +824,8 @@ function parseBatchResponse(
   if (translationMap.size === batch.length) {
     return batch.map((seg, i) => {
       const raw = translationMap.get(batchOffset + i + 1);
-      return raw ? applyProperNounFixes(raw, patterns) : seg.text;
+      if (!raw) return seg.text;
+      return sanitizeTranslationOutput(applyProperNounFixes(raw, patterns), seg.text);
     });
   }
 
@@ -577,7 +839,9 @@ function parseBatchResponse(
     console.warn(
       `[TRANSLATE] positional fallback: numbered=${translationMap.size} expected=${batch.length}`
     );
-    return batch.map((seg, i) => applyProperNounFixes(contentLines[i], patterns));
+    return batch.map((seg, i) =>
+      sanitizeTranslationOutput(applyProperNounFixes(contentLines[i], patterns), seg.text)
+    );
   }
 
   // Last resort: use whatever numbered matches exist; fall back to source for gaps
@@ -587,7 +851,7 @@ function parseBatchResponse(
       console.warn(`[TRANSLATE] missing translation for segment #${batchOffset + i + 1}`);
       return seg.text;
     }
-    return applyProperNounFixes(raw, patterns);
+    return sanitizeTranslationOutput(applyProperNounFixes(raw, patterns), seg.text);
   });
 }
 
@@ -638,10 +902,77 @@ async function validateTranslations(
 
     if (isFillerText(src)) continue; // fillers pass through as-is
 
-    const needsRetry = t.length === 0 || isLikelyUntranslated(t, targetLanguage);
+    // Check for likely dropped negation: source has negation trigger but
+    // Korean translation contains none of the expected negation markers.
+    // When the current segment ends without terminal punctuation, also look at
+    // the combined text of this segment + the next, so split-clause negations
+    // like "I don't think we're" / "gonna be a good fit" are caught as a unit.
+    const hasTerminalPunct = /[.!?]$/.test(src);
+    const nextSrc = (!hasTerminalPunct && i + 1 < segments.length)
+      ? segments[i + 1].text.trim()
+      : "";
+    const logicalSrc = nextSrc ? `${src} ${nextSrc}` : src;
+    const srcHasNegation = /\bdon't think\b|\bi don't think\b|\bnot a\b|\bdoesn't work\b|\bdon't work\b|\bcan't\b|\bwon't\b/i.test(logicalSrc);
+    const tgtHasNegation = /않|안|못|없|아니|모르/.test(t);
+    const negationDropped = srcHasNegation && t.length > 0 && !tgtHasNegation;
+    if (negationDropped) {
+      console.warn(`[VALIDATE] segment ${i} likely negation dropped: "${src}" → "${t}"`);
+    }
+
+    // Check for hallucinated proper nouns: translated text contains a known
+    // proper noun (Korean form) that has no corresponding source word in this
+    // specific segment. Prevents context-bleed from nearby segments.
+    const HALLUCINATION_GUARD: Array<[korean: string, english: RegExp]> = [
+      ["시리",   /\bsiri\b/i],
+      ["알렉사", /\balexa\b/i],
+      ["구글",   /\bgoogle\b/i],
+    ];
+    // Also check translated proper nouns from the properNouns dict (English key → Korean value).
+    // If the Korean translation appears in the output but the English key is absent from src,
+    // it was likely bled in from context.
+    const nounHallucinationFound =
+      HALLUCINATION_GUARD.some(([ko, enRe]) => t.includes(ko) && !enRe.test(src)) ||
+      patterns.some(p => {
+        // p.tgt is the Korean translation of the proper noun (e.g. "마크 저커버그").
+        // p.src is the original English form. If the Korean form appears in the
+        // translated output but the English form is absent from this source line,
+        // the model bled the noun in from context.
+        return p.tgt && t.includes(p.tgt) && !new RegExp(`\\b${p.src.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(src);
+      });
+    if (nounHallucinationFound) {
+      console.warn(`[VALIDATE] segment ${i} hallucinated proper noun: "${src}" → "${t}"`);
+    }
+
+    // Apply sanitization to the current translation before checking leftover English.
+    // This removes stage-direction artefacts before the retry decision so we
+    // don't retry a segment that is merely polluted with "(혼잣말)".
+    result[i] = sanitizeTranslationOutput(t, src);
+    const tSanitized = result[i];
+
+    const leftoverEnglish = hasLeftoverEnglish(tSanitized, src, patterns, targetLanguage);
+    if (leftoverEnglish) {
+      console.warn(`[VALIDATE] segment ${i} leftover English: "${src}" → "${tSanitized}"`);
+    }
+
+    // Ellipsis-only output — model stalled and produced only filler punctuation.
+    const isEllipsisOnly = /^[.…]{2,}$/.test(tSanitized.trim());
+
+    // Split-negation structural check: source ends with a negated auxiliary
+    // (the operator whose scope continues into the next segment) but the Korean
+    // output contains no negation marker — the predicate was translated without
+    // carrying the negation across the segment boundary.
+    const srcEndsWithNegAux =
+      /\b(don't|won't|can't|didn't|doesn't|haven't|hasn't|couldn't|shouldn't|wouldn't|not)\s*$/i.test(src);
+    const tgtMissingNegation = !/않|안|못|없|아니|모르/.test(tSanitized);
+    const splitNegationDropped = srcEndsWithNegAux && tgtMissingNegation && tSanitized.length > 0;
+    if (splitNegationDropped) {
+      console.warn(`[VALIDATE] segment ${i} split-negation dropped: "${src}" → "${tSanitized}"`);
+    }
+
+    const needsRetry = tSanitized.length === 0 || isEllipsisOnly || isLikelyUntranslated(tSanitized, targetLanguage) || negationDropped || splitNegationDropped || nounHallucinationFound || leftoverEnglish;
     if (!needsRetry) continue;
 
-    console.warn(`[VALIDATE] segment ${i} untranslated: "${src}" → "${t}"`);
+    console.warn(`[VALIDATE] segment ${i} queued for retry: "${src}" → "${tSanitized}"`);
 
     try {
       const singlePrompt =
@@ -659,7 +990,8 @@ async function validateTranslations(
         stop:        ["</s>", "<end_of_turn>", "<|end|>", "\n"],
       });
 
-      const candidate = retryResult.text.trim();
+      const rawCandidate = retryResult.text.trim();
+      const candidate    = sanitizeTranslationOutput(rawCandidate, src);
       if (candidate && !isLikelyUntranslated(candidate, targetLanguage)) {
         result[i] = applyProperNounFixes(candidate, patterns);
         console.log(`[VALIDATE] fixed segment ${i}: "${src}" → "${result[i]}"`);
@@ -745,8 +1077,33 @@ export async function translateSegments(
     throw new Error("모델이 로드되지 않았습니다. loadModel()을 먼저 호출하세요.");
   }
 
+  // ── Step 0: Deduplicate overlapping yt-dlp segments ───────────────────────
+  // yt-dlp word-level output frequently has segments whose startTime falls
+  // inside the previous segment's window (negative gap). This must be resolved
+  // into a clean non-overlapping sequence before gap-based merge logic runs.
+  const deduped = deduplicateOverlappingSegments(segments);
+  console.log(
+    `[TRANSLATE] dedup: ${segments.length} → ${deduped.length} segments` +
+    ` (${segments.length - deduped.length} overlaps resolved)`
+  );
+
+  // ── Step 0b: Lightweight ASR noise cleanup ───────────────────────────────
+  // Removes common yt-dlp artefacts from segment text before merging:
+  //   • trailing ellipsis runs left by ASR continuation markers
+  //   • orphaned closing brackets/parens that have no matching opener
+  //     (e.g. "something)" or "something]" emitted by partial captions)
+  // Timestamps and start/end are not touched — only the text field.
+  const cleanedDeduped = deduped.map(seg => ({
+    ...seg,
+    text: seg.text
+      .replace(/\.{2,}$/, "")
+      .replace(/(?<!\()[^)]*\)/g, "")
+      .replace(/(?<!\[)[^\]]*\]/g, "")
+      .trim(),
+  }));
+
   // ── Step A: Merge yt-dlp word fragments into sentence-level groups ────────
-  const mergedGroups       = absorbShortGroups(mergeFragments(segments));
+  const mergedGroups       = absorbShortGroups(mergeFragments(cleanedDeduped));
   const mergedSegs: TranslationSegment[] = mergedGroups.map(g => ({
     start: g.start, end: g.end, text: g.text, translated: "",
   }));
@@ -754,13 +1111,13 @@ export async function translateSegments(
   const mergedTotalBatches = Math.ceil(mergedTotal / BATCH_SIZE);
 
   console.log(
-    `[TRANSLATE] merged ${segments.length} → ${mergedTotal} groups` +
-    ` (${segments.length - mergedTotal} fragments combined)`
+    `[TRANSLATE] merged ${deduped.length} → ${mergedTotal} groups` +
+    ` (${deduped.length - mergedTotal} fragments combined)`
   );
 
-  // ── Step B: 고유명사 사전 구축 (scan original segments for full coverage) ─
+  // ── Step B: 고유명사 사전 구축 (scan deduplicated segments for full coverage) ─
   const profile     = getLanguageProfile(targetLanguage);
-  const properNouns = await buildProperNounDict(segments, videoHash, targetLanguage);
+  const properNouns = await buildProperNounDict(deduped, videoHash, targetLanguage);
   const nounHint    = formatNounHint(properNouns);
   const patterns    = buildPatterns(properNouns);
   console.log(`[Gemma] Proper nouns: ${Object.keys(properNouns).length} entries`);
@@ -770,19 +1127,45 @@ export async function translateSegments(
   const langRules    = profile.systemPromptRules.join(" ");
 
   const systemPrompt =
-    `You are a professional subtitle translator. ` +
+    `You are a professional Korean subtitle translator. ` +
     (genrePersona ? genrePersona + " " : "") +
-    `Translate each numbered English line into natural ${targetLanguage}. ` +
-    `Translate complete thought units. If a segment is a sentence fragment, translate it as a natural fragment in context. ` +
-    `Use context from surrounding lines to handle pronouns (it, they, he, she) accurately. ` +
-    `Preserve natural speech rhythm and flow. ` +
-    `Output ONLY numbered lines matching the input count. No explanations. ` +
-    `Each input line must produce exactly one output line. Never merge two input lines into one. ` +
-    `Never skip a line — every line must be translated and output. ` +
-    `Never translate filler fragments (single punctuation, numbers-only) — output them as-is. ` +
-    `Pay careful attention to negation words (don't, won't, can't, didn't, not, never, no). ` +
-    `A missed negation completely reverses the meaning — double-check every sentence containing negation. ` +
-    `Never leave English words untranslated in the output. ` +
+    `Translate each numbered English line into natural conversational Korean (구어체). ` +
+    `Output ONLY numbered lines. No explanations. One output line per input line. Never skip or merge lines. ` +
+
+    `CORE RULES (follow in order): ` +
+
+    `1. OUTPUT FORMAT ` +
+    `Every input line must produce exactly one output line with the same number. ` +
+    `Filler-only input (single punctuation, digits only) → output as-is. ` +
+
+    `2. MEANING FIRST ` +
+    `Translate the intended meaning, not word-for-word. ` +
+    `When a word's literal meaning is physically impossible in context, use the contextually correct meaning instead. ` +
+    `Do not add meaning that is not in the source line. ` +
+
+    `3. NEGATION ` +
+    `Preserve all negation (not, don't, won't, can't, never). ` +
+    `A negated thought split across two lines — where line N ends with a negated auxiliary and line N+1 completes the predicate — must produce a Korean output that contains a negation marker (않/안/못/없) in the translated predicate. ` +
+
+    `4. AGENT DIRECTION ` +
+    `For communication verbs (ask, tell, say) with a tool or service as object: the tool is receiving the action, not performing it. ` +
+    `'I'll ask [tool]' → tool이 말하는 것이 아니라 화자가 tool에게 묻는 것. ` +
+
+    `5. REGISTER ` +
+    `Use 존댓말 (-요/-습니다) for workplace and interview scenes. ` +
+    `Sentence-initial casual English fillers (well, look, okay, right used as softeners) → translate by function: attention-getter → '있잖아요', softener → omit if sentence is complete without it. ` +
+    `Romantic address forms (자기야/여보) → only when romantic relationship is explicitly confirmed in the immediate context. ` +
+
+    `6. SEGMENT BOUNDARY & CONTEXT READING ` +
+    `Each output line translates ONLY the words in its own input line. ` +
+    `Never borrow, repeat, or anticipate content from adjacent lines. ` +
+    `If the same word or phrase would appear in two consecutive output lines, you have made a boundary error — remove it from the earlier line and keep it only where it appears in the source. ` +
+    `For incomplete segments (no verb, or bare noun list), use the surrounding lines as context to understand meaning, but output ONLY a translation of the current line's own words: ` +
+    `Bare noun/app list → translate as neutral comma-separated list, no evaluative words added. ` +
+    `Incomplete clause fragment → translate as a natural fragment, do not complete it with content from the next line. ` +
+    `CONTEXT RULE: Read the full batch to understand the scene and speaker relationships before translating any single line. ` +
+    `Use that understanding to select the correct register, implied subject, and emotional tone — but never import specific words from other lines into the current line's translation. ` +
+
     langRules +
     nounHint;
 
@@ -802,17 +1185,53 @@ export async function translateSegments(
   // ── Step E: 배치 번역 (merged segments) ──────────────────────────────────
   try {
     for (let batchIdx = startBatch; batchIdx < mergedTotalBatches; batchIdx++) {
-      const offset  = batchIdx * BATCH_SIZE;
-      const batch   = mergedSegs.slice(offset, offset + BATCH_SIZE);
-      const userMsg = buildBatchMessage(batch, 0);
+      const offset = batchIdx * BATCH_SIZE;
+      const batch  = mergedSegs.slice(offset, offset + BATCH_SIZE);
 
       console.log(`[TRANSLATE] batch ${batchIdx + 1}/${mergedTotalBatches}, groups: ${batch.length}`);
 
+      // Build message array with optional sliding-window context from the
+      // immediately preceding batch. Including the prior turn as
+      // user/assistant context lets the model maintain pronoun reference,
+      // register, and name consistency across batch boundaries without any
+      // additional LLM call.
+      const messages: Array<{ role: string; content: string }> = [
+        { role: "system", content: systemPrompt },
+      ];
+
+      if (batchIdx > 0) {
+        const prevOffset = (batchIdx - 1) * BATCH_SIZE;
+        const prevBatch  = mergedSegs.slice(prevOffset, prevOffset + BATCH_SIZE);
+
+        // Compact context snippet: last 2 completed translations from the
+        // previous batch, stripped of sentence-final endings and capped at
+        // MAX_CONTEXT_WORDS words each, joined with " / ".
+        // This gives the model just enough cross-batch continuity for pronoun
+        // and register consistency without inflating the token budget with the
+        // full numbered list.
+        const MAX_CONTEXT_WORDS = 8;
+        const contextLines = mergedTranslations
+          .slice(Math.max(0, prevOffset + BATCH_SIZE - 2), prevOffset + BATCH_SIZE)
+          .filter(Boolean)
+          .map(line => {
+            const stripped = line
+              .replace(/[.!?。]$/, "")
+              .replace(/(습니다|니다|네요|거든요|ㄴ다|는다|요|죠|다)$/, "")
+              .trim();
+            const words = stripped.split(/\s+/);
+            return words.slice(0, MAX_CONTEXT_WORDS).join(" ");
+          })
+          .filter(line => line.length > 2)
+          .join(" / ");
+
+        messages.push({ role: "user",      content: buildBatchMessage(prevBatch, 0) });
+        messages.push({ role: "assistant", content: contextLines });
+      }
+
+      messages.push({ role: "user", content: buildBatchMessage(batch, 0) });
+
       const result = await llamaContext.completion({
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user",   content: userMsg       },
-        ],
+        messages,
         n_predict:   batch.length * 120,
         temperature: 0.15,
         top_p:       0.9,
@@ -824,12 +1243,12 @@ export async function translateSegments(
         mergedTranslations[offset + i] = translations[i];
       }
 
-      // Expand to original segment array for progress callback
-      const expandedPartial = expandGroupTranslations(mergedGroups, mergedTranslations, segments);
+      // Expand to deduplicated segment array for progress callback
+      const expandedPartial = expandGroupTranslations(mergedGroups, mergedTranslations, deduped);
       onProgress?.(
         offset + batch.length,
         mergedTotal,
-        mergeWithTranslations(segments, expandedPartial)
+        mergeWithTranslations(deduped, expandedPartial)
       );
 
       await saveCheckpoint(videoHash, {
@@ -847,26 +1266,26 @@ export async function translateSegments(
     }
   } catch (e) {
     console.error("[Gemma] Inference error, returning partial results:", e);
-    const partialExpanded = expandGroupTranslations(mergedGroups, mergedTranslations, segments);
-    return mergeWithTranslations(segments, partialExpanded);
+    const partialExpanded = expandGroupTranslations(mergedGroups, mergedTranslations, deduped);
+    return mergeWithTranslations(deduped, partialExpanded);
   }
 
   await deleteCheckpoint(videoHash);
 
   // ── Step F: Re-expand merged translations → original segment slots ────────
-  const translatedTexts = expandGroupTranslations(mergedGroups, mergedTranslations, segments);
+  const translatedTexts = expandGroupTranslations(mergedGroups, mergedTranslations, deduped);
 
-  // ── Step G: 번역 실패 세그먼트 재시도 (최대 2회, original segments) ───────
-  // Retries operate on original segments to fix expansion artifacts or LLM gaps.
+  // ── Step G: 번역 실패 세그먼트 재시도 (최대 2회, deduplicated segments) ────
+  // Retries operate on deduplicated segments to fix expansion artifacts or LLM gaps.
   // 조건 1: translated 텍스트가 비어있는 경우.
   // 조건 2: translated 텍스트가 원문 영어와 동일하고 원문 길이가 15자 초과인 경우.
   // 조건 3: 모델이 번호만 출력한 경우.
   const MAX_RETRY_ATTEMPTS = 2;
   for (let attempt = 0; attempt < MAX_RETRY_ATTEMPTS; attempt++) {
     const failedIndices: number[] = [];
-    for (let i = 0; i < segments.length; i++) {
+    for (let i = 0; i < deduped.length; i++) {
       const t   = translatedTexts[i];
-      const src = segments[i].text.trim();
+      const src = deduped[i].text.trim();
       if (!t || t.trim().length === 0) {
         failedIndices.push(i);
       } else if (t.trim() === src && src.length > 15) {
@@ -882,7 +1301,7 @@ export async function translateSegments(
     );
     if (!llamaContext) break;
 
-    const retryBatch = failedIndices.map((i) => segments[i]);
+    const retryBatch = failedIndices.map((i) => deduped[i]);
     const retryMsg   = buildBatchMessage(retryBatch, 0);
 
     try {
@@ -912,12 +1331,12 @@ export async function translateSegments(
 
   // ── Step H: Post-translation validation — force-retry ASCII pass-throughs ──
   const validatedTexts = await validateTranslations(
-    segments, translatedTexts, systemPrompt, targetLanguage, patterns
+    deduped, translatedTexts, systemPrompt, targetLanguage, patterns
   );
 
   // ── Step I: Assemble final segments + Netflix-style timing adjustment ─────
   const completed = adjustTimingsForReadability(
-    mergeWithTranslations(segments, validatedTexts)
+    mergeWithTranslations(deduped, validatedTexts)
   );
   console.log(`[Gemma] Translation complete: ${completed.length} segments.`);
   return completed;
