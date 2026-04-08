@@ -22,6 +22,7 @@ import { router } from "expo-router";
 import { usePlayerStore } from "../store/usePlayerStore";
 import { useSettingsStore } from "../store/useSettingsStore";
 import { LANGUAGES } from "../constants/languages";
+import { UrlInputModal } from "../components/UrlInputModal";
 
 // ── Thumbnail helper (graceful fallback if expo-video-thumbnails not installed) ──
 let getThumbnailAsync: ((uri: string, opts: { time: number }) => Promise<{ uri: string }>) | null = null;
@@ -552,6 +553,7 @@ export default function HomeScreen() {
   const [categories,       setCategories]       = useState<Category[]>([]);
   const [selectedCat,      setSelectedCat]      = useState<string>(DEFAULT_CATEGORY);
   const [langModalVisible, setLangModalVisible] = useState(false);
+  const [filePickerVisible, setFilePickerVisible] = useState(false); // ← 추가
   const [searchQuery,      setSearchQuery]      = useState("");
   const [searchActive,     setSearchActive]     = useState(false);
   const [sortOrder,        setSortOrder]        = useState<SortOrder>("recent");
@@ -568,6 +570,7 @@ export default function HomeScreen() {
   const [moveModal, setMoveModal] = useState<{ visible: boolean; file?: RecentFile }>({ visible: false });
 
   const setVideo = usePlayerStore((s) => s.setVideo);
+  const setYoutubeVideo = usePlayerStore((s) => s.setYoutubeVideo); // ← 추가
   const pendingFileRef = useRef<{ uri: string; name: string } | null>(null);
 
   // ── Load on mount ──────────────────────────────────────────────────────────
@@ -725,47 +728,49 @@ export default function HomeScreen() {
     pendingFileRef.current = null;
   }, []);
 
-  const pickVideo = async () => {
-    try {
-      const result = await DocumentPicker.getDocumentAsync({
-        type: ["video/*"],
-        copyToCacheDirectory: true,
-      });
-      if (result.canceled) return;
-      const file = result.assets[0];
-      const stableUri = await ensureFileUri(file.uri, file.name);
-      if (!stableUri) {
-        Alert.alert("오류", "파일을 캐시에 복사할 수 없습니다.");
-        return;
-      }
-      const autoCategory =
-        selectedCat !== DEFAULT_CATEGORY && selectedCat !== "__uncat__" && selectedCat !== "__fav__"
-          ? selectedCat : undefined;
+  // ── 새 핸들러: 로컬 파일 선택 후 처리 ─────────────────────────────────────
+  const handleLocalFilePicked = async (stableUri: string, name: string) => {
+    const fileSize = await getFileSize(stableUri);
+    const thumbUri = (await fetchThumbnail(stableUri, undefined)) ?? undefined;
+    const autoCategory =
+      selectedCat !== DEFAULT_CATEGORY &&
+      selectedCat !== "__uncat__" &&
+      selectedCat !== "__fav__"
+        ? selectedCat
+        : undefined;
+    const entry: RecentFile = {
+      uri: stableUri,
+      name,
+      category: autoCategory,
+      addedAt: Date.now(),
+      fileSize,
+      thumbnailUri: thumbUri,
+      subtitleStatus: "none",
+    };
+    setRecentFiles((prev) => {
+      const filtered = prev.filter((f) => f.uri !== stableUri);
+      return [entry, ...filtered].slice(0, 50);
+    });
+    setVideo(stableUri, name);
+    pendingFileRef.current = { uri: stableUri, name };
+    setLangModalVisible(true); // 기존 언어 선택 모달 그대로 사용
+  };
 
-      const fileSize = await getFileSize(stableUri);
-      // Duration is unknown at pick time; fetchThumbnail will try multiple time offsets
-      const thumbUri = await fetchThumbnail(stableUri, undefined) ?? undefined;
-
-      const entry: RecentFile = {
-        uri: stableUri,
-        name: file.name,
-        category: autoCategory,
-        addedAt: Date.now(),
-        fileSize,
-        thumbnailUri: thumbUri,
-        subtitleStatus: "none",
-      };
-
-      setRecentFiles((prev) => {
-        const filtered = prev.filter((f) => f.uri !== stableUri);
-        return [entry, ...filtered].slice(0, 50);
-      });
-      setVideo(stableUri, file.name);
-      pendingFileRef.current = { uri: stableUri, name: file.name };
-      setLangModalVisible(true);
-    } catch (e) {
-      Alert.alert("오류", "파일을 열 수 없습니다: " + String(e));
+  // ── 새 핸들러: URL (YouTube) 선택 후 처리 ─────────────────────────────────
+  const handleUrlPicked = (videoId: string, title: string, isYoutube: boolean) => {
+    if (isYoutube) {
+      setYoutubeVideo(videoId, title);
+      router.push("/youtube-player");
     }
+    // 일반 URL은 향후 확장 가능
+  };
+
+  // pickVideo 함수는 더 이상 버튼에서 직접 호출되지 않지만,
+  // UrlInputModal 내부에서 로컬 파일 선택 시에도 동일한 로직을 사용하므로 유지
+  const pickVideo = async () => {
+    // 실제로는 UrlInputModal이 대신 처리하므로 빈 함수로 두거나,
+    // 필요 시 내부에서 DocumentPicker를 호출할 수도 있음 (현재는 모달이 담당)
+    // 여기서는 모달이 모든 파일/URL 입력을 담당하므로 단순히 모달을 여는 용도로만 사용
   };
 
   const openRecent = async (file: RecentFile) => {
@@ -952,11 +957,14 @@ export default function HomeScreen() {
         <Text style={styles.tagline}>실시간 AI 자막 · 완전 무료</Text>
       </View>
 
-      {/* File open button */}
-      <TouchableOpacity style={styles.pickButton} onPress={pickVideo}>
+      {/* File open button — 이제 UrlInputModal을 통해 열림 */}
+      <TouchableOpacity 
+        style={styles.pickButton} 
+        onPress={() => setFilePickerVisible(true)}
+      >
         <Text style={styles.pickIcon}>📂</Text>
         <Text style={styles.pickText}>동영상 파일 열기</Text>
-        <Text style={styles.pickSub}>MP4, MKV, AVI, MOV</Text>
+        <Text style={styles.pickSub}>MP4, MKV, AVI, MOV 또는 YouTube URL</Text>
       </TouchableOpacity>
 
       {/* ── Recently played horizontal scroll ──────────────────────────────── */}
@@ -1193,6 +1201,14 @@ export default function HomeScreen() {
 
       {/* ── Modals ────────────────────────────────────────────────────────── */}
       <LangSetupModal visible={langModalVisible} onConfirm={goToProcessing} onCancel={handleCancelModal} />
+
+      {/* URL 입력 모달 (로컬 파일 + YouTube URL 지원) */}
+      <UrlInputModal
+        visible={filePickerVisible}
+        onClose={() => setFilePickerVisible(false)}
+        onLocalFilePicked={handleLocalFilePicked}
+        onUrlPicked={handleUrlPicked}
+      />
 
       <CategoryNameModal
         visible={catNameModal.visible}

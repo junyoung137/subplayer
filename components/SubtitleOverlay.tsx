@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -9,6 +9,7 @@ import {
 import { usePlayerStore, SubtitleSegment } from "../store/usePlayerStore";
 import { useSettingsStore } from "../store/useSettingsStore";
 import { SubtitleEditModal } from "./SubtitleEditModal";
+import { getLanguageProfile } from "../constants/languageProfiles";
 
 function cleanSubtitleText(text: string): string {
   if (!text) return '';
@@ -20,13 +21,22 @@ function cleanSubtitleText(text: string): string {
   return text.trim();
 }
 
-const MIN_DISPLAY_S  = 1.5;
+// ✅ BLANK 판정 패턴
+const BLANK_PATTERNS = ['[BLANK_AUDIO]', '[BLANK_VIDEO]', '[blank_audio]', '[silence]', '[SILENCE]'];
+function isBlankText(text: string): boolean {
+  if (!text || text.trim().length === 0) return true;
+  return BLANK_PATTERNS.some(p => text.includes(p));
+}
+
+// ✅ MIN_DISPLAY_S 단축: 1.5 → 0.5
+// BLANK 세그먼트가 점유하는 타임슬롯을 줄이고 자막 전환 반응성 개선
+const MIN_DISPLAY_S  = 0.5;
 const FADE_IN_MS     = 200;
 const FADE_OUT_MS    = 150;
 const SWITCH_DIP_MS  = 100;
 const POS_MIN        = 0.02;
 const POS_MAX        = 0.92;
-const LONG_PRESS_MS  = 500;   // 길게 누르기 판정 시간
+const LONG_PRESS_MS  = 500;
 
 function findActiveSubtitle(
   subtitles: SubtitleSegment[],
@@ -34,12 +44,29 @@ function findActiveSubtitle(
 ): SubtitleSegment | null {
   let lo = 0;
   let hi = subtitles.length - 1;
+  let lastEndedIdx = -1; // track largest startTime whose segment has already ended
+
   while (lo <= hi) {
     const mid = (lo + hi) >>> 1;
     const seg = subtitles[mid];
-    if (currentTime < seg.startTime)    hi = mid - 1;
-    else if (currentTime > seg.endTime) lo = mid + 1;
-    else                                return seg;
+    if (currentTime < seg.startTime) {
+      hi = mid - 1;
+    } else if (currentTime > seg.endTime) {
+      lastEndedIdx = mid; // this segment ended before currentTime
+      lo = mid + 1;
+    } else {
+      // startTime <= currentTime <= endTime
+      // ✅ BLANK 세그먼트는 표시하지 않음 (이중 방어)
+      if (isBlankText(seg.original)) return null;
+      return seg;
+    }
+  }
+
+  // No segment covers currentTime exactly (gap between segments, or past all segments).
+  // Fall back to the most recently ended segment so seek doesn't flash to empty.
+  if (lastEndedIdx >= 0) {
+    const fallback = subtitles[lastEndedIdx];
+    if (!isBlankText(fallback.original)) return fallback;
   }
   return null;
 }
@@ -51,6 +78,7 @@ export function SubtitleOverlay() {
   const subtitleMode        = useSettingsStore((s) => s.subtitleMode);
   const subtitlePositionPct = useSettingsStore((s) => s.subtitlePositionPct);
   const subtitleStyle       = useSettingsStore((s) => s.subtitleStyle ?? "outline");
+  const targetLanguage      = useSettingsStore((s) => s.targetLanguage);
   const update              = useSettingsStore((s) => s.update);
 
   const positionPctRef = useRef(subtitlePositionPct);
@@ -87,12 +115,10 @@ export function SubtitleOverlay() {
         isLongPressRef.current  = false;
         startPctRef.current     = positionPctRef.current;
 
-        // 길게 누르기 타이머 시작
         if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
         longPressTimerRef.current = setTimeout(() => {
           if (!isDraggingRef.current) {
             isLongPressRef.current = true;
-            // 편집 모달 오픈 (렌더링된 자막 기준)
             if (renderedSubRef.current) {
               setEditingSegment({ ...renderedSubRef.current });
             }
@@ -104,7 +130,6 @@ export function SubtitleOverlay() {
         const h = containerHeightRef.current;
         if (h <= 0) return;
 
-        // 일정 px 이상 움직이면 드래그로 판정 → 길게 누르기 취소
         if (Math.abs(gs.dy) > 6 || Math.abs(gs.dx) > 6) {
           if (!isDraggingRef.current) {
             isDraggingRef.current = true;
@@ -155,10 +180,12 @@ export function SubtitleOverlay() {
   const prevSeekVersion = useRef(0);
   const fadeAnim = useRef(new Animated.Value(0)).current;
 
-  // renderedSubRef를 항상 최신으로 유지
   useEffect(() => { renderedSubRef.current = renderedSub; }, [renderedSub]);
 
-  const candidate = findActiveSubtitle(subtitles, currentTime);
+  const candidate = useMemo(
+    () => findActiveSubtitle(subtitles, currentTime),
+    [subtitles, currentTime]
+  );
 
   useEffect(() => {
     const isSeeked = seekVersion !== prevSeekVersion.current;
@@ -215,6 +242,13 @@ export function SubtitleOverlay() {
     ? { top: containerHeight * activePct }
     : { top: "85%" as any };
 
+  const profile = getLanguageProfile(targetLanguage);
+  // Apply profile trailing-punctuation cleanup at display time only.
+  // renderedSub.translated is never mutated — only the rendered string changes.
+  const displayTranslated = renderedSub?.translated
+    ? renderedSub.translated.replace(profile.trailingPunctuationToStrip, "").trim()
+    : "";
+
   const showOriginal    = renderedSub && (subtitleMode === "original" || subtitleMode === "both") && renderedSub.original;
   const showTranslation = renderedSub && (subtitleMode === "translation" || subtitleMode === "both") && renderedSub.translated;
 
@@ -241,7 +275,7 @@ export function SubtitleOverlay() {
           style={[styles.outlineTranslated, { color: subtitleColor, fontSize: subtitleFontSize }]}
           numberOfLines={3}
         >
-          {cleanSubtitleText(renderedSub!.translated)}
+          {cleanSubtitleText(displayTranslated)}
         </Text>
       )}
     </Animated.View>
@@ -269,7 +303,7 @@ export function SubtitleOverlay() {
             style={[styles.pillTranslated, { color: subtitleColor, fontSize: subtitleFontSize }]}
             numberOfLines={3}
           >
-            {cleanSubtitleText(renderedSub!.translated)}
+            {cleanSubtitleText(displayTranslated)}
           </Text>
         </View>
       )}
@@ -295,7 +329,7 @@ export function SubtitleOverlay() {
           style={[styles.barTranslated, { color: subtitleColor, fontSize: subtitleFontSize }]}
           numberOfLines={3}
         >
-          {cleanSubtitleText(renderedSub!.translated)}
+          {cleanSubtitleText(displayTranslated)}
         </Text>
       )}
     </Animated.View>
@@ -314,7 +348,6 @@ export function SubtitleOverlay() {
       {subtitleStyle === "pill"    && renderPill()}
       {subtitleStyle === "bar"     && renderBar()}
 
-      {/* 자막 편집 모달 */}
       <SubtitleEditModal
         segment={editingSegment}
         onClose={handleEditClose}

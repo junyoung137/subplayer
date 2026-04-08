@@ -1,0 +1,17 @@
+{
+  "name": "realtimesub-subtitle-server",
+  "version": "1.0.0",
+  "description": "yt-dlp subtitle proxy for RealtimeSub",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.18.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
