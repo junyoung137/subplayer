@@ -72,48 +72,13 @@ const RE_NUMERIC_TOKEN = /^\d+([:.]\d+)*$/;
  * 장르별 페르소나 프롬프트 접두어.
  */
 const GENRE_PERSONA: Record<string, string> = {
-  "comedy":
-    "You specialize in comedy subtitles. " +
-    "Use natural casual Korean (구어체). " +
-    "Preserve humor, sarcasm, and exaggeration. " +
-    "Translate emotional tone and comedic intent, not just literal words. " +
-    "Use -요/-어요 endings for polite casual speech. " +
-    "Use 반말 (-아/-어/-지) only when speakers are clearly close.",
-
-  "news":
-    "You specialize in news subtitles. " +
-    "Use formal declarative Korean (-습니다/-입니다). " +
-    "Every sentence must end in -습니다 or -입니다. " +
-    "Use precise, neutral vocabulary. No colloquial expressions.",
-
-  "documentary":
-    "You specialize in documentary narration. " +
-    "Use formal explanatory Korean. " +
-    "Alternate naturally between -습니다 endings for facts " +
-    "and -ㄴ다/-는다 plain style for descriptive narration. " +
-    "Tone should be calm, authoritative, and informative.",
-
-  "education":
-    "You specialize in educational and lecture subtitles. " +
-    "Use polite formal Korean (-습니다/-ㅂ니다). " +
-    "Technical terms should be preserved or transliterated precisely. " +
-    "Sentence structure should be clear and logical. " +
-    "Avoid casual fillers.",
-
-  "tech lecture":
-    "You specialize in technology and programming subtitles. " +
-    "Use polite formal Korean (-습니다/-ㅂ니다). " +
-    "Keep all technical terms, variable names, and code keywords in English. " +
-    "Explanatory sentences should end in -습니다 or -됩니다.",
-
-  "gaming":
-    "You specialize in gaming content subtitles. " +
-    "Use casual informal Korean (반말, -아/-어/-지 endings). " +
-    "Preserve gamer slang and exclamations naturally. " +
-    "Energy and enthusiasm should match the source tone.",
-
-  "general":
-    "",
+  "tech lecture":  "You specialize in technology and programming subtitles.",
+  "comedy":        "You specialize in comedy subtitles. Preserve humor, sarcasm, irony, and exaggeration. Use casual, natural Korean (구어체). Translate the emotional tone and comedic intent, not just the literal words. Slang and idioms should be translated by feel and meaning. Translate idioms and slang by meaning, not literally. Examples: 'surprised you didn't save Facebook' in context of listing social media apps means 'surprised you didn't include/mention Facebook' → 'Facebook은 왜 빠뜨린 거예요?'. 'ready to go at 8:00 sharp' → '아침 8시 정각에 준비 완료'. 'mental health day' → '정신건강의 날 (하루 쉬는 날)'. 'that\\'s our old people like my parents' means Facebook is what old people (like her parents) use — dismissive teen attitude → '그건 저희 부모님 같은 아저씨 아줌마들이 쓰는 거죠.'. 'you don\\'t work here' said to someone = telling them they have no authority here → '여기서 일하지도 않잖아요'. 'are you firing me' = shocked reaction → '저 해고하시는 거예요?'.",
+  "news":          "You specialize in news subtitles, using formal and precise language.",
+  "documentary":   "You specialize in documentary narration, using descriptive language.",
+  "gaming":        "You specialize in gaming content, preserving gamer slang and terms.",
+  "education":     "You specialize in educational content for learners.",
+  "general":       "",
 };
 
 const COMMON_WORDS = new Set([
@@ -285,8 +250,8 @@ function isFillerText(text: string): boolean {
 // terminal punctuation, the gap threshold is relaxed to MERGE_CONTINUATION_GAP_S
 // so mid-clause splits like "I don't think we're" / "gonna be a good fit" stay
 // together and the LLM sees the full negated thought.
-const CONTINUATION_WORDS = /^(gonna|going|been|have|just|really|so|that|the|a|an|to|be|get)\b/i;
-const MERGE_CONTINUATION_GAP_S = 1.0; // relaxed gap for continuation-word merges
+const CONTINUATION_WORDS = /^(gonna|going|been|have|just|really|so|that|the|a|an|to|be|get|even|don't|i|and|in|until|like)\b/i;
+const MERGE_CONTINUATION_GAP_S = 1.5; // relaxed gap for continuation-word merges
 
 /**
  * Merges consecutive short/fragment segments from yt-dlp word-level timestamps
@@ -431,6 +396,52 @@ function expandGroupTranslations(
     const translation         = groupTranslations[gi] ?? "";
     const { originalIndices } = group;
 
+    if (originalIndices.length >= 3) {
+      const charLength = translation.replace(/\s+/g, "").length;
+      const charsPerSlot = charLength / originalIndices.length;
+
+      if (charsPerSlot < 6) {
+        const sentences = translation.split(/(?<=[.!?])\s+/).filter(Boolean);
+
+        if (sentences.length >= 2) {
+          const firstSentences  = sentences.slice(0, Math.ceil(sentences.length / 2)).join(" ");
+          const secondSentences = sentences.slice(Math.ceil(sentences.length / 2)).join(" ");
+          const firstCharRatio  = firstSentences.length /
+            (firstSentences.length + secondSentences.length);
+          const totalDuration =
+            originalSegments[originalIndices[originalIndices.length - 1]].end -
+            originalSegments[originalIndices[0]].start;
+          const splitTime =
+            originalSegments[originalIndices[0]].start + totalDuration * firstCharRatio;
+
+          let splitSlot = Math.max(1, Math.floor(originalIndices.length / 2));
+          for (let k = 1; k < originalIndices.length; k++) {
+            if (originalSegments[originalIndices[k]].start >= splitTime) {
+              splitSlot = k;
+              break;
+            }
+          }
+
+          result[originalIndices[0]] = firstSentences;
+          for (let k = 1; k < splitSlot; k++) {
+            result[originalIndices[k]] = "";
+          }
+          result[originalIndices[splitSlot]] = secondSentences;
+          for (let k = splitSlot + 1; k < originalIndices.length; k++) {
+            result[originalIndices[k]] = "";
+          }
+
+        } else {
+          result[originalIndices[0]] = translation;
+          for (let k = 1; k < originalIndices.length; k++) {
+            result[originalIndices[k]] = "";
+          }
+        }
+
+        continue; // skip word-proportional split below
+      }
+    }
+
     if (originalIndices.length === 1) {
       result[originalIndices[0]] = translation;
       continue;
@@ -441,7 +452,7 @@ function expandGroupTranslations(
       continue;
     }
 
-    // Distribute translation words proportionally by source character count
+    // ── Multi-slot word-proportional split ──────────────────────────────
     const totalSrcChars = originalIndices.reduce(
       (sum, idx) => sum + originalSegments[idx].text.trim().length, 0
     );
@@ -451,8 +462,8 @@ function expandGroupTranslations(
       continue;
     }
 
-    const words = translation.split(/\s+/).filter(Boolean);
-    let wordOffset = 0;
+    const words      = translation.split(/\s+/).filter(Boolean);
+    let   wordOffset = 0;
 
     for (let k = 0; k < originalIndices.length; k++) {
       const idx    = originalIndices[k];
@@ -468,33 +479,19 @@ function expandGroupTranslations(
       }
     }
 
-    // Post-expansion deduplication within the group:
-    // If two adjacent slots ended up identical, or one is a substring of the
-    // other, clear the shorter one so the viewer doesn't see the same phrase
-    // repeated. The longer slot keeps the translation; the shorter becomes "".
-    // Also strip any shared suffix/prefix overlap > 6 characters between
-    // consecutive slots in the same group.
-    for (let k = 0; k < originalIndices.length - 1; k++) {
-      const idxA = originalIndices[k];
-      const idxB = originalIndices[k + 1];
+    // Backward dedup pass: clear earlier slot when identical to or
+    // contained in a later slot, strip suffix/prefix overlap > 6 chars
+    for (let k = originalIndices.length - 1; k > 0; k--) {
+      const idxA = originalIndices[k - 1];
+      const idxB = originalIndices[k];
       const a    = result[idxA].trim();
       const b    = result[idxB].trim();
-
       if (!a || !b) continue;
-
-      // Case 1: identical or one contains the other — keep the longer, clear the shorter.
-      if (a === b || a.includes(b) || b.includes(a)) {
-        if (a.length >= b.length) {
-          result[idxB] = "";
-        } else {
-          result[idxA] = "";
-        }
-        continue;
-      }
-
-      // Case 2: shared suffix/prefix overlap longer than 6 chars — strip from the later slot.
+      if (a === b)        { result[idxA] = ""; continue; }
+      if (a.includes(b)) { result[idxA] = ""; continue; }
+      if (b.includes(a)) { result[idxB] = ""; continue; }
       const OVERLAP_MIN = 6;
-      const maxCheck = Math.min(a.length, b.length);
+      const maxCheck    = Math.min(a.length, b.length);
       for (let len = maxCheck; len >= OVERLAP_MIN; len--) {
         if (a.endsWith(b.slice(0, len))) {
           result[idxB] = b.slice(len).trimStart();
@@ -1137,11 +1134,18 @@ export async function translateSegments(
     `1. OUTPUT FORMAT ` +
     `Every input line must produce exactly one output line with the same number. ` +
     `Filler-only input (single punctuation, digits only) → output as-is. ` +
+    `If the source line is a short fragment (3 words or fewer), keep the translation proportionally short and concise — do not expand into a full sentence. A fragment input should produce a fragment output. ` +
+    `Each output line must cover ONLY its own input line's content. The Korean translation length must be proportional to the English source length. A 3-word English fragment must produce a short Korean fragment — not a full sentence summarizing multiple lines. If you find yourself writing more than 15 Korean characters for a source line under 4 words, you are borrowing from adjacent lines — stop. ` +
 
     `2. MEANING FIRST ` +
     `Translate the intended meaning, not word-for-word. ` +
     `When a word's literal meaning is physically impossible in context, use the contextually correct meaning instead. ` +
     `Do not add meaning that is not in the source line. ` +
+
+    `2b. DEMONSTRATIVE REFERENCE DIRECTION ` +
+    `When 'that', 'those', or 'it' is used to dismiss or mock a thing (object, app, service, concept) as old, uncool, or inferior, the predicate of oldness or contempt must attach to THE THING ITSELF in Korean — not to the people associated with it. ` +
+    `Example: 'that's our old people like my parents' (dismissing Facebook as outdated) → '그건 우리 부모님처럼 완전 구식이잖아요' NOT '그런 건 부모님 같은 아저씨 아줌마들이나 쓰는 거죠'. ` +
+    `The distinction: Korean must predicate 구식/올드함 onto the subject ('그건 구식이에요'), not onto who uses it. ` +
 
     `3. NEGATION ` +
     `Preserve all negation (not, don't, won't, can't, never). ` +
@@ -1190,45 +1194,34 @@ export async function translateSegments(
 
       console.log(`[TRANSLATE] batch ${batchIdx + 1}/${mergedTotalBatches}, groups: ${batch.length}`);
 
-      // Build message array with optional sliding-window context from the
-      // immediately preceding batch. Including the prior turn as
-      // user/assistant context lets the model maintain pronoun reference,
-      // register, and name consistency across batch boundaries without any
-      // additional LLM call.
       const messages: Array<{ role: string; content: string }> = [
         { role: "system", content: systemPrompt },
       ];
 
+      // Add previous batch as context if available (sliding window of 1 batch)
       if (batchIdx > 0) {
         const prevOffset = (batchIdx - 1) * BATCH_SIZE;
         const prevBatch  = mergedSegs.slice(prevOffset, prevOffset + BATCH_SIZE);
+        const prevResult = mergedTranslations
+          .slice(prevOffset, prevOffset + BATCH_SIZE)
+          .map((t, i) => `${i + 1}. ${t}`)
+          .join("\n");
 
-        // Compact context snippet: last 2 completed translations from the
-        // previous batch, stripped of sentence-final endings and capped at
-        // MAX_CONTEXT_WORDS words each, joined with " / ".
-        // This gives the model just enough cross-batch continuity for pronoun
-        // and register consistency without inflating the token budget with the
-        // full numbered list.
-        const MAX_CONTEXT_WORDS = 8;
-        const contextLines = mergedTranslations
-          .slice(Math.max(0, prevOffset + BATCH_SIZE - 2), prevOffset + BATCH_SIZE)
-          .filter(Boolean)
-          .map(line => {
-            const stripped = line
-              .replace(/[.!?。]$/, "")
-              .replace(/(습니다|니다|네요|거든요|ㄴ다|는다|요|죠|다)$/, "")
-              .trim();
-            const words = stripped.split(/\s+/);
-            return words.slice(0, MAX_CONTEXT_WORDS).join(" ");
-          })
-          .filter(line => line.length > 2)
-          .join(" / ");
-
-        messages.push({ role: "user",      content: buildBatchMessage(prevBatch, 0) });
-        messages.push({ role: "assistant", content: contextLines });
+        messages.push({
+          role: "user",
+          content: buildBatchMessage(prevBatch, 0),
+        });
+        messages.push({
+          role: "assistant",
+          content: prevResult,
+        });
       }
 
-      messages.push({ role: "user", content: buildBatchMessage(batch, 0) });
+      // Current batch
+      messages.push({
+        role: "user",
+        content: buildBatchMessage(batch, 0),
+      });
 
       const result = await llamaContext.completion({
         messages,
