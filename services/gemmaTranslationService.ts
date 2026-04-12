@@ -45,10 +45,12 @@ const NETFLIX_MIN_CHARS_FOR_SPLIT = 15;
 // expand: gap 기준 자연 분할 임계값
 const EXPAND_GAP_THRESHOLD_S = 0.8;
 
-// ── [핵심 수정] 병합 금지 gap 임계값 ──────────────────────────────────────────
-// 이전: MERGE_GAP_HARD_LIMIT_S = 1.5 (너무 관대 — "Yeah"→"Yes" 0.76s gap도 못 막음)
-// 수정: 0.6s — 대화 흐름상 0.6s 이상이면 다른 발화자 or 다른 문장
+// 기본 병합 gap 상한
 const MERGE_GAP_HARD_LIMIT_S = 0.6;
+
+// [Fix] 발화자 전환이 강하게 의심될 때 적용하는 더 엄격한 gap 상한
+// Q→A 패턴이나 지시→반응 패턴에서는 gap이 짧아도 분리
+const MERGE_GAP_SPEAKER_CHANGE_S = 0.35;
 
 // ── 소셜미디어 앱명 정규화 ────────────────────────────────────────────────────
 const SOCIAL_MEDIA_NORMALIZATION: Record<string, string> = {
@@ -60,27 +62,40 @@ const SOCIAL_MEDIA_NORMALIZATION: Record<string, string> = {
 
 // ── 환각 / 오염 패턴 ──────────────────────────────────────────────────────────
 const RE_HALLUCINATED_TERMS_KO = /자기야[,，\s]*|자기[,，\s]+|여보[,，\s]*|오빠[,，\s]*|언니[,，\s]*/g;
-// [수정] baby는 비격식 호칭어(informal address)로, 자기야가 아닌 이름/생략으로 처리해야 함
-// HALLUCINATION_GUARD는 "honey/sweetie/darling/dear/oppa/unnie"만 유지 — baby 제외
 const RE_HALLUCINATION_GUARD = /\b(honey|sweetie|darling|dear|oppa|unnie)\b/i;
 const RE_OUTPUT_CORRUPTION = /^##\s*Translation\s*:?\s*/i;
 const RE_UNTRANSLATED_MARKER = /^\[미번역\]\s*/;
 const RE_STAGE_DIRECTION_KO = /\(혼잣말\)|\(독백\)|\(방백\)|\(내레이션\)/g;
 const RE_PARENS_ANY = /\([^)]*\)/g;
 const RE_ENGLISH_WORD = /\b([a-zA-Z]{3,})\b/g;
-const RE_NUMERIC_TOKEN = /^\d+([:.]\d+)*$/;
+const RE_NUMERIC_TOKEN = /^\d+([:.]\d+)*[%]?$|^\d+(st|nd|rd|th)$/i;
 
-// ── [Fix 1] 숫자 접두사 오염 패턴 ────────────────────────────────────────────
+// ── 접두사 / 지시사 오염 패턴 ────────────────────────────────────────────────
 const RE_NUMBERED_PREFIX = /^\d+\.\s+/;
-
-// ── [Fix 2] 어색한 지시사 패턴 ────────────────────────────────────────────────
 const RE_AWKWARD_DEMONSTRATIVE = /^저것은\s/;
 const RE_AWKWARD_DEMONSTRATIVE_I = /^저것이\s/;
+
+// ── [Fix A] 발화자 전환 신호 패턴 ────────────────────────────────────────────
+// 이 패턴으로 끝나는 세그먼트 뒤에 오는 세그먼트는 다른 발화자일 가능성이 높음
+// 질문, 지시, 완결 문장 → 다음 세그먼트는 응답일 가능성
+const RE_LIKELY_QUESTION_END = /\?$|\bright\b|\bunderstood\b|\bunderstand\b|\bgot it\b/i;
+// 다음 세그먼트가 응답/백채널일 가능성이 높은 패턴
+const RE_LIKELY_RESPONSE_START = /^(yes|no|yeah|nope|yep|nah|i do|i don'?t|not really|of course|okay|ok|sure|right|hmm|uh|oh|well|i|we|that|it'?s|what|why|how)\b/i;
+
+// ── [Fix B] 환각 추가 내용 감지 패턴 ─────────────────────────────────────────
+// 원문에 없는 내용이 번역문에 추가된 경우 감지
+// "don't work here" → "여기서 일하지도 않잖아요" (O) vs "놀랍네요" 추가 (X)
+const RE_HALLUCINATED_ADDITION_KO = /놀랍네요|놀랍습니다|놀랍군요|이상하네요|이상합니다/g;
+
+// ── [Fix C] 시간대 후처리 패턴 ───────────────────────────────────────────────
+// "until X:00 in the morning" → X시 이후면 새벽/아침 판단
+// 번역문에서 잘못된 시간대 표현 교정
+const RE_MORNING_TIME_KO = /아침\s*(\d{1,2})시/g;
 
 // ── 장르 페르소나 ─────────────────────────────────────────────────────────────
 const GENRE_PERSONA: Record<string, string> = {
   "tech lecture": "You specialize in technology and programming subtitles.",
-  "comedy": "You specialize in comedy subtitles. Preserve humor, sarcasm, irony, and casual tone (구어체). Translate emotional intent and comedic meaning, not just literal words.",
+  "comedy": "You specialize in comedy subtitles. Preserve humor, sarcasm, irony, and casual tone. Translate emotional intent and comedic meaning, not just literal words.",
   "news": "You specialize in news subtitles using formal, precise language.",
   "documentary": "You specialize in documentary narration using descriptive language.",
   "gaming": "You specialize in gaming content, preserving gamer slang and terms.",
@@ -104,6 +119,19 @@ const COMMON_WORDS = new Set([
   "With","Without","About","Above","Below","Between","Through","During",
 ]);
 
+// ── 보호 고유명사 (번역 금지) ─────────────────────────────────────────────────
+const PROTECTED_PROPER_NOUNS = new Set([
+  "Siri", "Alexa", "Google", "ChatGPT", "GPT", "AI",
+  "Snapchat", "Pinterest", "Instagram", "Vine", "Twitter", "Facebook",
+  "TikTok", "YouTube", "LinkedIn", "Reddit", "Discord", "Twitch",
+  "Starbucks", "iPhone", "Android", "iOS", "macOS", "Windows",
+  "Excel", "PowerPoint", "Publisher", "Word", "Outlook",
+  "Skype", "Zoom", "Teams", "Slack",
+]);
+
+// HR은 별도 처리 — 고유명사 추출 제외 + 후처리에서 보호
+const PROTECTED_ACRONYMS = new Set(["HR", "CEO", "CFO", "CTO", "IT", "PR", "VP"]);
+
 let llamaContext: LlamaContext | null = null;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -118,6 +146,51 @@ function normalizeSocialMediaNames(text: string): string {
     r = r.replace(new RegExp(`(?<![a-zA-Z])${escapeRegex(lower)}(?![a-zA-Z])`, "gi"), proper);
   }
   return r;
+}
+
+// ── 숫자/시간 토큰 마스킹 ────────────────────────────────────────────────────
+interface MaskedToken { placeholder: string; original: string; }
+
+function maskNumericTokens(text: string): { masked: string; tokens: MaskedToken[] } {
+  const tokens: MaskedToken[] = [];
+  const RE_MASK = /\b(\d{1,2}:\d{2}(?::\d{2})?(?:\s*(?:AM|PM|am|pm))?|\d+(?:\.\d+)?%|\d+(st|nd|rd|th)|\d+)\b/gi;
+  const masked = text.replace(RE_MASK, (match) => {
+    const ph = `__NUM${tokens.length}__`;
+    tokens.push({ placeholder: ph, original: match });
+    return ph;
+  });
+  return { masked, tokens };
+}
+
+function restoreNumericTokens(text: string, tokens: MaskedToken[]): string {
+  let r = text;
+  // 역순으로 복원 — __NUM10__이 __NUM1__에 포함되는 오치환 방지
+  for (let i = tokens.length - 1; i >= 0; i--) {
+    r = r.replace(new RegExp(escapeRegex(tokens[i].placeholder), "g"), tokens[i].original);
+  }
+  return r;
+}
+
+// ── [Fix A] 발화자 전환 가능성 판단 ──────────────────────────────────────────
+// prev 세그먼트 끝과 curr 세그먼트 시작을 보고 발화자 전환 가능성을 반환
+// true면 이 경계에서 병합을 더 엄격하게 제한
+function likelySpeakerChange(prevText: string, currText: string, gap: number): boolean {
+  const prev = prevText.trim();
+  const curr = currText.trim();
+
+  // gap이 충분히 크면 기본 로직에서 이미 분리됨 — 여기선 짧은 gap에서의 판단
+  if (gap >= MERGE_GAP_HARD_LIMIT_S) return false;
+
+  // 이전이 질문으로 끝나고 현재가 응답 패턴이면 전환 가능성 높음
+  if (RE_LIKELY_QUESTION_END.test(prev) && RE_LIKELY_RESPONSE_START.test(curr)) return true;
+
+  // 이전이 완결 문장(마침표/느낌표)이고 현재가 백채널/단답이면 전환 가능성
+  if (/[.!]$/.test(prev) && /^(yes|no|yeah|nope|hmm|uh|oh|ok|okay|right|sure|i do|i don't)\b/i.test(curr)) return true;
+
+  // 이전이 단답(yes/no 계열)이고 현재가 그렇지 않으면 전환 가능성
+  if (/^(yes|no|yeah|nope|hmm|uh|oh|ok|okay|right|sure)\.?$/i.test(prev) && curr.split(/\s+/).length >= 3) return true;
+
+  return false;
 }
 
 // ── Model lifecycle ───────────────────────────────────────────────────────────
@@ -159,7 +232,11 @@ function deduplicateOverlappingSegments(segments: TranslationSegment[]): Transla
       const incoming = seg.text.trim().split(/\s+/).filter(Boolean);
       const seen = new Set(accWords);
       for (const w of incoming) {
-        if (!seen.has(w.toLowerCase())) { accText += " " + w; accWords.push(w.toLowerCase()); seen.add(w.toLowerCase()); }
+        if (!seen.has(w.toLowerCase())) {
+          accText += " " + w;
+          accWords.push(w.toLowerCase());
+          seen.add(w.toLowerCase());
+        }
       }
       accEnd = Math.max(accEnd, seg.end);
     } else {
@@ -177,25 +254,12 @@ function isFillerText(text: string): boolean {
   return text.trim().length === 0 || /^[\d\s.,;:!?'"()[\]-]+$/.test(text.trim());
 }
 
-// ── [핵심 수정] isShortIndependent — 1~3단어 독립 발화 보호 ────────────────────
-/**
- * 이전 isSingleWordIndependent(1단어만)에서 확장.
- * 1~3단어이면서 완결된 의미 단위인 경우 병합 금지.
- *
- * 보호 케이스:
- *   1) 1단어 물음표   — "PowerPoint?", "Publisher?"
- *   2) yes/no 계열    — "No", "Yes", "Yeah", "Nope", "Not really", "Okay yes"
- *   3) 감탄사/호응    — "Hmm", "Wow", "Oh", "That's funny"
- *   4) 단일 고유명사  — "Amy", "Twitter" (대문자 시작 1단어)
- *   5) 짧은 완결 동사 — "I do", "I will", "You do"
- *   6) 감정/반응 짧은 문장 — 3단어 이하 + 마침표/느낌표로 끝
- */
+// ── isShortIndependent — 1~3단어 독립 발화 보호 ───────────────────────────────
 function isShortIndependent(t: string): boolean {
   const trimmed = t.trim();
   const words = trimmed.split(/\s+/).filter(Boolean);
   const wc = words.length;
 
-  // 4단어 이상은 보호 대상 아님
   if (wc === 0 || wc > 3) return false;
 
   const word = words[0];
@@ -203,7 +267,7 @@ function isShortIndependent(t: string): boolean {
   // 케이스 1: 단일 단어 물음표
   if (wc === 1 && word.endsWith("?")) return true;
 
-  // 케이스 2: yes/no 계열 (단어 수 무관, 3단어 이하)
+  // 케이스 2: yes/no 계열
   if (/^(no|yes|yeah|nope|yep|nah|not\s+really|okay\s+yes|alright|sure|right)$/i.test(trimmed)) return true;
 
   // 케이스 3: 감탄사/호응어 (1단어)
@@ -213,20 +277,18 @@ function isShortIndependent(t: string): boolean {
   if (wc === 1 && /^[A-Z][a-zA-Z]{1,11}$/.test(word)) return true;
 
   // 케이스 5: 짧은 완결 동사 구문 ("I do", "I will", "You do", "I get it")
-  if (wc <= 3 && /^(i|you|we|they)\s+(do|did|will|won't|can|can't|get|got|know|see|am|was)$/i.test(trimmed)) return true;
+  if (wc <= 3 && /^(i|you|we|they)\s+(do|did|will|won't|can|can't|get|got|know|see|am|was)(\s+\w+)?$/i.test(trimmed)) return true;
 
   // 케이스 6: 2~3단어 + 마침표/느낌표 (완결된 짧은 문장)
-  // "That's funny.", "I see.", "Me too." 등
   if (wc >= 2 && wc <= 3 && /[.!]$/.test(trimmed)) return true;
 
-  // 케이스 7: "That's [형용사]" 패턴 — "That's funny", "That's great"
+  // 케이스 7: "That's [형용사]" 패턴
   if (wc === 2 && /^that's\s+\w+$/i.test(trimmed)) return true;
 
   return false;
 }
 
 // ── Fragment merging ──────────────────────────────────────────────────────────
-// merge 상한: 이 단어 수 초과 시 문장 미완성이어도 더 이상 붙이지 않음
 const MAX_MERGE_WORDS = 12;
 
 function mergeFragments(segments: TranslationSegment[]): MergedGroup[] {
@@ -241,58 +303,64 @@ function mergeFragments(segments: TranslationSegment[]): MergedGroup[] {
 
     if (isFiller(seg.text)) {
       groups.push({ start: seg.start, end: seg.end, text: seg.text, originalIndices: [i] });
-      i++; continue;
+      i++;
+      continue;
     }
 
-    // [핵심 수정] 독립 보호 대상 → 병합 없이 바로 push
     if (isShortIndependent(seg.text)) {
       groups.push({ start: seg.start, end: seg.end, text: seg.text, originalIndices: [i] });
-      i++; continue;
+      i++;
+      continue;
     }
 
-    let group: MergedGroup = { start: seg.start, end: seg.end, text: seg.text.trim(), originalIndices: [i] };
+    let group: MergedGroup = {
+      start: seg.start,
+      end: seg.end,
+      text: seg.text.trim(),
+      originalIndices: [i],
+    };
     let j = i + 1;
 
     while (j < segments.length) {
       const next = segments[j];
       if (isFiller(next.text)) break;
-
-      // 다음 세그먼트가 독립 보호 대상이면 현재 병합 중단
       if (isShortIndependent(next.text)) break;
 
       const gap = next.start - group.end;
       const wc = group.text.split(/\s+/).length;
 
-      // [핵심 수정] gap 하드 리밋: 0.6s 이상이면 병합 중단
-      if (gap >= MERGE_GAP_HARD_LIMIT_S) break;
+      // [Fix A] 발화자 전환 가능성이 높은 경우 더 엄격한 gap 적용
+      const speakerChange = likelySpeakerChange(group.text, next.text, gap);
+      const effectiveLimit = speakerChange ? MERGE_GAP_SPEAKER_CHANGE_S : MERGE_GAP_HARD_LIMIT_S;
 
+      if (gap >= effectiveLimit) break;
       if (wc >= MAX_MERGE_WORDS) break;
 
       if (!isSentenceEnd(group.text)) {
-        group.text += " " + next.text.trim(); group.end = next.end; group.originalIndices.push(j); j++; continue;
+        group.text += " " + next.text.trim();
+        group.end = next.end;
+        group.originalIndices.push(j);
+        j++;
+        continue;
       }
-      if (wc < 6 && gap < 0.4) {
-        // gap 기준도 함께 강화 (1.2 → 0.4)
-        group.text += " " + next.text.trim(); group.end = next.end; group.originalIndices.push(j); j++; continue;
+      if (wc < 6 && gap < 0.4 && !speakerChange) {
+        group.text += " " + next.text.trim();
+        group.end = next.end;
+        group.originalIndices.push(j);
+        j++;
+        continue;
       }
       if (isBackchannel(group.text) && wc <= 3) break;
       break;
     }
 
-    groups.push(group); i = j;
+    groups.push(group);
+    i = j;
   }
   return groups;
 }
 
-// ── [핵심 수정] enforceSentence — 역할 대폭 축소 ─────────────────────────────
-/**
- * 변경:
- *   1) isShortIndependent로 보호 범위 확장 (기존 isSingleWordIndependent → 1~3단어)
- *   2) gap ≥ MERGE_GAP_HARD_LIMIT_S → 병합 금지 (0.6s)
- *   3) 병합 기준: 3단어 미만 → 2단어 미만 (더 보수적)
- *      — "I do" 같은 2단어도 독립 유지
- *   4) buffer 자체가 isShortIndependent이면 절대 병합 안 함
- */
+// ── enforceSentence ───────────────────────────────────────────────────────────
 function enforceSentence(groups: MergedGroup[]): MergedGroup[] {
   const result: MergedGroup[] = [];
   let buffer: MergedGroup | null = null;
@@ -300,23 +368,22 @@ function enforceSentence(groups: MergedGroup[]): MergedGroup[] {
   for (const g of groups) {
     if (!buffer) { buffer = { ...g }; continue; }
 
-    // [핵심 수정] buffer 또는 다음 그룹이 독립 보호 대상이면 병합 면제
     if (isShortIndependent(buffer.text) || isShortIndependent(g.text)) {
       result.push(buffer);
       buffer = { ...g };
       continue;
     }
 
-    // gap 하드 리밋
     const gap = g.start - buffer.end;
-    if (gap >= MERGE_GAP_HARD_LIMIT_S) {
+
+    // [Fix A] 여기서도 발화자 전환 체크
+    const speakerChange = likelySpeakerChange(buffer.text, g.text, gap);
+    if (speakerChange || gap >= MERGE_GAP_HARD_LIMIT_S) {
       result.push(buffer);
       buffer = { ...g };
       continue;
     }
 
-    // [핵심 수정] 병합 기준: 2단어 미만일 때만 (기존 3 → 2)
-    // 실질적으로 1단어 미완성 프래그먼트("are")만 병합
     if (buffer.text.split(/\s+/).length < 2) {
       buffer.text += " " + g.text;
       buffer.end = g.end;
@@ -466,7 +533,7 @@ function distributeChunksToSlots(chunks: string[], slotCount: number): string[] 
   return result;
 }
 
-// ── expandGroupTranslations ────────────────────────────────────────────────────
+// ── expandGroupTranslations ───────────────────────────────────────────────────
 function expandGroupTranslations(
   groups: MergedGroup[],
   groupTranslations: string[],
@@ -488,7 +555,10 @@ function expandGroupTranslations(
     if (!RE_HALLUCINATION_GUARD.test(groupSrc)) {
       translation = translation.replace(RE_HALLUCINATED_TERMS_KO, "").trim();
     }
-    if (!translation) { for (const idx of originalIndices) result[idx] = originalSegments[idx].text; continue; }
+    if (!translation) {
+      for (const idx of originalIndices) result[idx] = originalSegments[idx].text;
+      continue;
+    }
 
     if (originalIndices.length === 1) {
       result[originalIndices[0]] = translation;
@@ -509,13 +579,9 @@ function expandGroupTranslations(
     const breakPoints = findNaturalBreakPoints(originalIndices, originalSegments);
 
     if (breakPoints.length === 0) {
-      if (originalIndices.length === 1) {
-        result[originalIndices[0]] = translation;
-      } else {
-        const chunks = splitIntoMeaningChunks(translation);
-        const distributed = distributeChunksToSlots(chunks, originalIndices.length);
-        for (let k = 0; k < originalIndices.length; k++) result[originalIndices[k]] = distributed[k] ?? "";
-      }
+      const chunks = splitIntoMeaningChunks(translation);
+      const distributed = distributeChunksToSlots(chunks, originalIndices.length);
+      for (let k = 0; k < originalIndices.length; k++) result[originalIndices[k]] = distributed[k] ?? "";
     } else {
       distributeByBreakPoints(translation, originalIndices, breakPoints, originalSegments, result);
     }
@@ -603,7 +669,6 @@ function distributeByBreakPoints(
 
   const chunks = splitIntoMeaningChunks(translation);
   const totalChunks = chunks.length;
-
   let chunkOffset = 0;
 
   for (let si = 0; si < slotGroups.length; si++) {
@@ -660,13 +725,16 @@ function extractProperNounCandidates(segments: TranslationSegment[]): string[] {
     while ((m = allPat.exec(seg.text)) !== null) {
       const w = m[1];
       if (COMMON_WORDS.has(w)) continue;
+      if (PROTECTED_PROPER_NOUNS.has(w)) continue;
+      if (PROTECTED_ACRONYMS.has(w)) continue;
       const e = stats.get(w) ?? { mid: 0, first: 0 };
       if (firstWords.has(w)) e.first++; else e.mid++;
       stats.set(w, e);
     }
   }
   const result: string[] = [];
-  for (const [w, { mid, first }] of stats) if (mid * 1.5 + first * 0.5 >= PROPER_NOUN_MIN_COUNT) result.push(w);
+  for (const [w, { mid, first }] of stats)
+    if (mid * 1.5 + first * 0.5 >= PROPER_NOUN_MIN_COUNT) result.push(w);
   return result;
 }
 
@@ -674,10 +742,15 @@ async function transliterateProperNouns(nouns: string[], targetLanguage: string)
   if (!llamaContext || nouns.length === 0) return {};
   const r = await llamaContext.completion({
     messages: [
-      { role: "system", content: `Transliterate each proper noun into ${targetLanguage} phonetically.\nOutput ONLY 'English=Transliteration' lines.` },
+      {
+        role: "system",
+        content: `Transliterate each proper noun into ${targetLanguage} phonetically.\nOutput ONLY 'English=Transliteration' lines.`,
+      },
       { role: "user", content: nouns.join("\n") },
     ],
-    n_predict: nouns.length * 20, temperature: 0.1, top_p: 0.9,
+    n_predict: nouns.length * 20,
+    temperature: 0.1,
+    top_p: 0.9,
     stop: ["</s>", "<end_of_turn>", "<|end|>"],
   });
   const dict: Record<string, string> = {};
@@ -690,7 +763,11 @@ async function transliterateProperNouns(nouns: string[], targetLanguage: string)
   return dict;
 }
 
-async function buildProperNounDict(segments: TranslationSegment[], videoHash: string, targetLanguage: string): Promise<Record<string, string>> {
+async function buildProperNounDict(
+  segments: TranslationSegment[],
+  videoHash: string,
+  targetLanguage: string
+): Promise<Record<string, string>> {
   const stored = await AsyncStorage.getItem(properNounKey(videoHash));
   const existing: Record<string, string> = stored ? JSON.parse(stored) : {};
   const candidates = extractProperNounCandidates(segments);
@@ -736,11 +813,67 @@ function applyProperNounFixes(text: string, patterns: CompiledNounPattern[]): st
 
 // ── Text cleaning ─────────────────────────────────────────────────────────────
 function cleanWhisperText(text: string): string {
-  return text.replace(/\.{2,}$/, "").replace(/(?<!\()[^)]*\)/g, "").replace(/(?<!\[)[^\]]*\]/g, "").replace(/\s{2,}/g, " ").trim();
+  return text
+    .replace(/\.{2,}$/, "")
+    .replace(/(?<!\()[^)]*\)/g, "")
+    .replace(/(?<!\[)[^\]]*\]/g, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
 }
 
-function buildBatchMessage(batch: TranslationSegment[]): string {
-  return batch.map((seg, i) => `${i + 1}. ${normalizeSocialMediaNames(cleanWhisperText(seg.text))}`).join("\n");
+// ── buildBatchMessage — 숫자/시간 토큰 마스킹 포함 ───────────────────────────
+function buildBatchMessage(batch: TranslationSegment[]): {
+  message: string;
+  tokenMaps: MaskedToken[][];
+} {
+  const tokenMaps: MaskedToken[][] = [];
+  const lines: string[] = [];
+
+  for (let i = 0; i < batch.length; i++) {
+    const c = normalizeSocialMediaNames(cleanWhisperText(batch[i].text));
+    const { masked, tokens } = maskNumericTokens(c);
+    tokenMaps.push(tokens);
+    lines.push(`${i + 1}. ${masked}`);
+  }
+
+  return { message: lines.join("\n"), tokenMaps };
+}
+
+// ── [Fix B] 번역문 후처리 — 환각 추가 내용 및 시간대 오류 교정 ──────────────
+function postProcessTranslation(translated: string, sourceText: string, targetLanguage: string): string {
+  let out = translated;
+
+  // 타겟이 한국어일 때만 적용
+  if (targetLanguage === "Korean" || targetLanguage === "ko") {
+    // [Fix B-1] 원문에 없는 환각 추가 표현 제거
+    // 원문에 감탄/놀람 표현이 없는데 번역에 추가된 경우
+    const srcHasSurprise = /surprised|amazing|incredible|unbelievable|wow|astonish/i.test(sourceText);
+    if (!srcHasSurprise) {
+      out = out.replace(RE_HALLUCINATED_ADDITION_KO, "").trim();
+    }
+
+    // [Fix B-2] 시간대 오역 교정 — "until X:00 in the morning" 패턴
+    // 원문에 "until ... in the morning"이 있고 시간이 1~6시면 새벽, 7~11시면 아침
+    const morningUntilMatch = sourceText.match(/until\s+(?:like\s+)?(\d{1,2})(?::\d{2})?\s+in\s+the\s+morning/i);
+    if (morningUntilMatch) {
+      const hour = parseInt(morningUntilMatch[1], 10);
+      // 1~6시는 새벽(새벽), 7~ 이면 아침 유지
+      if (hour >= 1 && hour <= 6) {
+        // "아침 X시"를 "새벽 X시"로 교정
+        out = out.replace(RE_MORNING_TIME_KO, (_, h) => `새벽 ${h}시`);
+        // "아침까지"를 "새벽까지"로 교정
+        out = out.replace(/아침까지/, "새벽까지");
+      }
+    }
+
+    // [Fix B-3] HR director 오역 교정 — 후처리에서 확실히 보호
+    // "감독" 계열 표현이 HR director 번역에 섞인 경우
+    if (/\bHR\b/i.test(sourceText) && /감독/.test(out)) {
+      out = out.replace(/인사\s*감독/g, "인사 담당자").replace(/감독님/g, "인사 책임자").trim();
+    }
+  }
+
+  return out.replace(/\s{2,}/g, " ").trim();
 }
 
 // ── Sanitize ──────────────────────────────────────────────────────────────────
@@ -758,59 +891,115 @@ export function sanitizeTranslationOutput(text: string, sourceText: string): str
   return out.replace(/\s{2,}/g, " ").trim();
 }
 
-export function hasLeftoverEnglish(translated: string, sourceText: string, patterns: CompiledNounPattern[], targetLanguage: string): boolean {
+export function hasLeftoverEnglish(
+  translated: string,
+  sourceText: string,
+  patterns: CompiledNounPattern[],
+  targetLanguage: string
+): boolean {
   const profile = getLanguageProfile(targetLanguage);
   if (profile.isLatinScript) return false;
   const knownEn = new Set(sourceText.toLowerCase().split(/\s+/).filter(Boolean));
   const knownTr = new Set(patterns.map(p => p.src.toLowerCase()));
+  const knownProtected = new Set([
+    ...[...PROTECTED_PROPER_NOUNS].map(w => w.toLowerCase()),
+    ...[...PROTECTED_ACRONYMS].map(w => w.toLowerCase()),
+  ]);
   RE_ENGLISH_WORD.lastIndex = 0;
   let m: RegExpExecArray | null;
   while ((m = RE_ENGLISH_WORD.exec(translated)) !== null) {
     const w = m[1];
-    if (RE_NUMERIC_TOKEN.test(w) || knownEn.has(w.toLowerCase()) || knownTr.has(w.toLowerCase())) continue;
+    if (
+      RE_NUMERIC_TOKEN.test(w) ||
+      knownEn.has(w.toLowerCase()) ||
+      knownTr.has(w.toLowerCase()) ||
+      knownProtected.has(w.toLowerCase())
+    ) continue;
     return true;
   }
   return false;
 }
 
 function isCorruptedOutput(text: string): boolean {
-  return /^##/.test(text) || /^Translation:/i.test(text) || /^\[미번역\]/.test(text) || /^---/.test(text) || text.includes("\n\n");
+  return (
+    /^##/.test(text) ||
+    /^Translation:/i.test(text) ||
+    /^\[미번역\]/.test(text) ||
+    /^---/.test(text) ||
+    text.includes("\n\n")
+  );
 }
 
+// [Fix B] isOvergenerated — 단문 원본 기준 강화
+// 원문이 짧을수록(3단어 이하) 오버제너레이션 감지를 더 엄격하게
 function isOvergenerated(input: string, output: string, targetLanguage = "Korean"): boolean {
   const inLen = input.split(/\s+/).filter(Boolean).length;
   const outLen = output.split(/\s+/).filter(Boolean).length;
-  const threshold = targetLanguage === "Korean" ? 2.0 : 1.7;
-  return outLen > Math.max(inLen * threshold, 4);
+  const baseThreshold = targetLanguage === "Korean" ? 2.0 : 1.7;
+  // 원문이 짧을수록(1~3단어) 더 엄격한 기준 적용
+  const strictThreshold = inLen <= 3 ? 1.5 : baseThreshold;
+  return outLen > Math.max(inLen * strictThreshold, 4);
 }
 
-// ── 배치 응답 파싱 ────────────────────────────────────────────────────────────
-function parseBatchResponse(response: string, batch: TranslationSegment[], patterns: CompiledNounPattern[]): string[] {
+// ── 배치 응답 파싱 — 숫자 토큰 복원 포함 ────────────────────────────────────
+function parseBatchResponse(
+  response: string,
+  batch: TranslationSegment[],
+  patterns: CompiledNounPattern[],
+  tokenMaps: MaskedToken[][]
+): string[] {
   const tmap = new Map<number, string>();
   const lines = response.split("\n").map(l => l.trim()).filter(Boolean);
 
   for (const line of lines) {
     const m = line.match(/^(\d+)[.)]\s*(.+)$/);
-    if (m) { const n = parseInt(m[1], 10); if (n >= 1 && n <= batch.length && !tmap.has(n)) tmap.set(n, m[2].trim()); }
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (n >= 1 && n <= batch.length && !tmap.has(n)) tmap.set(n, m[2].trim());
+    }
   }
   if (tmap.size < batch.length) {
     for (const line of lines) {
       const m = line.match(/^(\d+)[.):\-]\s+(.+)$/) ?? line.match(/^(\d+)\s{2,}(.+)$/);
-      if (m) { const n = parseInt(m[1], 10); if (n >= 1 && n <= batch.length && !tmap.has(n)) tmap.set(n, m[2].trim()); }
+      if (m) {
+        const n = parseInt(m[1], 10);
+        if (n >= 1 && n <= batch.length && !tmap.has(n)) tmap.set(n, m[2].trim());
+      }
     }
   }
+
+  // [Fix] restoreAndClean — idx는 항상 배치 내 0-based 인덱스
+  // 폴백 경로에서도 tokenMaps[i]를 올바르게 참조
+  const restoreAndClean = (raw: string, batchIdx: number, srcText: string): string => {
+    if (!raw) return srcText;
+    const tokens = tokenMaps[batchIdx] ?? [];
+    const restored = restoreNumericTokens(raw, tokens);
+    const sanitized = sanitizeTranslationOutput(applyProperNounFixes(restored, patterns), srcText);
+    return sanitized;
+  };
+
   if (tmap.size === batch.length) {
-    return batch.map((seg, i) => sanitizeTranslationOutput(applyProperNounFixes(tmap.get(i + 1) ?? "", patterns), seg.text));
+    return batch.map((seg, i) => restoreAndClean(tmap.get(i + 1) ?? "", i, seg.text));
   }
-  const contentLines = lines.map(l => l.replace(/^[\d]+[.):\-\s]+/, "").trim()).filter(Boolean);
+
+  // positional fallback — 라인 수가 정확히 일치할 때
+  const contentLines = lines
+    .map(l => l.replace(/^[\d]+[.):\-\s]+/, "").trim())
+    .filter(Boolean);
   if (contentLines.length === batch.length) {
     console.warn(`[TRANSLATE] positional fallback: parsed=${tmap.size} expected=${batch.length}`);
-    return batch.map((seg, i) => sanitizeTranslationOutput(applyProperNounFixes(contentLines[i], patterns), seg.text));
+    // [Fix] i를 배치 인덱스로 정확히 사용
+    return batch.map((seg, i) => restoreAndClean(contentLines[i], i, seg.text));
   }
+
+  // 부분 매핑 — 파싱된 것만 사용, 나머지는 원문 유지
   return batch.map((seg, i) => {
     const raw = tmap.get(i + 1);
-    if (!raw) { console.warn(`[TRANSLATE] missing #${i + 1}`); return seg.text; }
-    return sanitizeTranslationOutput(applyProperNounFixes(raw, patterns), seg.text);
+    if (!raw) {
+      console.warn(`[TRANSLATE] missing #${i + 1}, keeping source`);
+      return seg.text;
+    }
+    return restoreAndClean(raw, i, seg.text);
   });
 }
 
@@ -847,25 +1036,49 @@ async function validateTranslations(
     const foreignLatin = profile.isLatinScript && /[가-힣\u4e00-\u9fff\u3040-\u30ff\u0400-\u04FF]/.test(t);
     const goodFitBad = /\bgood\s+fit\b/i.test(src) && /몸|체형|체격|사이즈|맞는 몸/.test(t);
 
-    const needsRetry = t.length === 0 || /^[.…]{2,}$/.test(t) || isLikelyUntranslated(t, targetLanguage) ||
-      isCorruptedOutput(t) || isOvergenerated(src, t, targetLanguage) || negDropped || leftoverEn || foreignLatin || goodFitBad;
+    const needsRetry =
+      t.length === 0 ||
+      /^[.…]{2,}$/.test(t) ||
+      isLikelyUntranslated(t, targetLanguage) ||
+      isCorruptedOutput(t) ||
+      isOvergenerated(src, t, targetLanguage) ||
+      negDropped ||
+      leftoverEn ||
+      foreignLatin ||
+      goodFitBad;
 
     if (!needsRetry) continue;
     console.warn(`[VALIDATE] retry ${i}: "${src}" → "${t}"`);
+
+    const { masked: maskedSrc, tokens } = maskNumericTokens(src);
 
     try {
       const r = await llamaContext.completion({
         messages: [
           { role: "system", content: systemPrompt },
-          { role: "user", content: `Translate to ${targetLanguage}. Output ONLY translation:\n${src}${negDropped ? "\nCRITICAL: Preserve NEGATIVE meaning." : ""}` },
+          {
+            role: "user",
+            content: `Translate to ${targetLanguage}. Output ONLY translation:\n${maskedSrc}${negDropped ? "\nCRITICAL: Preserve NEGATIVE meaning." : ""}`,
+          },
         ],
-        n_predict: 80, temperature: 0.1, top_p: 0.9,
+        n_predict: 80,
+        temperature: 0.1,
+        top_p: 0.9,
         stop: ["</s>", "<end_of_turn>", "<|end|>", "\n"],
       });
-      const c = sanitizeTranslationOutput(r.text.trim(), src);
-      result[i] = (c && !isLikelyUntranslated(c, targetLanguage) && !isCorruptedOutput(c) && !isOvergenerated(src, c, targetLanguage))
-        ? applyProperNounFixes(c, patterns) : src;
-    } catch (e) { result[i] = src; console.warn(`[VALIDATE] error ${i}:`, e); }
+      const restored = restoreNumericTokens(r.text.trim(), tokens);
+      const c = sanitizeTranslationOutput(restored, src);
+      result[i] =
+        c &&
+        !isLikelyUntranslated(c, targetLanguage) &&
+        !isCorruptedOutput(c) &&
+        !isOvergenerated(src, c, targetLanguage)
+          ? applyProperNounFixes(c, patterns)
+          : src;
+    } catch (e) {
+      result[i] = src;
+      console.warn(`[VALIDATE] error ${i}:`, e);
+    }
   }
   return result;
 }
@@ -876,22 +1089,43 @@ async function loadCheckpoint(videoHash: string): Promise<Checkpoint | null> {
     const raw = await AsyncStorage.getItem(checkpointKey(videoHash));
     if (!raw) return null;
     const cp: Checkpoint = JSON.parse(raw);
-    if (Date.now() - cp.timestamp >= CHECKPOINT_TTL_MS) { await AsyncStorage.removeItem(checkpointKey(videoHash)); return null; }
+    if (Date.now() - cp.timestamp >= CHECKPOINT_TTL_MS) {
+      await AsyncStorage.removeItem(checkpointKey(videoHash));
+      return null;
+    }
     return cp;
   } catch { return null; }
 }
+
 async function saveCheckpoint(videoHash: string, cp: Omit<Checkpoint, "timestamp">): Promise<void> {
-  try { await AsyncStorage.setItem(checkpointKey(videoHash), JSON.stringify({ ...cp, timestamp: Date.now() })); }
-  catch (e) { console.warn("[Gemma] Checkpoint save failed:", e); }
+  try {
+    await AsyncStorage.setItem(checkpointKey(videoHash), JSON.stringify({ ...cp, timestamp: Date.now() }));
+  } catch (e) {
+    console.warn("[Gemma] Checkpoint save failed:", e);
+  }
 }
-async function deleteCheckpoint(videoHash: string): Promise<void> { await AsyncStorage.removeItem(checkpointKey(videoHash)); }
+
+async function deleteCheckpoint(videoHash: string): Promise<void> {
+  await AsyncStorage.removeItem(checkpointKey(videoHash));
+}
 
 function mergeWithTranslations(segments: TranslationSegment[], translatedTexts: string[]): TranslationSegment[] {
   return segments.map((seg, i) => ({ ...seg, translated: translatedTexts[i] || seg.text }));
 }
 
 // ── 시스템 프롬프트 빌더 ──────────────────────────────────────────────────────
-function buildSystemPrompt(targetLanguage: string, langRules: string, genrePersona: string, nounHint: string, batchSize: number): string {
+function buildSystemPrompt(
+  targetLanguage: string,
+  langRules: string,
+  genrePersona: string,
+  nounHint: string,
+  batchSize: number
+): string {
+  const protectedNounList = [
+    ...[...PROTECTED_PROPER_NOUNS],
+    ...[...PROTECTED_ACRONYMS],
+  ].join(", ");
+
   return (
     `You are a professional subtitle translator. Translate English subtitles to ${targetLanguage}.\n\n` +
     (genrePersona ? genrePersona + "\n\n" : "") +
@@ -901,23 +1135,23 @@ function buildSystemPrompt(targetLanguage: string, langRules: string, genrePerso
     `- ONE output line per input line. Never merge. Never split. Never skip.\n` +
     `- NEVER output headers like "## Translation:", "[미번역]", "---", or any non-translation text.\n\n` +
     `TRANSLATION RULES:\n` +
-    `- Translate exact meaning only. Do not add, remove, or infer content.\n` +
-    `- Preserve negation: "don't/can't/never" → must use 않/안/못/없 in Korean.\n` +
-    `- Fragment lines (no complete verb) → translate as fragment, do NOT complete.\n` +
-    `- Short responses (Yes/No/Hmm) → translate naturally as single words.\n` +
-    // [핵심 수정] baby 번역 규칙 추가
-    `- "baby" as informal address (not romantic context) → use the person's name or omit. NEVER translate as 자기야.\n` +
-    `- NEVER add 자기야/여보/honey unless that exact romantic term is in the source.\n` +
-    `- "not really" → "그다지요"\n` +
-    `- "good fit" in job/interview context → "잘 맞다" (compatibility, NOT fitness)\n` +
-    `- "mental health day" → "정신 건강을 위한 휴가"\n` +
-    `- "Vine" is a social media app → "바인(Vine)", never "덩굴"\n` +
-    `- "surprised you didn't say X" → "X라고 안 하신 게 놀랍네요"\n` +
-    `- "you don't work here" → "여기서 일하지도 않잖아요"\n` +
-    `- "are you firing me" → "저 해고하시는 거예요?"\n` +
-    `- "I do" → "나" or "그럼요" depending on context\n` +
-    `- Conversational "That's/That is" referring to something just mentioned → "그건" or "그게" (NOT "저것은" or "그것은")\n` +
-    `- "This is/That's" in casual dialogue → use 그/이 pronouns, never 저\n` +
+    `- Translate exact meaning only. Do NOT add, infer, or embellish content not in the source.\n` +
+    `- Preserve negation: "don't/can't/never/not" → must reflect negation in translation.\n` +
+    `- Fragment lines (no complete verb) → translate as fragment, do NOT complete the sentence.\n` +
+    `- Short responses (Yes/No/Hmm/I do) → translate naturally as single words or short phrases.\n` +
+    `- "I do" as a standalone affirmative response → translate as a short confirmation, NOT a full sentence.\n` +
+    `- "baby" as an informal address (non-romantic) → use the person's name or omit. NEVER translate as 자기야.\n` +
+    `- NEVER add 자기야/여보/honey/darling unless that exact term is in the source.\n` +
+    `- "HR" always means Human Resources. "HR director" → 인사 담당자 or 인사 책임자. NEVER 감독님.\n` +
+    `- Tokens like __NUM0__, __NUM1__ are number/time placeholders. Copy them EXACTLY as-is. Do not translate or remove.\n` +
+    `- These proper nouns must NOT be translated — keep or phonetically transliterate only: ${protectedNounList}\n` +
+    `- "not really" → translate as mild negation in context\n` +
+    `- "good fit" in work/interview context → compatibility match, NOT physical fitness\n` +
+    `- "mental health day" → a day off for mental wellbeing\n` +
+    `- "you don't work here" → factual statement that the person is NOT an employee here\n` +
+    `- "are you firing me" → question about being dismissed from a job\n` +
+    `- Conversational "That's/That is" → use proximal pronoun (그건/그게), never distal (저것은/저것이)\n` +
+    `- Time expressions: "until X in the morning" — if X is 1–6, it is the middle of the night (새벽), not 아침\n` +
     `\n` +
     langRules +
     nounHint
@@ -937,11 +1171,12 @@ export async function translateSegments(
 
   // Step 0: 중복 제거 + ASR 정리
   const deduped = deduplicateOverlappingSegments(segments);
-  const cleaned = deduped.map(seg => ({ ...seg, text: normalizeSocialMediaNames(cleanWhisperText(seg.text)) }));
+  const cleaned = deduped.map(seg => ({
+    ...seg,
+    text: normalizeSocialMediaNames(cleanWhisperText(seg.text)),
+  }));
 
-  // Step A: 프래그먼트 병합 → 완전한 문장
-  // [핵심 수정] mergeFragments: gap 0.6s + isShortIndependent(1~3단어) 보호
-  // [핵심 수정] enforceSentence: 2단어 미만만 병합 + isShortIndependent 보호
+  // Step A: 프래그먼트 병합 (발화자 전환 감지 포함)
   let merged = mergeFragments(cleaned);
   merged = enforceSentence(merged);
   const mergedSegs = merged.map(g => ({ start: g.start, end: g.end, text: g.text, translated: "" }));
@@ -963,7 +1198,9 @@ export async function translateSegments(
   const mergedTranslations: string[] = new Array(total).fill("");
   if (checkpoint && checkpoint.translatedTexts.length === total) {
     startBatch = checkpoint.lastBatchIndex + 1;
-    for (let i = 0; i < checkpoint.translatedTexts.length; i++) mergedTranslations[i] = checkpoint.translatedTexts[i];
+    for (let i = 0; i < checkpoint.translatedTexts.length; i++) {
+      mergedTranslations[i] = checkpoint.translatedTexts[i];
+    }
     console.log(`[Gemma] Resuming from batch ${startBatch}/${totalBatches}`);
   }
 
@@ -974,18 +1211,13 @@ export async function translateSegments(
       const batch = mergedSegs.slice(offset, offset + BATCH_SIZE);
       console.log(`[TRANSLATE] batch ${bi + 1}/${totalBatches} (${batch.length})`);
 
-      const sysPrompt = buildSystemPrompt(
-        targetLanguage,
-        langRules,
-        genrePersona,
-        nounHint,
-        batch.length
-      );
+      const sysPrompt = buildSystemPrompt(targetLanguage, langRules, genrePersona, nounHint, batch.length);
+      const { message: batchMessage, tokenMaps } = buildBatchMessage(batch);
 
       const r = await llamaContext.completion({
         messages: [
           { role: "system", content: sysPrompt },
-          { role: "user", content: buildBatchMessage(batch) }
+          { role: "user", content: batchMessage },
         ],
         n_predict: batch.length * 80,
         temperature: 0.1,
@@ -995,19 +1227,14 @@ export async function translateSegments(
         stop: ["</s>", "<end_of_turn>", "<|end|>"],
       } as any);
 
-      const translations = parseBatchResponse(r.text, batch, patterns);
+      const translations = parseBatchResponse(r.text, batch, patterns, tokenMaps);
 
       for (let i = 0; i < batch.length; i++) {
         mergedTranslations[offset + i] = translations[i];
       }
 
       const partial = expandGroupTranslations(merged, mergedTranslations, cleaned);
-
-      onProgress?.(
-        offset + batch.length,
-        total,
-        mergeWithTranslations(cleaned, partial)
-      );
+      onProgress?.(offset + batch.length, total, mergeWithTranslations(cleaned, partial));
 
       await saveCheckpoint(videoHash, {
         translatedTexts: mergedTranslations,
@@ -1017,39 +1244,30 @@ export async function translateSegments(
       });
 
       if (bi < totalBatches - 1) {
-        await sleep(
-          (bi + 1) % THERMAL_EVERY_N === 0
-            ? SLEEP_THERMAL_MS
-            : SLEEP_BETWEEN_MS
-        );
+        await sleep((bi + 1) % THERMAL_EVERY_N === 0 ? SLEEP_THERMAL_MS : SLEEP_BETWEEN_MS);
       }
     }
   } catch (e) {
     console.error("[Gemma] Inference error:", e);
-    return mergeWithTranslations(
-      cleaned,
-      expandGroupTranslations(merged, mergedTranslations, cleaned)
-    );
+    return mergeWithTranslations(cleaned, expandGroupTranslations(merged, mergedTranslations, cleaned));
   }
 
   await deleteCheckpoint(videoHash);
 
   // Step E: 재분배
-  const translatedTexts = expandGroupTranslations(
-    merged,
-    mergedTranslations,
-    cleaned
-  );
+  const translatedTexts = expandGroupTranslations(merged, mergedTranslations, cleaned);
 
   // Step E.1: 호칭어 환각 제거
   for (let i = 0; i < cleaned.length; i++) {
-    if (
-      !RE_HALLUCINATION_GUARD.test(cleaned[i].text) &&
-      translatedTexts[i]
-    ) {
-      translatedTexts[i] = translatedTexts[i]
-        .replace(RE_HALLUCINATED_TERMS_KO, "")
-        .trim();
+    if (!RE_HALLUCINATION_GUARD.test(cleaned[i].text) && translatedTexts[i]) {
+      translatedTexts[i] = translatedTexts[i].replace(RE_HALLUCINATED_TERMS_KO, "").trim();
+    }
+  }
+
+  // Step E.2: [Fix B] 후처리 — 시간대 오역, 환각 추가, HR 교정
+  for (let i = 0; i < cleaned.length; i++) {
+    if (translatedTexts[i]) {
+      translatedTexts[i] = postProcessTranslation(translatedTexts[i], cleaned[i].text, targetLanguage);
     }
   }
 
@@ -1058,7 +1276,6 @@ export async function translateSegments(
     const failed = cleaned.reduce<number[]>((acc, seg, i) => {
       const t = translatedTexts[i];
       const src = seg.text.trim();
-
       if (
         !t ||
         !t.trim() ||
@@ -1068,29 +1285,21 @@ export async function translateSegments(
       ) {
         return [...acc, i];
       }
-
       return acc;
     }, []);
 
     if (failed.length === 0) break;
-
     console.log(`[Gemma] Retry ${attempt + 1}: ${failed.length} segs`);
 
     const retryBatch = failed.map(i => cleaned[i]);
-
-    const retryPrompt = buildSystemPrompt(
-      targetLanguage,
-      langRules,
-      genrePersona,
-      nounHint,
-      retryBatch.length
-    );
+    const retryPrompt = buildSystemPrompt(targetLanguage, langRules, genrePersona, nounHint, retryBatch.length);
+    const { message: retryMessage, tokenMaps: retryTokenMaps } = buildBatchMessage(retryBatch);
 
     try {
       const rr = await llamaContext.completion({
         messages: [
           { role: "system", content: retryPrompt },
-          { role: "user", content: buildBatchMessage(retryBatch) }
+          { role: "user", content: retryMessage },
         ],
         n_predict: retryBatch.length * 80,
         temperature: 0.1,
@@ -1100,26 +1309,19 @@ export async function translateSegments(
         stop: ["</s>", "<end_of_turn>", "<|end|>"],
       } as any);
 
-      const rt = parseBatchResponse(rr.text, retryBatch, patterns);
+      const rt = parseBatchResponse(rr.text, retryBatch, patterns, retryTokenMaps);
 
       for (let j = 0; j < failed.length; j++) {
-        if (
-          rt[j] &&
-          rt[j].trim() &&
-          !isCorruptedOutput(rt[j])
-        ) {
-          translatedTexts[failed[j]] = rt[j];
+        if (rt[j] && rt[j].trim() && !isCorruptedOutput(rt[j])) {
+          translatedTexts[failed[j]] = postProcessTranslation(rt[j], retryBatch[j].text, targetLanguage);
         }
       }
-
     } catch (e) {
       console.warn(`[Gemma] Retry ${attempt + 1} error:`, e);
       break;
     }
 
-    if (attempt < 1) {
-      await sleep(SLEEP_BETWEEN_MS);
-    }
+    if (attempt < 1) await sleep(SLEEP_BETWEEN_MS);
   }
 
   // Step G: 검증

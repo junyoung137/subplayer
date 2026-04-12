@@ -1,9 +1,12 @@
 /**
- * RealtimeSub subtitle proxy server (v19 + parseJson3WordLevel 업데이트)
+ * RealtimeSub subtitle proxy server (v19 + parseJson3WordLevel 업데이트 + 단답 보호)
  *
- * 변경사항:
- * - parseJson3WordLevel을 사용자가 제공한 버전으로 교체
- * - 나머지 로직은 v19 그대로 유지 (ORPHAN_WORDS, premerge, buildDisplaySegments 등)
+ * 변경사항 (단답/단독 발화 소실 수정):
+ * ✅ [수정 1] parseJson3WordLevel - GROUPING 단계에서 단답 단어를 독립 그룹으로 분리
+ * ✅ [수정 2] premergeRawSegments - ORPHAN_WORDS 흡수 시 단답이면 건너뜀
+ * ✅ [수정 3] buildDisplaySegments - isSingleResponse일 때 gap > 0.3s면 독립 출력
+ *
+ * 나머지 로직은 v19 그대로 유지
  */
 
 import express from "express";
@@ -97,7 +100,7 @@ function isSlidingWindow(events) {
   return false;
 }
 
-// ── UPDATED: 사용자가 제공한 parseJson3WordLevel ───────────────────────────────
+// ── parseJson3WordLevel ───────────────────────────────────────────────────────
 function parseJson3WordLevel(data) {
   const allEvents = (data?.events ?? [])
     .filter(e => e.tStartMs != null || e.segs?.some(s => s.tOffsetMs != null))
@@ -116,7 +119,7 @@ function parseJson3WordLevel(data) {
     );
   };
 
-  // 1. WORD FLATTEN (사용자 제공 로직 + tStartMs 보정)
+  // 1. WORD FLATTEN
   const words = [];
   for (const event of allEvents) {
     if (!event.segs) continue;
@@ -139,7 +142,7 @@ function parseJson3WordLevel(data) {
 
   if (words.length === 0) return [];
 
-  // 2. GROUPING (사용자 제공 로직)
+  // 2. GROUPING
   const utterances = [];
   let group = [words[0]];
 
@@ -154,7 +157,7 @@ function parseJson3WordLevel(data) {
     const twoWord = (prev.text + " " + curr.text).trim();
     const isTwoWordResponse = TWO_WORD_RESPONSE_RE.test(twoWord);
 
-    // ⭐ 핵심: STICKY 우선 보호
+    // STICKY 우선 보호
     if (isSticky) {
       group.push(curr);
       continue;
@@ -167,7 +170,31 @@ function parseJson3WordLevel(data) {
       continue;
     }
 
-    // gap split
+    // ✅ [수정 1] 단답 단어 독립 분리
+    // 현재 단어가 단독으로 SPEAKER_CHANGE_RE에 해당하고
+    // 앞뒤 gap이 충분하면 독립 그룹으로 분리
+    // - gap(앞) > 200ms: 앞 발화와 분리
+    // - gap(뒤) 체크는 다음 iteration에서 자연스럽게 처리됨
+    // 기존 gap split(400ms)보다 낮은 200ms 기준을 단답에만 적용
+    const isCurrShortResponse = SPEAKER_CHANGE_RE.test(curr.text.trim());
+    const isPrevShortResponse = SPEAKER_CHANGE_RE.test(prev.text.trim());
+
+    if (isCurrShortResponse && gap > 200 && !isSticky) {
+      // 현재 단어가 단답이고 앞과 gap이 200ms 이상이면 독립 그룹
+      if (group.length > 0) utterances.push(group);
+      group = [curr];
+      continue;
+    }
+
+    if (isPrevShortResponse && gap > 200 && !isSticky) {
+      // 이전 단어가 단답이고 현재와 gap이 200ms 이상이면
+      // 이전 그룹을 flush하고 새 그룹 시작
+      if (group.length > 0) utterances.push(group);
+      group = [curr];
+      continue;
+    }
+
+    // gap split (기존 로직)
     if (gap > GAP_THRESHOLD_MS) {
       if (isTwoWordResponse) {
         group.push(curr);
@@ -193,7 +220,7 @@ function parseJson3WordLevel(data) {
   return rawSegments;
 }
 
-// ── premergeRawSegments (v19 유지) ───────────────────────────────────────────
+// ── premergeRawSegments ───────────────────────────────────────────────────────
 function premergeRawSegments(segs) {
   if (segs.length === 0) return segs;
 
@@ -237,7 +264,12 @@ function premergeRawSegments(segs) {
 
       const isOrphan = curWords.length === 1 && ORPHAN_WORDS.has(curWord);
 
-      if (isOrphan && next) {
+      // ✅ [수정 2] 단답이면 ORPHAN_WORDS 흡수에서 제외
+      // SPEAKER_CHANGE_RE에 해당하는 단어(hmm, uh, wow 등)는
+      // ORPHAN_WORDS에 있어도 다음 세그먼트에 강제 병합하지 않음
+      const isShortResponseWord = SPEAKER_CHANGE_RE.test(cur.text.trim());
+
+      if (isOrphan && !isShortResponseWord && next) {
         const gap = next.startTime - cur.endTime;
         const nextWord1 = next.text.trim().split(/\s+/)[0].toLowerCase();
         const nextIsRealBreak = next._uttBreak && !ORPHAN_WORDS.has(nextWord1);
@@ -264,7 +296,7 @@ function premergeRawSegments(segs) {
   return out;
 }
 
-// ── buildDisplaySegments (v19 유지) ──────────────────────────────────────────
+// ── buildDisplaySegments ─────────────────────────────────────────────────────
 function buildDisplaySegments(rawSegs) {
   if (rawSegs.length === 0) return [];
 
@@ -290,7 +322,10 @@ function buildDisplaySegments(rawSegs) {
   for (let i = 0; i < rawSegs.length; i++) {
     const seg = rawSegs[i];
     const nextSeg = rawSegs[i + 1] ?? null;
+    const prevSeg = rawSegs[i - 1] ?? null;
     const nextGap = nextSeg ? nextSeg.startTime - seg.endTime : Infinity;
+    // ✅ [수정 3] 앞 세그먼트와의 gap도 계산
+    const prevGap = prevSeg ? seg.startTime - prevSeg.endTime : Infinity;
     const segWords = seg.text.trim().split(/\s+/).filter(Boolean);
 
     const isSingleResponse = SPEAKER_CHANGE_RE.test(seg.text.trim());
@@ -305,7 +340,12 @@ function buildDisplaySegments(rawSegs) {
     );
 
     if (isSingleResponse && !isSticky && !isOrphanWord) {
-      if (seg._uttBreak || nextGap > 0.5) {
+      // ✅ [수정 3] _uttBreak 없어도 prevGap > 0.3s 또는 nextGap > 0.3s이면 독립 출력
+      // 기존: seg._uttBreak || nextGap > 0.5 일 때만 독립
+      // 수정: 앞뒤 간격이 0.3s 이상이면 독립 발화로 판단 (발화자 전환 가능성)
+      const isIsolated = seg._uttBreak || nextGap > 0.5 || prevGap > 0.3;
+
+      if (isIsolated) {
         flushBuffer();
         result.push({ startTime: seg.startTime, endTime: seg.endTime, text: seg.text });
       } else {
@@ -357,9 +397,7 @@ function buildDisplaySegments(rawSegs) {
   return result;
 }
 
-// 나머지 함수들 (parseJson3ASR, parseJson3ByEvent, splitEventWords, mergeOrphanPhrases, resolveOverlaps, resolveAndCleanSegments, parseVtt, runYtDlp 등)은 v19 그대로 유지
-// (코드 길이로 인해 생략하지 않고 전체 제공하겠습니다. 아래 이어서 붙여넣기)
-
+// ── parseJson3ASR ─────────────────────────────────────────────────────────────
 function parseJson3ASR(data) {
   const events = (data?.events ?? [])
     .filter((e) => e.segs && e.tStartMs != null)
@@ -405,6 +443,7 @@ function parseJson3ASR(data) {
   return segments;
 }
 
+// ── parseJson3ByEvent ─────────────────────────────────────────────────────────
 function parseJson3ByEvent(data) {
   const events = data?.events ?? [];
   const segments = [];
@@ -434,6 +473,7 @@ function parseJson3ByEvent(data) {
   return segments;
 }
 
+// ── splitEventWords ───────────────────────────────────────────────────────────
 function splitEventWords(words, startS, endS) {
   const duration = Math.max(endS - startS, 0.1);
   const results = [];
@@ -487,6 +527,7 @@ function splitEventWords(words, startS, endS) {
   return results;
 }
 
+// ── mergeOrphanPhrases ────────────────────────────────────────────────────────
 function mergeOrphanPhrases(phrases) {
   let result = [...phrases];
 
@@ -579,6 +620,7 @@ function mergeOrphanPhrases(phrases) {
   return capped;
 }
 
+// ── resolveOverlaps ───────────────────────────────────────────────────────────
 function resolveOverlaps(segments) {
   if (segments.length === 0) return segments;
   const sorted = [...segments].sort((a, b) => a.startTime - b.startTime);
@@ -593,6 +635,7 @@ function resolveOverlaps(segments) {
   return sorted.filter((s) => s.endTime - s.startTime >= 0.05);
 }
 
+// ── resolveAndCleanSegments ───────────────────────────────────────────────────
 function resolveAndCleanSegments(segments) {
   if (segments.length === 0) return segments;
 
@@ -652,6 +695,7 @@ function resolveAndCleanSegments(segments) {
   return deduped;
 }
 
+// ── parseVtt ──────────────────────────────────────────────────────────────────
 function parseVtt(vttText) {
   const TIME_RE = /(\d{1,2}:\d{2}:\d{2}\.\d{3}|\d{2}:\d{2}\.\d{3})\s*-->\s*(\d{1,2}:\d{2}:\d{2}\.\d{3}|\d{2}:\d{2}\.\d{3})/;
   const TAG_RE = /<[^>]+>/g;
