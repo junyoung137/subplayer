@@ -45,6 +45,11 @@ const NETFLIX_MIN_CHARS_FOR_SPLIT = 15;
 // expand: gap 기준 자연 분할 임계값
 const EXPAND_GAP_THRESHOLD_S = 0.8;
 
+// ── [핵심 수정] 병합 금지 gap 임계값 ──────────────────────────────────────────
+// 이전: MERGE_GAP_HARD_LIMIT_S = 1.5 (너무 관대 — "Yeah"→"Yes" 0.76s gap도 못 막음)
+// 수정: 0.6s — 대화 흐름상 0.6s 이상이면 다른 발화자 or 다른 문장
+const MERGE_GAP_HARD_LIMIT_S = 0.6;
+
 // ── 소셜미디어 앱명 정규화 ────────────────────────────────────────────────────
 const SOCIAL_MEDIA_NORMALIZATION: Record<string, string> = {
   "vine": "Vine", "snapchat": "Snapchat", "pinterest": "Pinterest",
@@ -54,17 +59,23 @@ const SOCIAL_MEDIA_NORMALIZATION: Record<string, string> = {
 };
 
 // ── 환각 / 오염 패턴 ──────────────────────────────────────────────────────────
-// 호칭어 환각: 원문에 없는데 LLM이 삽입하는 패턴
-// 자기야/자기/여보/오빠/언니 — 한국어 LLM에서 빈번히 발생
 const RE_HALLUCINATED_TERMS_KO = /자기야[,，\s]*|자기[,，\s]+|여보[,，\s]*|오빠[,，\s]*|언니[,，\s]*/g;
-// 원문에 호칭어가 있을 때 제거를 건너뛰기 위한 가드 (영어 원문 기준)
-const RE_HALLUCINATION_GUARD = /\b(baby|honey|sweetie|darling|dear|oppa|unnie)\b/i;
+// [수정] baby는 비격식 호칭어(informal address)로, 자기야가 아닌 이름/생략으로 처리해야 함
+// HALLUCINATION_GUARD는 "honey/sweetie/darling/dear/oppa/unnie"만 유지 — baby 제외
+const RE_HALLUCINATION_GUARD = /\b(honey|sweetie|darling|dear|oppa|unnie)\b/i;
 const RE_OUTPUT_CORRUPTION = /^##\s*Translation\s*:?\s*/i;
 const RE_UNTRANSLATED_MARKER = /^\[미번역\]\s*/;
 const RE_STAGE_DIRECTION_KO = /\(혼잣말\)|\(독백\)|\(방백\)|\(내레이션\)/g;
 const RE_PARENS_ANY = /\([^)]*\)/g;
 const RE_ENGLISH_WORD = /\b([a-zA-Z]{3,})\b/g;
 const RE_NUMERIC_TOKEN = /^\d+([:.]\d+)*$/;
+
+// ── [Fix 1] 숫자 접두사 오염 패턴 ────────────────────────────────────────────
+const RE_NUMBERED_PREFIX = /^\d+\.\s+/;
+
+// ── [Fix 2] 어색한 지시사 패턴 ────────────────────────────────────────────────
+const RE_AWKWARD_DEMONSTRATIVE = /^저것은\s/;
+const RE_AWKWARD_DEMONSTRATIVE_I = /^저것이\s/;
 
 // ── 장르 페르소나 ─────────────────────────────────────────────────────────────
 const GENRE_PERSONA: Record<string, string> = {
@@ -166,9 +177,56 @@ function isFillerText(text: string): boolean {
   return text.trim().length === 0 || /^[\d\s.,;:!?'"()[\]-]+$/.test(text.trim());
 }
 
+// ── [핵심 수정] isShortIndependent — 1~3단어 독립 발화 보호 ────────────────────
+/**
+ * 이전 isSingleWordIndependent(1단어만)에서 확장.
+ * 1~3단어이면서 완결된 의미 단위인 경우 병합 금지.
+ *
+ * 보호 케이스:
+ *   1) 1단어 물음표   — "PowerPoint?", "Publisher?"
+ *   2) yes/no 계열    — "No", "Yes", "Yeah", "Nope", "Not really", "Okay yes"
+ *   3) 감탄사/호응    — "Hmm", "Wow", "Oh", "That's funny"
+ *   4) 단일 고유명사  — "Amy", "Twitter" (대문자 시작 1단어)
+ *   5) 짧은 완결 동사 — "I do", "I will", "You do"
+ *   6) 감정/반응 짧은 문장 — 3단어 이하 + 마침표/느낌표로 끝
+ */
+function isShortIndependent(t: string): boolean {
+  const trimmed = t.trim();
+  const words = trimmed.split(/\s+/).filter(Boolean);
+  const wc = words.length;
+
+  // 4단어 이상은 보호 대상 아님
+  if (wc === 0 || wc > 3) return false;
+
+  const word = words[0];
+
+  // 케이스 1: 단일 단어 물음표
+  if (wc === 1 && word.endsWith("?")) return true;
+
+  // 케이스 2: yes/no 계열 (단어 수 무관, 3단어 이하)
+  if (/^(no|yes|yeah|nope|yep|nah|not\s+really|okay\s+yes|alright|sure|right)$/i.test(trimmed)) return true;
+
+  // 케이스 3: 감탄사/호응어 (1단어)
+  if (wc === 1 && /^(hmm|hm|uh|um|oh|wow|okay|ok|hey|right|sure|fine|well|whoa|ow|ugh|yikes|oops)$/i.test(word)) return true;
+
+  // 케이스 4: 단일 고유명사 호칭 (대문자 시작, 알파벳만, 2~12자)
+  if (wc === 1 && /^[A-Z][a-zA-Z]{1,11}$/.test(word)) return true;
+
+  // 케이스 5: 짧은 완결 동사 구문 ("I do", "I will", "You do", "I get it")
+  if (wc <= 3 && /^(i|you|we|they)\s+(do|did|will|won't|can|can't|get|got|know|see|am|was)$/i.test(trimmed)) return true;
+
+  // 케이스 6: 2~3단어 + 마침표/느낌표 (완결된 짧은 문장)
+  // "That's funny.", "I see.", "Me too." 등
+  if (wc >= 2 && wc <= 3 && /[.!]$/.test(trimmed)) return true;
+
+  // 케이스 7: "That's [형용사]" 패턴 — "That's funny", "That's great"
+  if (wc === 2 && /^that's\s+\w+$/i.test(trimmed)) return true;
+
+  return false;
+}
+
 // ── Fragment merging ──────────────────────────────────────────────────────────
 // merge 상한: 이 단어 수 초과 시 문장 미완성이어도 더 이상 붙이지 않음
-// → 감정/리듬/강조가 살아있는 짧은 발화가 하나의 덩어리로 flatten되는 현상 방지
 const MAX_MERGE_WORDS = 12;
 
 function mergeFragments(segments: TranslationSegment[]): MergedGroup[] {
@@ -180,58 +238,105 @@ function mergeFragments(segments: TranslationSegment[]): MergedGroup[] {
 
   while (i < segments.length) {
     const seg = segments[i];
+
     if (isFiller(seg.text)) {
       groups.push({ start: seg.start, end: seg.end, text: seg.text, originalIndices: [i] });
       i++; continue;
     }
+
+    // [핵심 수정] 독립 보호 대상 → 병합 없이 바로 push
+    if (isShortIndependent(seg.text)) {
+      groups.push({ start: seg.start, end: seg.end, text: seg.text, originalIndices: [i] });
+      i++; continue;
+    }
+
     let group: MergedGroup = { start: seg.start, end: seg.end, text: seg.text.trim(), originalIndices: [i] };
     let j = i + 1;
+
     while (j < segments.length) {
       const next = segments[j];
       if (isFiller(next.text)) break;
+
+      // 다음 세그먼트가 독립 보호 대상이면 현재 병합 중단
+      if (isShortIndependent(next.text)) break;
+
       const gap = next.start - group.end;
       const wc = group.text.split(/\s+/).length;
-      // [Fix] 단어 수 상한 초과 시 문장 미완성이어도 merge 중단
+
+      // [핵심 수정] gap 하드 리밋: 0.6s 이상이면 병합 중단
+      if (gap >= MERGE_GAP_HARD_LIMIT_S) break;
+
       if (wc >= MAX_MERGE_WORDS) break;
+
       if (!isSentenceEnd(group.text)) {
         group.text += " " + next.text.trim(); group.end = next.end; group.originalIndices.push(j); j++; continue;
       }
-      if (wc < 6 && gap < 1.2) {
+      if (wc < 6 && gap < 0.4) {
+        // gap 기준도 함께 강화 (1.2 → 0.4)
         group.text += " " + next.text.trim(); group.end = next.end; group.originalIndices.push(j); j++; continue;
       }
       if (isBackchannel(group.text) && wc <= 3) break;
       break;
     }
+
     groups.push(group); i = j;
   }
   return groups;
 }
 
+// ── [핵심 수정] enforceSentence — 역할 대폭 축소 ─────────────────────────────
+/**
+ * 변경:
+ *   1) isShortIndependent로 보호 범위 확장 (기존 isSingleWordIndependent → 1~3단어)
+ *   2) gap ≥ MERGE_GAP_HARD_LIMIT_S → 병합 금지 (0.6s)
+ *   3) 병합 기준: 3단어 미만 → 2단어 미만 (더 보수적)
+ *      — "I do" 같은 2단어도 독립 유지
+ *   4) buffer 자체가 isShortIndependent이면 절대 병합 안 함
+ */
 function enforceSentence(groups: MergedGroup[]): MergedGroup[] {
   const result: MergedGroup[] = [];
   let buffer: MergedGroup | null = null;
+
   for (const g of groups) {
     if (!buffer) { buffer = { ...g }; continue; }
-    if (buffer.text.split(/\s+/).length < 5) {
-      buffer.text += " " + g.text; buffer.end = g.end;
+
+    // [핵심 수정] buffer 또는 다음 그룹이 독립 보호 대상이면 병합 면제
+    if (isShortIndependent(buffer.text) || isShortIndependent(g.text)) {
+      result.push(buffer);
+      buffer = { ...g };
+      continue;
+    }
+
+    // gap 하드 리밋
+    const gap = g.start - buffer.end;
+    if (gap >= MERGE_GAP_HARD_LIMIT_S) {
+      result.push(buffer);
+      buffer = { ...g };
+      continue;
+    }
+
+    // [핵심 수정] 병합 기준: 2단어 미만일 때만 (기존 3 → 2)
+    // 실질적으로 1단어 미완성 프래그먼트("are")만 병합
+    if (buffer.text.split(/\s+/).length < 2) {
+      buffer.text += " " + g.text;
+      buffer.end = g.end;
       buffer.originalIndices = [...buffer.originalIndices, ...g.originalIndices];
-    } else { result.push(buffer); buffer = { ...g }; }
+    } else {
+      result.push(buffer);
+      buffer = { ...g };
+    }
   }
   if (buffer) result.push(buffer);
   return result;
 }
 
 // ── Netflix-style formatting ──────────────────────────────────────────────────
-/**
- * 두 줄 균형 검사: 한 줄이 다른 줄의 40% 미만이면 불균형으로 판단해 기각.
- * 예: "안녕\n오늘 정말 기분이 너무 좋아서 일찍 나왔어요" → 기각 → 다음 순위로
- */
 function isBalancedSplit(l1: string, l2: string): boolean {
   const len1 = l1.length, len2 = l2.length;
   if (len1 < 3 || len2 < 3) return false;
   const shorter = Math.min(len1, len2);
   const longer = Math.max(len1, len2);
-  return shorter / longer >= 0.4; // 짧은 쪽이 긴 쪽의 40% 이상이어야 균형
+  return shorter / longer >= 0.4;
 }
 
 export function formatNetflixSubtitle(text: string): string {
@@ -242,22 +347,18 @@ export function formatNetflixSubtitle(text: string): string {
 
   const midPoint = Math.floor(t.length / 2);
 
-  // 1순위: 문장부호 뒤 분할 — 균형 검사 통과 시만 채택
   const sentenceMatch = t.match(/^(.+?[.!?])\s+(.+)$/);
   if (sentenceMatch) {
     const l1 = sentenceMatch[1].trim(), l2 = sentenceMatch[2].trim();
     if (isBalancedSplit(l1, l2)) return `${l1}\n${l2}`;
-    // 불균형이면 다음 순위로 — 강제 채택하지 않음
   }
 
-  // 2순위: 쉼표 뒤 분할 — 균형 검사
   const commaMatch = t.match(/^(.+?,)\s+(.+)$/);
   if (commaMatch) {
     const l1 = commaMatch[1].trim(), l2 = commaMatch[2].trim();
     if (isBalancedSplit(l1, l2)) return `${l1}\n${l2}`;
   }
 
-  // 3순위: 한국어 조사/접속사 기준 — midPoint 가장 가까운 균형 지점
   const koPattern = /(은|는|이|가|을|를|에서|에게|으로|로|하고|이고|지만|는데|인데|그리고|그래서|하지만|그런데)\s/g;
   let bestPos = -1, bestDist = Infinity;
   let m: RegExpExecArray | null;
@@ -265,7 +366,7 @@ export function formatNetflixSubtitle(text: string): string {
   while ((m = koPattern.exec(t)) !== null) {
     const pos = m.index + m[1].length;
     const l1c = t.slice(0, pos).trim(), l2c = t.slice(pos).trim();
-    if (!isBalancedSplit(l1c, l2c)) continue; // 불균형 후보 스킵
+    if (!isBalancedSplit(l1c, l2c)) continue;
     const dist = Math.abs(pos - midPoint);
     if (dist < bestDist) { bestDist = dist; bestPos = pos; }
   }
@@ -274,11 +375,9 @@ export function formatNetflixSubtitle(text: string): string {
     if (isBalancedSplit(l1, l2)) return `${l1}\n${l2}`;
   }
 
-  // 4순위: 공백 기준 midPoint 가장 가까운 균형 지점
   const spaces: number[] = [];
   for (let i = 0; i < t.length; i++) { if (t[i] === " ") spaces.push(i); }
   if (spaces.length > 0) {
-    // midPoint 기준 정렬 후, 균형 조건을 만족하는 첫 번째 후보 채택
     const sorted = [...spaces].sort((a, b) => Math.abs(a - midPoint) - Math.abs(b - midPoint));
     for (const sp of sorted) {
       const l1 = t.slice(0, sp).trim(), l2 = t.slice(sp).trim();
@@ -289,51 +388,33 @@ export function formatNetflixSubtitle(text: string): string {
   return t;
 }
 
-// ── [핵심 개선] 의미 단위 chunk 분할 ─────────────────────────────────────────
-/**
- * 번역 텍스트를 의미 단위로 분할한다.
- * 우선순위: 문장부호 > 쉼표 > 한국어 조사/접속사 > 영어 접속사(phrase) > 단어
- *
- * [보정] healDanglingParticles: 단독 조사 토큰이 된 chunk를 다음 chunk와 병합
- * 반환값은 항상 1개 이상의 non-empty string 배열.
- */
+// ── 의미 단위 chunk 분할 ──────────────────────────────────────────────────────
 function splitIntoMeaningChunks(text: string): string[] {
   const t = text.trim();
   if (!t) return [t];
 
-  // 1순위: 문장부호(.!?) 뒤 공백
   const sentParts = t.split(/(?<=[.!?])\s+/).map(s => s.trim()).filter(Boolean);
   if (sentParts.length > 1) return healDanglingParticles(sentParts);
 
-  // 2순위: 쉼표 뒤 공백
   const commaParts = t.split(/,\s+/).map(s => s.trim()).filter(Boolean);
   if (commaParts.length > 1) return healDanglingParticles(commaParts);
 
-  // 3순위: 한국어 조사/접속사 경계 (lookbehind → 조사는 앞 청크에 포함)
   const koSplit = t
     .split(/(?<=은|는|이|가|을|를|에서|에게|으로|로|하고|이고|지만|는데|인데|그리고|그래서|하지만|그런데)\s+/)
     .map(s => s.trim())
     .filter(Boolean);
   if (koSplit.length > 1) return healDanglingParticles(koSplit);
 
-  // 4순위: 영어 접속사/전치사 기준 phrase 분할 (단어 단위 분해보다 의미 보존 우선)
   const enPhraseSplit = t
     .split(/(?<=\b(?:and|but|so|because|that|when|if|although|while|after|before|since|until|though|or)\b)\s+/i)
     .map(s => s.trim())
     .filter(Boolean);
   if (enPhraseSplit.length > 1) return enPhraseSplit;
 
-  // 5순위: 단어 분할 (최후 수단 — 어떤 패턴도 없는 경우)
   const wordParts = t.split(/\s+/).filter(Boolean);
   return wordParts.length > 0 ? wordParts : [t];
 }
 
-/**
- * chunk 배열에서 "단독 조사 토큰"이 된 chunk를 다음 chunk와 병합.
- * 예: split 결과로 ["이", "정말 중요합니다"] 가 나온 경우
- *     → ["이 정말 중요합니다"] 로 복원
- * 의미 단위 깨짐 방지용 보정 패스.
- */
 function healDanglingParticles(chunks: string[]): string[] {
   const RE_DANGLING = /^(은|는|이|가|을|를|에서|에게|으로|로)$/;
   const result: string[] = [];
@@ -351,21 +432,14 @@ function healDanglingParticles(chunks: string[]): string[] {
   return result.filter(Boolean);
 }
 
-/**
- * chunk 배열을 target 개수의 슬롯에 가능한 한 균등하게 병합하여 분배.
- * 예: chunks 5개, slots 3개 → [2, 2, 1] 개씩 병합
- */
 function distributeChunksToSlots(chunks: string[], slotCount: number): string[] {
   if (slotCount <= 0) return [];
   if (chunks.length === 0) return new Array(slotCount).fill("");
   if (slotCount === 1) return [chunks.join(" ")];
 
-  // chunk 수 < slot 수: word 단위로 한 번 더 쪼개서 슬롯을 채움
-  // (빈 슬롯 없이 모든 슬롯에 텍스트 배치 → 모바일 UX 개선)
   if (chunks.length < slotCount) {
     const words = chunks.join(" ").split(/\s+/).filter(Boolean);
     if (words.length >= slotCount) {
-      // 단어 수 >= 슬롯 수 → 단어 단위 균등 분배
       const result: string[] = [];
       let offset = 0;
       for (let s = 0; s < slotCount; s++) {
@@ -376,13 +450,11 @@ function distributeChunksToSlots(chunks: string[], slotCount: number): string[] 
       }
       return result;
     }
-    // 단어 수 < 슬롯 수: 어쩔 수 없이 빈 슬롯 허용 (텍스트 자체가 너무 짧음)
     const result = new Array(slotCount).fill("");
     for (let i = 0; i < words.length; i++) result[i] = words[i];
     return result;
   }
 
-  // chunk 수 >= slot 수 → chunk 단위 균등 병합
   const result: string[] = [];
   let offset = 0;
   for (let s = 0; s < slotCount; s++) {
@@ -412,20 +484,17 @@ function expandGroupTranslations(
       continue;
     }
 
-    // 호칭어 환각 제거
     const groupSrc = originalIndices.map(idx => originalSegments[idx].text).join(" ");
     if (!RE_HALLUCINATION_GUARD.test(groupSrc)) {
       translation = translation.replace(RE_HALLUCINATED_TERMS_KO, "").trim();
     }
     if (!translation) { for (const idx of originalIndices) result[idx] = originalSegments[idx].text; continue; }
 
-    // ── 케이스 1: 단일 세그먼트 ─────────────────────────────────────────────
     if (originalIndices.length === 1) {
       result[originalIndices[0]] = translation;
       continue;
     }
 
-    // ── 케이스 2: 2개 세그먼트 ──────────────────────────────────────────────
     if (originalIndices.length === 2) {
       const [p1, p2] = splitTranslationInTwo(
         translation,
@@ -437,14 +506,9 @@ function expandGroupTranslations(
       continue;
     }
 
-    // ── 케이스 3: 3개+ 세그먼트 ─────────────────────────────────────────────
-    // gap 기반 자연 분할 지점 탐색
     const breakPoints = findNaturalBreakPoints(originalIndices, originalSegments);
 
     if (breakPoints.length === 0) {
-      // gap 없음:
-      //   슬롯 1개 → 전체 텍스트 첫 슬롯에 (빈 슬롯 없이 자연스러움)
-      //   슬롯 2개+ → 균등 chunk 분배 (긴 문장이 한 슬롯에 몰리는 UX 문제 방지)
       if (originalIndices.length === 1) {
         result[originalIndices[0]] = translation;
       } else {
@@ -460,10 +524,6 @@ function expandGroupTranslations(
   return result;
 }
 
-/**
- * 번역을 2개 세그먼트에 의미 단위로 분배
- * 우선순위: 문장부호 > 쉼표 > 한국어 조사/접속사(타이밍 비율 기준) > 공백(타이밍 비율)
- */
 function splitTranslationInTwo(
   translation: string,
   seg1: TranslationSegment,
@@ -471,15 +531,12 @@ function splitTranslationInTwo(
 ): [string, string] {
   const t = translation.trim();
 
-  // 1순위: 문장 부호
   const sentenceBreak = t.match(/^(.+?[.!?])\s+(.+)$/);
   if (sentenceBreak) return [sentenceBreak[1].trim(), sentenceBreak[2].trim()];
 
-  // 2순위: 쉼표
   const commaBreak = t.match(/^(.+?,)\s+(.+)$/);
   if (commaBreak) return [commaBreak[1].trim(), commaBreak[2].trim()];
 
-  // 3순위: 한국어 조사/접속사 (타이밍 비율에 가장 가까운 지점)
   const dur1 = Math.max(seg1.end - seg1.start, 0.1);
   const dur2 = Math.max(seg2.end - seg2.start, 0.1);
   const targetRatio = dur1 / (dur1 + dur2);
@@ -498,7 +555,6 @@ function splitTranslationInTwo(
     return [t.slice(0, bestPos).trim(), t.slice(bestPos).trim()];
   }
 
-  // 4순위: chunk 기반 타이밍 비율 분할
   const chunks = splitIntoMeaningChunks(t);
   if (chunks.length >= 2) {
     const splitIdx = Math.max(1, Math.round(chunks.length * targetRatio));
@@ -511,9 +567,6 @@ function splitTranslationInTwo(
   return [t, ""];
 }
 
-/**
- * 0.8s 이상 gap이 있는 세그먼트 경계를 자연 분할 지점으로 반환
- */
 function findNaturalBreakPoints(
   originalIndices: number[],
   originalSegments: TranslationSegment[]
@@ -527,16 +580,6 @@ function findNaturalBreakPoints(
   return breaks;
 }
 
-/**
- * gap 분할 지점 기준으로 번역을 구간별로 배분.
- *
- * [핵심 변경]
- * 기존: words.split(/\s+/) → 단어 단위 분배 (의미 단위 파괴 위험)
- * 신규: splitIntoMeaningChunks() → 의미 chunk 단위 분배
- *
- * 각 구간(gap으로 나뉜 slot 그룹)에 타이밍 비율로 chunk를 배분하고,
- * 구간 내 첫 번째 슬롯에 병합된 텍스트를 배치, 나머지는 빈칸.
- */
 function distributeByBreakPoints(
   translation: string,
   originalIndices: number[],
@@ -544,7 +587,6 @@ function distributeByBreakPoints(
   originalSegments: TranslationSegment[],
   result: string[]
 ): void {
-  // 1. gap 기준으로 슬롯 그룹 구성
   const slotGroups: number[][] = [];
   let start = 0;
   for (const bp of breakPoints) {
@@ -553,14 +595,12 @@ function distributeByBreakPoints(
   }
   slotGroups.push(originalIndices.slice(start));
 
-  // 2. 각 슬롯 그룹의 총 duration 계산
   const durations = slotGroups.map(grp =>
     grp.reduce((sum, idx) =>
       sum + Math.max(originalSegments[idx].end - originalSegments[idx].start, 0.1), 0)
   );
   const totalDuration = durations.reduce((a, b) => a + b, 0);
 
-  // 3. [핵심] 단어가 아닌 의미 chunk 단위로 분할
   const chunks = splitIntoMeaningChunks(translation);
   const totalChunks = chunks.length;
 
@@ -571,10 +611,8 @@ function distributeByBreakPoints(
     let assignedText: string;
 
     if (si === slotGroups.length - 1) {
-      // 마지막 그룹: 남은 chunk 전부
       assignedText = chunks.slice(chunkOffset).join(" ");
     } else {
-      // 타이밍 비율로 chunk 개수 결정
       const chunkCount = Math.max(
         1,
         Math.round((durations[si] / totalDuration) * totalChunks)
@@ -583,8 +621,6 @@ function distributeByBreakPoints(
       chunkOffset += chunkCount;
     }
 
-    // [Fix 2] 구간 내 슬롯이 2개 이상이면 chunk 균등 분배
-    // (슬롯 1개: 전체 텍스트 그대로 / 슬롯 2개+: 빈칸 없이 균등 분배 → 모바일 UX 개선)
     if (grp.length === 1) {
       result[grp[0]] = assignedText.trim();
     } else {
@@ -712,7 +748,11 @@ export function sanitizeTranslationOutput(text: string, sourceText: string): str
   let out = text
     .replace(RE_OUTPUT_CORRUPTION, "")
     .replace(RE_UNTRANSLATED_MARKER, "")
-    .replace(RE_STAGE_DIRECTION_KO, "");
+    .replace(RE_STAGE_DIRECTION_KO, "")
+    .replace(RE_NUMBERED_PREFIX, "")
+    .replace(RE_AWKWARD_DEMONSTRATIVE, "그건 ")
+    .replace(RE_AWKWARD_DEMONSTRATIVE_I, "그게 ");
+
   if (!RE_HALLUCINATION_GUARD.test(sourceText)) out = out.replace(RE_HALLUCINATED_TERMS_KO, "");
   if (!sourceText.includes("(") && !sourceText.includes(")")) out = out.replace(RE_PARENS_ANY, "");
   return out.replace(/\s{2,}/g, " ").trim();
@@ -740,7 +780,6 @@ function isCorruptedOutput(text: string): boolean {
 function isOvergenerated(input: string, output: string, targetLanguage = "Korean"): boolean {
   const inLen = input.split(/\s+/).filter(Boolean).length;
   const outLen = output.split(/\s+/).filter(Boolean).length;
-  // 한국어는 조사/어미 구조상 원문 대비 어절 수가 늘어나므로 임계값 완화
   const threshold = targetLanguage === "Korean" ? 2.0 : 1.7;
   return outLen > Math.max(inLen * threshold, 4);
 }
@@ -866,14 +905,20 @@ function buildSystemPrompt(targetLanguage: string, langRules: string, genrePerso
     `- Preserve negation: "don't/can't/never" → must use 않/안/못/없 in Korean.\n` +
     `- Fragment lines (no complete verb) → translate as fragment, do NOT complete.\n` +
     `- Short responses (Yes/No/Hmm) → translate naturally as single words.\n` +
-    `- NEVER add 자기야/여보/honey/baby unless that exact word is in the source.\n` +
+    // [핵심 수정] baby 번역 규칙 추가
+    `- "baby" as informal address (not romantic context) → use the person's name or omit. NEVER translate as 자기야.\n` +
+    `- NEVER add 자기야/여보/honey unless that exact romantic term is in the source.\n` +
     `- "not really" → "그다지요"\n` +
     `- "good fit" in job/interview context → "잘 맞다" (compatibility, NOT fitness)\n` +
     `- "mental health day" → "정신 건강을 위한 휴가"\n` +
     `- "Vine" is a social media app → "바인(Vine)", never "덩굴"\n` +
     `- "surprised you didn't say X" → "X라고 안 하신 게 놀랍네요"\n` +
     `- "you don't work here" → "여기서 일하지도 않잖아요"\n` +
-    `- "are you firing me" → "저 해고하시는 거예요?"\n\n` +
+    `- "are you firing me" → "저 해고하시는 거예요?"\n` +
+    `- "I do" → "나" or "그럼요" depending on context\n` +
+    `- Conversational "That's/That is" referring to something just mentioned → "그건" or "그게" (NOT "저것은" or "그것은")\n` +
+    `- "This is/That's" in casual dialogue → use 그/이 pronouns, never 저\n` +
+    `\n` +
     langRules +
     nounHint
   );
@@ -895,6 +940,8 @@ export async function translateSegments(
   const cleaned = deduped.map(seg => ({ ...seg, text: normalizeSocialMediaNames(cleanWhisperText(seg.text)) }));
 
   // Step A: 프래그먼트 병합 → 완전한 문장
+  // [핵심 수정] mergeFragments: gap 0.6s + isShortIndependent(1~3단어) 보호
+  // [핵심 수정] enforceSentence: 2단어 미만만 병합 + isShortIndependent 보호
   let merged = mergeFragments(cleaned);
   merged = enforceSentence(merged);
   const mergedSegs = merged.map(g => ({ start: g.start, end: g.end, text: g.text, translated: "" }));
@@ -926,7 +973,7 @@ export async function translateSegments(
       const offset = bi * BATCH_SIZE;
       const batch = mergedSegs.slice(offset, offset + BATCH_SIZE);
       console.log(`[TRANSLATE] batch ${bi + 1}/${totalBatches} (${batch.length})`);
-  
+
       const sysPrompt = buildSystemPrompt(
         targetLanguage,
         langRules,
@@ -934,7 +981,7 @@ export async function translateSegments(
         nounHint,
         batch.length
       );
-  
+
       const r = await llamaContext.completion({
         messages: [
           { role: "system", content: sysPrompt },
@@ -946,29 +993,29 @@ export async function translateSegments(
         top_k: 40,
         repeat_penalty: 1.1,
         stop: ["</s>", "<end_of_turn>", "<|end|>"],
-      } as any); // 🔥 TS 에러 방지
-  
+      } as any);
+
       const translations = parseBatchResponse(r.text, batch, patterns);
-  
+
       for (let i = 0; i < batch.length; i++) {
         mergedTranslations[offset + i] = translations[i];
       }
-  
+
       const partial = expandGroupTranslations(merged, mergedTranslations, cleaned);
-  
+
       onProgress?.(
         offset + batch.length,
         total,
         mergeWithTranslations(cleaned, partial)
       );
-  
+
       await saveCheckpoint(videoHash, {
         translatedTexts: mergedTranslations,
         lastBatchIndex: bi,
         properNouns,
         totalBatches,
       });
-  
+
       if (bi < totalBatches - 1) {
         await sleep(
           (bi + 1) % THERMAL_EVERY_N === 0
@@ -984,16 +1031,16 @@ export async function translateSegments(
       expandGroupTranslations(merged, mergedTranslations, cleaned)
     );
   }
-  
+
   await deleteCheckpoint(videoHash);
-  
+
   // Step E: 재분배
   const translatedTexts = expandGroupTranslations(
     merged,
     mergedTranslations,
     cleaned
   );
-  
+
   // Step E.1: 호칭어 환각 제거
   for (let i = 0; i < cleaned.length; i++) {
     if (
@@ -1005,13 +1052,13 @@ export async function translateSegments(
         .trim();
     }
   }
-  
+
   // Step F: 실패 세그먼트 재시도
   for (let attempt = 0; attempt < 2; attempt++) {
     const failed = cleaned.reduce<number[]>((acc, seg, i) => {
       const t = translatedTexts[i];
       const src = seg.text.trim();
-  
+
       if (
         !t ||
         !t.trim() ||
@@ -1021,16 +1068,16 @@ export async function translateSegments(
       ) {
         return [...acc, i];
       }
-  
+
       return acc;
     }, []);
-  
+
     if (failed.length === 0) break;
-  
+
     console.log(`[Gemma] Retry ${attempt + 1}: ${failed.length} segs`);
-  
+
     const retryBatch = failed.map(i => cleaned[i]);
-  
+
     const retryPrompt = buildSystemPrompt(
       targetLanguage,
       langRules,
@@ -1038,7 +1085,7 @@ export async function translateSegments(
       nounHint,
       retryBatch.length
     );
-  
+
     try {
       const rr = await llamaContext.completion({
         messages: [
@@ -1051,10 +1098,10 @@ export async function translateSegments(
         top_k: 40,
         repeat_penalty: 1.1,
         stop: ["</s>", "<end_of_turn>", "<|end|>"],
-      } as any); // 🔥 TS 에러 방지
-  
+      } as any);
+
       const rt = parseBatchResponse(rr.text, retryBatch, patterns);
-  
+
       for (let j = 0; j < failed.length; j++) {
         if (
           rt[j] &&
@@ -1064,12 +1111,12 @@ export async function translateSegments(
           translatedTexts[failed[j]] = rt[j];
         }
       }
-  
+
     } catch (e) {
       console.warn(`[Gemma] Retry ${attempt + 1} error:`, e);
       break;
     }
-  
+
     if (attempt < 1) {
       await sleep(SLEEP_BETWEEN_MS);
     }
