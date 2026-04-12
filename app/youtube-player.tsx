@@ -603,7 +603,7 @@ export default function YoutubePlayerScreen() {
           <Text style={styles.title} numberOfLines={1}>{videoName ?? "YouTube"}</Text>
           <Text style={styles.titleSub}>YouTube · 자막 번역</Text>
         </View>
-        <TouchableOpacity onPress={() => router.push("/settings")} style={styles.headerBtn}>
+        <TouchableOpacity onPress={() => router.push("./settings")} style={styles.headerBtn}>
           <Text style={styles.headerBtnText}>⚙</Text>
         </TouchableOpacity>
       </View>}

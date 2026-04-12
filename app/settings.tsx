@@ -51,7 +51,7 @@ export default function SettingsScreen() {
           </View>
           <TouchableOpacity
             style={styles.manageBtn}
-            onPress={() => router.push("/gemmaModels")}
+            onPress={() => router.push("./gemmaModels")}
           >
             <Text style={styles.manageBtnText}>모델 관리</Text>
           </TouchableOpacity>
