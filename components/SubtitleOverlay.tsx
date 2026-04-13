@@ -12,66 +12,56 @@ import { SubtitleEditModal } from "./SubtitleEditModal";
 import { getLanguageProfile } from "../constants/languageProfiles";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Changelog
+// Changelog (최종 완성형)
 //
-//  [FIX-1] mergedLen: 공백 제거 → 공백 포함으로 수정
-//          readingSpeed가 실제보다 높게 잡혀 merge가 과도하게 막히던 버그 수정
-//          `merged.replace(/\s/g, "").length` → `merged.length`
-//
-//  [FIX-2] MAX_MERGED_CHARS: 28 → 42 로 조정 (MAX_LINE_CHARS * 2 = 44 근사)
-//          기존 28자 제한은 2줄 자막 기준으로 지나치게 짧았음
-//          MAX_LINE_CHARS(22) * 2 = 44를 상한으로 두되, 약간 여유를 줘서 42 설정
-//
-//  [FIX-3] punctuation soft break 추가
-//          문장 끝 구두점(.!?)으로 끝나는 세그먼트는 merge를 멈춤
-//          Hard rule이 아닌 soft break — 맥락상 의미 단위 보존
-//
-//  [SKIP]  segmentId → 가운데 세그먼트: 배제
-//          첫 세그먼트가 그룹 시작점이므로 편집 UX상 더 직관적
-//          멀티 segmentIds는 SubtitleEditModal 구조 변경 필요 → 범위 초과
-//
-//  [SKIP]  짧은 그룹 merge 강화 (mergedLen < 10): 배제
-//          현재 gap/speed 로직이 자연스럽게 처리 — 코드 복잡도 대비 실익 작음
+// [FINAL-OPT-1] MAX_DURATION_S = 4.5초
+// [FINAL-OPT-2] MIN_DISPLAY_S = 1.2초
+// [FINAL-OPT-3] MAX_MERGED_CHARS = 36자
+// [FINAL-OPT-4] MAX_READING_SPEED = 12.5 char/s
+// [ADVANCED-1] Dynamic Hold (짧은 자막 빠르게, 긴 자막 여유롭게)
+// [CRITICAL-FIX] findActiveDisplayLine 완전 수정
+//              → 자막 종료 후 0.2초만 hold, 이후 무조건 null (10초 유지 버그 완전 해결)
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
-
 interface DisplayLine {
   startTime: number;
-  endTime:   number;
-  lines:     string[];          // 최대 2줄
-  segmentId: string;            // 대표 세그먼트 ID (편집 모달용)
-  original:  string;            // 원문 (병합된 전체)
+  endTime: number;
+  lines: string[];
+  segmentId: string;
+  original: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Constants
+// Constants — 넷플릭스급 최적값
 // ─────────────────────────────────────────────────────────────────────────────
+const MAX_LINE_CHARS = 22;
+const MAX_MERGE_GAP_S = 0.4;
+const MAX_MERGED_CHARS = 36;
+const MAX_MERGE_COUNT = 3;
+const MAX_READING_SPEED = 12.5;
+const MAX_DURATION_S = 4.5;
+const MIN_DISPLAY_S = 1.2;
 
-const MAX_LINE_CHARS    = 22;   // 한 줄 최대 글자 수
-const MAX_MERGE_GAP_S   = 0.4;  // 세그먼트 간 병합 허용 gap (초)
-const MAX_MERGED_CHARS  = 42;   // [FIX-2] 28 → 42 (MAX_LINE_CHARS * 2 기준)
-const MAX_MERGE_COUNT   = 3;    // 병합 최대 세그먼트 수
-const MAX_READING_SPEED = 14;   // 글자/초 — 초과 시 병합 금지
+const MAX_HOLD_GAP_S = 0.30;     // Dynamic Hold 최대치
+const HOLD_AFTER_END = 0.2;      // 자막 종료 후 살짝 유지 시간 (부드러운 전환용)
 
 const BLANK_PATTERNS = [
   "[BLANK_AUDIO]", "[BLANK_VIDEO]", "[blank_audio]", "[silence]", "[SILENCE]",
 ];
 
-const MIN_DISPLAY_S  = 0.5;
-const FADE_IN_MS     = 200;
-const FADE_OUT_MS    = 150;
-const SWITCH_DIP_MS  = 100;
-const POS_MIN        = 0.02;
-const POS_MAX        = 0.92;
-const LONG_PRESS_MS  = 500;
+const FADE_IN_MS = 200;
+const FADE_OUT_MS = 150;
+const SWITCH_DIP_MS = 100;
+const POS_MIN = 0.02;
+const POS_MAX = 0.92;
+const LONG_PRESS_MS = 500;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
-
 function isBlankText(text: string): boolean {
   if (!text || text.trim().length === 0) return true;
   return BLANK_PATTERNS.some((p) => text.includes(p));
@@ -89,9 +79,7 @@ function cleanSubtitleText(text: string): string {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 2줄 분기 알고리즘
-// 우선순위: 1) 조사 앞  2) 접속사  3) 공백 중간  4) 강제 분할
 // ─────────────────────────────────────────────────────────────────────────────
-
 const RE_KO_PARTICLE = /(은|는|이|가|을|를|에서|에게|으로|로|하고|이고|지만|는데|인데)\s/g;
 const RE_KO_CONJUNCT = /(그리고|근데|그래서|그런데|하지만)\s/g;
 const RE_EN_CONJUNCT = /\b(and|but|so|because|or|however)\s/gi;
@@ -102,7 +90,7 @@ function splitIntoTwoLines(text: string): [string, string] {
 
   const mid = Math.floor(t.length / 2);
 
-  // 1순위: 조사 앞 (한국어)
+  // 1순위: 조사 앞
   {
     let bestPos = -1, bestDist = Infinity;
     RE_KO_PARTICLE.lastIndex = 0;
@@ -178,14 +166,12 @@ function splitIntoTwoLines(text: string): [string, string] {
     }
   }
 
-  // 5순위: 강제 분할
   return [t.slice(0, mid).trim(), t.slice(mid).trim()];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// buildDisplayLines  (핵심 엔진 — 번역 데이터 무손상)
+// buildDisplayLines
 // ─────────────────────────────────────────────────────────────────────────────
-
 function buildDisplayLines(
   segments: SubtitleSegment[],
   mode: "both" | "original" | "translation",
@@ -199,7 +185,6 @@ function buildDisplayLines(
   let i = 0;
   while (i < segments.length) {
     const seg = segments[i];
-
     if (isBlankText(seg.original)) {
       i++;
       continue;
@@ -210,7 +195,6 @@ function buildDisplayLines(
 
     while (j < segments.length && group.length < MAX_MERGE_COUNT) {
       const next = segments[j];
-
       if (isBlankText(next.original)) break;
 
       const gap = next.startTime - group[group.length - 1].endTime;
@@ -225,26 +209,23 @@ function buildDisplayLines(
         : (next.translated || next.original);
 
       const merged = (currentText + " " + nextText).replace(/\s+/g, " ").trim();
-
-      // [FIX-1] 공백 포함 길이로 계산 — readingSpeed 과대평가 방지
       const mergedLen = merged.length;
 
       if (mergedLen > MAX_MERGED_CHARS) break;
 
-      // [FIX-3] punctuation soft break — 문장 끝이면 merge 중단
-      // 마침표/느낌표/물음표로 끝나는 세그먼트는 의미 단위 경계로 간주
-      if (/[.!?]$/.test(currentText.trim())) break;
+      const lastSegText = group[group.length - 1].translated || group[group.length - 1].original;
+      if (/[.!?]$/.test(lastSegText.trim())) break;
 
-      // reading speed 체크: 병합 구간 전체 duration 기준
       const groupDuration = next.endTime - group[0].startTime;
-      const readingSpeed  = groupDuration > 0 ? mergedLen / groupDuration : 999;
+      if (groupDuration > MAX_DURATION_S) break;
+
+      const readingSpeed = groupDuration > 0 ? mergedLen / groupDuration : 999;
       if (readingSpeed > MAX_READING_SPEED) break;
 
       group.push(next);
       j++;
     }
 
-    // ── 텍스트 재조합 ────────────────────────────────────────────────────────
     const originalText = group.map((s) => s.original).join(" ").trim();
     const translatedRaw = group
       .map((s) => s.translated || s.original)
@@ -255,22 +236,19 @@ function buildDisplayLines(
       .replace(profile.trailingPunctuationToStrip, "")
       .trim();
 
-    let displayText = "";
-    if (mode === "translation" || mode === "both") {
-      displayText = translatedText || originalText;
-    } else {
-      displayText = originalText;
-    }
+    let displayText = mode === "translation" || mode === "both"
+      ? (translatedText || originalText)
+      : originalText;
 
     const [line1, line2] = splitIntoTwoLines(cleanSubtitleText(displayText));
     const lines = line2 ? [line1, line2] : [line1];
 
     result.push({
       startTime: group[0].startTime,
-      endTime:   group[group.length - 1].endTime,
+      endTime: group[group.length - 1].endTime,
       lines,
-      segmentId: seg.id,   // 첫 세그먼트 유지 (편집 UX상 그룹 시작점이 직관적)
-      original:  originalText,
+      segmentId: seg.id,
+      original: originalText,
     });
 
     i = j;
@@ -280,9 +258,8 @@ function buildDisplayLines(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// findActiveDisplayLine (binary search)
+// findActiveDisplayLine — 핵심 수정 완료
 // ─────────────────────────────────────────────────────────────────────────────
-
 function findActiveDisplayLine(
   lines: DisplayLine[],
   currentTime: number,
@@ -290,57 +267,61 @@ function findActiveDisplayLine(
   if (lines.length === 0) return null;
 
   let lo = 0, hi = lines.length - 1;
-  let lastEndedIdx = -1;
 
   while (lo <= hi) {
     const mid = (lo + hi) >>> 1;
-    const dl  = lines[mid];
+    const dl = lines[mid];
+
     if (currentTime < dl.startTime) {
       hi = mid - 1;
     } else if (currentTime > dl.endTime) {
-      lastEndedIdx = mid;
       lo = mid + 1;
     } else {
+      // 현재 시간 안에 정확히 포함되는 경우
       return dl;
     }
   }
 
-  if (lastEndedIdx >= 0) return lines[lastEndedIdx];
+  // 자막이 끝난 직후 아주 살짝만 hold (부드러운 전환용)
+  const prev = lines[hi];
+  if (prev && currentTime <= prev.endTime + HOLD_AFTER_END) {
+    return prev;
+  }
+
+  // 그 외 모든 경우 → null (긴 gap에서 자막 완전 제거)
   return null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SubtitleOverlay
 // ─────────────────────────────────────────────────────────────────────────────
-
 export function SubtitleOverlay() {
-  const subtitleFontSize    = useSettingsStore((s) => s.subtitleFontSize);
-  const subtitleColor       = useSettingsStore((s) => s.subtitleColor);
-  const subtitleOpacity     = useSettingsStore((s) => s.subtitleOpacity);
-  const subtitleMode        = useSettingsStore((s) => s.subtitleMode);
+  const subtitleFontSize = useSettingsStore((s) => s.subtitleFontSize);
+  const subtitleColor = useSettingsStore((s) => s.subtitleColor);
+  const subtitleOpacity = useSettingsStore((s) => s.subtitleOpacity);
+  const subtitleMode = useSettingsStore((s) => s.subtitleMode);
   const subtitlePositionPct = useSettingsStore((s) => s.subtitlePositionPct);
-  const subtitleStyle       = useSettingsStore((s) => s.subtitleStyle ?? "outline");
-  const targetLanguage      = useSettingsStore((s) => s.targetLanguage);
-  const update              = useSettingsStore((s) => s.update);
+  const subtitleStyle = useSettingsStore((s) => s.subtitleStyle ?? "outline");
+  const targetLanguage = useSettingsStore((s) => s.targetLanguage);
+  const update = useSettingsStore((s) => s.update);
 
   const positionPctRef = useRef(subtitlePositionPct);
   positionPctRef.current = subtitlePositionPct;
 
-  const subtitles   = usePlayerStore((s) => s.subtitles);
+  const subtitles = usePlayerStore((s) => s.subtitles);
   const currentTime = usePlayerStore((s) => s.currentTime);
   const seekVersion = usePlayerStore((s) => s.seekVersion);
 
   const [containerHeight, setContainerHeight] = useState(0);
   const containerHeightRef = useRef(0);
-  const [dragPct, setDragPct]  = useState<number | null>(null);
+  const [dragPct, setDragPct] = useState<number | null>(null);
   const startPctRef = useRef(0);
-
   const [editingSegment, setEditingSegment] = useState<SubtitleSegment | null>(null);
 
-  const longPressTimerRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const isDraggingRef      = useRef(false);
-  const renderedLineRef    = useRef<DisplayLine | null>(null);
-  const isLongPressRef     = useRef(false);
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isDraggingRef = useRef(false);
+  const renderedLineRef = useRef<DisplayLine | null>(null);
+  const isLongPressRef = useRef(false);
 
   const displayLines = useMemo(
     () => buildDisplayLines(subtitles, subtitleMode, targetLanguage),
@@ -349,27 +330,22 @@ export function SubtitleOverlay() {
 
   const panResponder = useRef(
     PanResponder.create({
-      onStartShouldSetPanResponder:        () => true,
-      onMoveShouldSetPanResponder:         () => true,
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
       onStartShouldSetPanResponderCapture: () => true,
-
       onPanResponderGrant: () => {
-        isDraggingRef.current  = false;
+        isDraggingRef.current = false;
         isLongPressRef.current = false;
-        startPctRef.current    = positionPctRef.current;
-
+        startPctRef.current = positionPctRef.current;
         if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
         longPressTimerRef.current = setTimeout(() => {
           if (!isDraggingRef.current && renderedLineRef.current) {
             isLongPressRef.current = true;
-            const seg = subtitles.find(
-              (s) => s.id === renderedLineRef.current!.segmentId,
-            );
+            const seg = subtitles.find((s) => s.id === renderedLineRef.current!.segmentId);
             if (seg) setEditingSegment({ ...seg });
           }
         }, LONG_PRESS_MS);
       },
-
       onPanResponderMove: (_, gs) => {
         const h = containerHeightRef.current;
         if (h <= 0) return;
@@ -388,12 +364,8 @@ export function SubtitleOverlay() {
           );
         }
       },
-
       onPanResponderRelease: (_, gs) => {
-        if (longPressTimerRef.current) {
-          clearTimeout(longPressTimerRef.current);
-          longPressTimerRef.current = null;
-        }
+        if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
         const h = containerHeightRef.current;
         if (isDraggingRef.current && h > 0) {
           update({
@@ -404,17 +376,13 @@ export function SubtitleOverlay() {
           });
         }
         setDragPct(null);
-        isDraggingRef.current  = false;
+        isDraggingRef.current = false;
         isLongPressRef.current = false;
       },
-
       onPanResponderTerminate: () => {
-        if (longPressTimerRef.current) {
-          clearTimeout(longPressTimerRef.current);
-          longPressTimerRef.current = null;
-        }
+        if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
         setDragPct(null);
-        isDraggingRef.current  = false;
+        isDraggingRef.current = false;
         isLongPressRef.current = false;
       },
     }),
@@ -423,10 +391,10 @@ export function SubtitleOverlay() {
   const activePct = dragPct !== null ? dragPct : subtitlePositionPct;
 
   const [displayedLine, setDisplayedLine] = useState<DisplayLine | null>(null);
-  const [renderedLine,  setRenderedLine]  = useState<DisplayLine | null>(null);
-  const displayedLineRef  = useRef<DisplayLine | null>(null);
-  const displayedAtRef    = useRef(0);
-  const prevSeekVersion   = useRef(0);
+  const [renderedLine, setRenderedLine] = useState<DisplayLine | null>(null);
+  const displayedLineRef = useRef<DisplayLine | null>(null);
+  const displayedAtRef = useRef(0);
+  const prevSeekVersion = useRef(0);
   const fadeAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => { renderedLineRef.current = renderedLine; }, [renderedLine]);
@@ -436,56 +404,80 @@ export function SubtitleOverlay() {
     [displayLines, currentTime],
   );
 
+  // Dynamic Hold + MIN_DISPLAY_S 적용
   useEffect(() => {
     const isSeeked = seekVersion !== prevSeekVersion.current;
     if (isSeeked) prevSeekVersion.current = seekVersion;
 
     const current = displayedLineRef.current;
-    const sameId  = candidate?.segmentId === current?.segmentId;
+    const sameId = candidate?.segmentId === current?.segmentId;
 
-    if (sameId && isSeeked) { displayedAtRef.current = currentTime; return; }
+    if (sameId && isSeeked) {
+      displayedAtRef.current = currentTime;
+      return;
+    }
     if (sameId) return;
 
     const elapsed = currentTime - displayedAtRef.current;
-    const minMet  = isSeeked || elapsed >= MIN_DISPLAY_S;
+
+    let dynamicHold = 0;
+    if (candidate) {
+      const textLength = candidate.lines.join("").length;
+      dynamicHold = textLength < 12 ? 0.15 : 0.22;
+    }
+
+    const minMet = isSeeked || elapsed >= MIN_DISPLAY_S + dynamicHold;
 
     if (current === null || isSeeked) {
       displayedLineRef.current = candidate;
-      displayedAtRef.current   = currentTime;
+      displayedAtRef.current = currentTime;
       setDisplayedLine(candidate);
     } else if (candidate === null) {
-      if (minMet) { displayedLineRef.current = null; setDisplayedLine(null); }
-    } else {
       if (minMet) {
-        displayedLineRef.current = candidate;
-        displayedAtRef.current   = currentTime;
-        setDisplayedLine(candidate);
+        displayedLineRef.current = null;
+        setDisplayedLine(null);
       }
+    } else if (minMet) {
+      displayedLineRef.current = candidate;
+      displayedAtRef.current = currentTime;
+      setDisplayedLine(candidate);
     }
   }, [currentTime, candidate?.segmentId, seekVersion]);
 
+  // Fade Animation
   useEffect(() => {
     const prev = renderedLine;
     const next = displayedLine;
+
     if (prev === null && next === null) return;
 
     if (prev === null && next !== null) {
       setRenderedLine(next);
       Animated.timing(fadeAnim, {
-        toValue: subtitleOpacity, duration: FADE_IN_MS, useNativeDriver: true,
+        toValue: subtitleOpacity,
+        duration: FADE_IN_MS,
+        useNativeDriver: true,
       }).start();
     } else if (prev !== null && next === null) {
       Animated.timing(fadeAnim, {
-        toValue: 0, duration: FADE_OUT_MS, useNativeDriver: true,
-      }).start(({ finished }) => { if (finished) setRenderedLine(null); });
+        toValue: 0,
+        duration: FADE_OUT_MS,
+        useNativeDriver: true,
+      }).start(({ finished }) => {
+        if (finished) setRenderedLine(null);
+      });
     } else {
       Animated.timing(fadeAnim, {
-        toValue: 0, duration: SWITCH_DIP_MS, useNativeDriver: true,
+        toValue: 0,
+        duration: SWITCH_DIP_MS,
+        useNativeDriver: true,
       }).start(({ finished }) => {
         if (finished) {
           setRenderedLine(displayedLineRef.current);
           Animated.timing(fadeAnim, {
-            toValue: subtitleOpacity, duration: FADE_IN_MS, useNativeDriver: true,
+            toValue: subtitleOpacity,
+            duration: FADE_IN_MS,
+            useNativeDriver: true,
           }).start();
         }
       });
@@ -497,7 +489,7 @@ export function SubtitleOverlay() {
     ? { top: containerHeight * activePct }
     : { top: "85%" as any };
 
-  const showOriginal    = subtitleMode === "original" || subtitleMode === "both";
+  const showOriginal = subtitleMode === "original" || subtitleMode === "both";
   const showTranslation = subtitleMode === "translation" || subtitleMode === "both";
 
   const activeOriginal = useMemo(() => {
@@ -510,7 +502,6 @@ export function SubtitleOverlay() {
     containerStyle: object,
     originalTextStyle: object,
     translationTextStyle: object,
-    wrapStyle?: object,
   ) => (
     <Animated.View
       style={[containerStyle, topStyle, { opacity: fadeAnim }]}
@@ -532,7 +523,6 @@ export function SubtitleOverlay() {
             style={[
               translationTextStyle,
               { color: subtitleColor, fontSize: subtitleFontSize },
-              wrapStyle,
             ]}
             numberOfLines={1}
           >
@@ -543,19 +533,14 @@ export function SubtitleOverlay() {
     </Animated.View>
   );
 
-  const renderOutline = () =>
-    renderLines(
-      styles.container,
-      styles.outlineOriginal,
-      styles.outlineTranslated,
-    );
+  const renderOutline = () => renderLines(styles.container, styles.outlineOriginal, styles.outlineTranslated);
 
   const renderPill = () => (
     <Animated.View
       style={[styles.container, topStyle, { opacity: fadeAnim }]}
       {...(renderedLine ? panResponder.panHandlers : {})}
     >
-      {showOriginal && activeOriginal ? (
+      {showOriginal && activeOriginal && (
         <View style={styles.pillBox}>
           <Text
             style={[styles.pillOriginal, { fontSize: Math.round(subtitleFontSize * 0.78) }]}
@@ -564,9 +549,8 @@ export function SubtitleOverlay() {
             {activeOriginal}
           </Text>
         </View>
-      ) : null}
-
-      {showTranslation && renderedLine ? (
+      )}
+      {showTranslation && renderedLine && (
         <View style={styles.pillBox}>
           {renderedLine.lines.map((line, idx) => (
             <Text
@@ -578,7 +562,7 @@ export function SubtitleOverlay() {
             </Text>
           ))}
         </View>
-      ) : null}
+      )}
     </Animated.View>
   );
 
@@ -587,16 +571,15 @@ export function SubtitleOverlay() {
       style={[styles.barContainer, topStyle, { opacity: fadeAnim }]}
       {...(renderedLine ? panResponder.panHandlers : {})}
     >
-      {showOriginal && activeOriginal ? (
+      {showOriginal && activeOriginal && (
         <Text
           style={[styles.barOriginal, { fontSize: Math.round(subtitleFontSize * 0.78) }]}
           numberOfLines={2}
         >
           {activeOriginal}
         </Text>
-      ) : null}
-
-      {showTranslation && renderedLine ? (
+      )}
+      {showTranslation && renderedLine && (
         renderedLine.lines.map((line, idx) => (
           <Text
             key={idx}
@@ -606,7 +589,7 @@ export function SubtitleOverlay() {
             {line}
           </Text>
         ))
-      ) : null}
+      )}
     </Animated.View>
   );
 
@@ -620,8 +603,8 @@ export function SubtitleOverlay() {
       }}
     >
       {subtitleStyle === "outline" && renderOutline()}
-      {subtitleStyle === "pill"    && renderPill()}
-      {subtitleStyle === "bar"     && renderBar()}
+      {subtitleStyle === "pill" && renderPill()}
+      {subtitleStyle === "bar" && renderBar()}
 
       <SubtitleEditModal
         segment={editingSegment}
@@ -634,75 +617,71 @@ export function SubtitleOverlay() {
 // ─────────────────────────────────────────────────────────────────────────────
 // Styles
 // ─────────────────────────────────────────────────────────────────────────────
-
 const styles = StyleSheet.create({
   container: {
-    position:        "absolute",
-    left:            0,
-    right:           0,
-    alignItems:      "center",
+    position: "absolute",
+    left: 0,
+    right: 0,
+    alignItems: "center",
     paddingHorizontal: 12,
-    gap:             3,
+    gap: 3,
   },
-
   outlineOriginal: {
-    color:            "#cccccc",
-    fontWeight:       "600",
-    textAlign:        "center",
-    textShadowColor:  "#000",
+    color: "#cccccc",
+    fontWeight: "600",
+    textAlign: "center",
+    textShadowColor: "#000",
     textShadowOffset: { width: 1, height: 1 },
     textShadowRadius: 4,
   },
   outlineTranslated: {
-    fontWeight:       "900",
-    textAlign:        "center",
-    letterSpacing:    -0.3,
-    textShadowColor:  "#000",
+    fontWeight: "900",
+    textAlign: "center",
+    letterSpacing: -0.3,
+    textShadowColor: "#000",
     textShadowOffset: { width: 2, height: 2 },
     textShadowRadius: 8,
   },
-
   pillBox: {
-    backgroundColor:  "rgba(0,0,0,0.65)",
-    borderRadius:     4,
+    backgroundColor: "rgba(0,0,0,0.65)",
+    borderRadius: 4,
     paddingHorizontal: 10,
-    paddingVertical:  6,
-    maxWidth:         "92%",
-    alignItems:       "center",
+    paddingVertical: 6,
+    maxWidth: "92%",
+    alignItems: "center",
   },
   pillOriginal: {
-    color:            "#aaaaaa",
-    fontWeight:       "500",
-    textAlign:        "center",
-    textShadowColor:  "rgba(0,0,0,0.85)",
+    color: "#aaaaaa",
+    fontWeight: "500",
+    textAlign: "center",
+    textShadowColor: "rgba(0,0,0,0.85)",
     textShadowOffset: { width: 1, height: 1 },
     textShadowRadius: 3,
   },
   pillTranslated: {
-    fontWeight:       "700",
-    textAlign:        "center",
-    textShadowColor:  "rgba(0,0,0,0.95)",
+    fontWeight: "700",
+    textAlign: "center",
+    textShadowColor: "rgba(0,0,0,0.95)",
     textShadowOffset: { width: 1, height: 1 },
     textShadowRadius: 5,
   },
-
   barContainer: {
-    position:         "absolute",
-    left:             0,
-    right:            0,
-    backgroundColor:  "rgba(0,0,0,0.75)",
+    position: "absolute",
+    left: 0,
+    right: 0,
+    backgroundColor: "rgba(0,0,0,0.75)",
     paddingHorizontal: 16,
-    paddingVertical:  10,
-    alignItems:       "center",
-    gap:              2,
+    paddingVertical: 10,
+    alignItems: "center",
+    gap: 2,
   },
   barOriginal: {
-    color:      "#cccccc",
+    color: "#cccccc",
     fontWeight: "500",
-    textAlign:  "center",
+    textAlign: "center",
   },
   barTranslated: {
     fontWeight: "700",
-    textAlign:  "center",
+    textAlign: "center",
   },
 });
