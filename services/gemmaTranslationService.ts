@@ -48,8 +48,7 @@ const EXPAND_GAP_THRESHOLD_S = 0.8;
 // 기본 병합 gap 상한
 const MERGE_GAP_HARD_LIMIT_S = 0.6;
 
-// [Fix] 발화자 전환이 강하게 의심될 때 적용하는 더 엄격한 gap 상한
-// Q→A 패턴이나 지시→반응 패턴에서는 gap이 짧아도 분리
+// 발화자 전환이 강하게 의심될 때 적용하는 더 엄격한 gap 상한
 const MERGE_GAP_SPEAKER_CHANGE_S = 0.35;
 
 // ── 소셜미디어 앱명 정규화 ────────────────────────────────────────────────────
@@ -75,22 +74,46 @@ const RE_NUMBERED_PREFIX = /^\d+\.\s+/;
 const RE_AWKWARD_DEMONSTRATIVE = /^저것은\s/;
 const RE_AWKWARD_DEMONSTRATIVE_I = /^저것이\s/;
 
-// ── [Fix A] 발화자 전환 신호 패턴 ────────────────────────────────────────────
-// 이 패턴으로 끝나는 세그먼트 뒤에 오는 세그먼트는 다른 발화자일 가능성이 높음
-// 질문, 지시, 완결 문장 → 다음 세그먼트는 응답일 가능성
+// ── 발화자 전환 신호 패턴 ────────────────────────────────────────────────────
 const RE_LIKELY_QUESTION_END = /\?$|\bright\b|\bunderstood\b|\bunderstand\b|\bgot it\b/i;
-// 다음 세그먼트가 응답/백채널일 가능성이 높은 패턴
 const RE_LIKELY_RESPONSE_START = /^(yes|no|yeah|nope|yep|nah|i do|i don'?t|not really|of course|okay|ok|sure|right|hmm|uh|oh|well|i|we|that|it'?s|what|why|how)\b/i;
 
-// ── [Fix B] 환각 추가 내용 감지 패턴 ─────────────────────────────────────────
-// 원문에 없는 내용이 번역문에 추가된 경우 감지
-// "don't work here" → "여기서 일하지도 않잖아요" (O) vs "놀랍네요" 추가 (X)
+// ── 환각 추가 내용 감지 패턴 ─────────────────────────────────────────────────
 const RE_HALLUCINATED_ADDITION_KO = /놀랍네요|놀랍습니다|놀랍군요|이상하네요|이상합니다/g;
 
-// ── [Fix C] 시간대 후처리 패턴 ───────────────────────────────────────────────
-// "until X:00 in the morning" → X시 이후면 새벽/아침 판단
-// 번역문에서 잘못된 시간대 표현 교정
+// ── 시간대 후처리 패턴 ───────────────────────────────────────────────────────
 const RE_MORNING_TIME_KO = /아침\s*(\d{1,2})시/g;
+
+// ── [FIX-TIME] 시간 표기 변환 패턴 ─────────────────────────────────────────
+// 반드시 restoreNumericTokens 이후에만 적용
+// 핵심: __NUM 플레이스홀더가 없는 순수 HH:MM 형태만 매칭
+const RE_TIME_HHMM = /\b(\d{1,2}):(\d{2})(?::\d{2})?(?:\s*(AM|PM|am|pm))?\b/g;
+
+// ── [FIX-TIME-DEDUP] "8시 시" 중복 감지 패턴 ────────────────────────────────
+// convertTimeExpressionKo 적용 후 중복 단위가 생기는 경우 제거
+const RE_TIME_UNIT_DEDUP = /(\d{1,2})시\s*시/g;
+const RE_MINUTE_UNIT_DEDUP = /(\d{1,2})분\s*분/g;
+
+// ── [FIX-2] "until (like) X(:00)? in the morning" — 새벽 판정 ───────────────
+const RE_UNTIL_IN_MORNING = /until\s+(?:like\s+)?(\d{1,2})(?::\d{2})?\s+in\s+the\s+morning/i;
+
+// ── [FIX-2B] 도착/행동 시간: "until (like) X(:00)?" 패턴 ────────────────────
+const RE_UNTIL_TIME_ONLY = /until\s+(?:like\s+)?(\d{1,2})(?::\d{2})?\b(?!\s+in\s+the\s+morning)/i;
+
+// ── [FIX-3] Placeholder 잔존 감지 ────────────────────────────────────────────
+const RE_PLACEHOLDER_LEAK = /__NUM\d+__/g;
+
+// ── [FIX-THAT-KIND-OF] "that kind of" / "kind of" 판별 패턴 ────────────────
+// 1. "that kind of thing" → 무조건 "그런 거" / "그런 식"
+const RE_THAT_KIND_OF_THING = /that\s+kind\s+of\s+thing/i;
+// 2. "that kind of + 명사" → 지칭 용법 ("그런 종류의")
+const RE_THAT_KIND_OF_NOUN = /that\s+kind\s+of\s+([a-z]+(?:\s+[a-z]+)?)/i;
+// 3. "that kind of + 동사/형용사" → 약화 용법 ("좀" / "그게 좀")
+const RE_THAT_KIND_OF_VERB_ADJ = /that\s+kind\s+of\s+(is|was|are|were|feels|feel|seems|seem|looks|look|sounds|sound|works|work|makes|make|does|do|did|doesn't|don't|won't|can't|isn't|wasn't)/i;
+// 4. "kind of" 단독 (not preceded by "that") → 약화어 "좀" / "약간"
+const RE_KIND_OF_ALONE = /(?<!that\s)kind\s+of\b/i;
+// 5. 부정 동사 동반 패턴
+const RE_NEGATIVE_VERB = /\b(doesn't|don't|won't|can't|isn't|wasn't|didn't|never|no|not)\b/i;
 
 // ── 장르 페르소나 ─────────────────────────────────────────────────────────────
 const GENRE_PERSONA: Record<string, string> = {
@@ -117,6 +140,7 @@ const COMMON_WORDS = new Set([
   "Good","Great","Little","Large","Small","Big","Long","High","Own",
   "After","Before","While","Although","Because","Since","Until","Though",
   "With","Without","About","Above","Below","Between","Through","During",
+  "Save",
 ]);
 
 // ── 보호 고유명사 (번역 금지) ─────────────────────────────────────────────────
@@ -129,7 +153,6 @@ const PROTECTED_PROPER_NOUNS = new Set([
   "Skype", "Zoom", "Teams", "Slack",
 ]);
 
-// HR은 별도 처리 — 고유명사 추출 제외 + 후처리에서 보호
 const PROTECTED_ACRONYMS = new Set(["HR", "CEO", "CFO", "CTO", "IT", "PR", "VP"]);
 
 let llamaContext: LlamaContext | null = null;
@@ -164,31 +187,177 @@ function maskNumericTokens(text: string): { masked: string; tokens: MaskedToken[
 
 function restoreNumericTokens(text: string, tokens: MaskedToken[]): string {
   let r = text;
-  // 역순으로 복원 — __NUM10__이 __NUM1__에 포함되는 오치환 방지
   for (let i = tokens.length - 1; i >= 0; i--) {
     r = r.replace(new RegExp(escapeRegex(tokens[i].placeholder), "g"), tokens[i].original);
   }
   return r;
 }
 
-// ── [Fix A] 발화자 전환 가능성 판단 ──────────────────────────────────────────
-// prev 세그먼트 끝과 curr 세그먼트 시작을 보고 발화자 전환 가능성을 반환
-// true면 이 경계에서 병합을 더 엄격하게 제한
+// ── [FIX-3] Placeholder 잔존 시 강제 제거 ────────────────────────────────────
+function stripLeakedPlaceholders(text: string): string {
+  return text.replace(RE_PLACEHOLDER_LEAK, "").replace(/\s{2,}/g, " ").trim();
+}
+
+// ── [FIX-TIME-DEDUP] 중복 시간 단위 제거 ────────────────────────────────────
+// "8시 시" → "8시", "30분 분" → "30분"
+// convertTimeExpressionKo 이후 반드시 호출
+function deduplicateTimeUnits(text: string): string {
+  return text
+    .replace(RE_TIME_UNIT_DEDUP, "$1시")
+    .replace(RE_MINUTE_UNIT_DEDUP, "$1분");
+}
+
+// ── [FIX-TIME] 한국어 시간 표기 변환 ─────────────────────────────────────────
+// "8:00" → "8시", "3:30" → "3시 30분", "10:45 AM" → "오전 10시 45분"
+// 반드시 restoreNumericTokens 이후에 호출
+function convertTimeExpressionKo(text: string): string {
+  RE_TIME_HHMM.lastIndex = 0;
+  const converted = text.replace(RE_TIME_HHMM, (match, hour, minute, ampm) => {
+    const h = parseInt(hour, 10);
+    const m = parseInt(minute, 10);
+
+    if (ampm) {
+      const isAm = /am/i.test(ampm);
+      const prefix = isAm ? "오전" : "오후";
+      if (m === 0) return `${prefix} ${h}시`;
+      return `${prefix} ${h}시 ${m}분`;
+    }
+
+    if (m === 0) return `${h}시`;
+    return `${h}시 ${m}분`;
+  });
+
+  // 변환 직후 중복 단위 제거 — "8시 시" 같은 이중 변환 방어
+  return deduplicateTimeUnits(converted);
+}
+
+// ── [FIX-2] 새벽 시간대 판정 — 원문 기반 ────────────────────────────────────
+function applyDawnTimeCorrection(out: string, sourceText: string): string {
+  // Case A: "until (like) X in the morning" → 새벽 판정
+  const morningMatch = sourceText.match(RE_UNTIL_IN_MORNING);
+  if (morningMatch) {
+    const hour = parseInt(morningMatch[1], 10);
+    if (hour >= 1 && hour <= 6) {
+      out = out.replace(RE_MORNING_TIME_KO, (_, h) => `새벽 ${h}시`);
+      out = out.replace(/아침까지/, "새벽까지");
+      // [FIX-TIME-DAWN] "오전 X시"가 새벽 시간대인 경우도 교정
+      out = out.replace(/오전\s*(\d{1,2})시/g, (_, h) => {
+        const hNum = parseInt(h, 10);
+        return hNum >= 1 && hNum <= 6 ? `새벽 ${h}시` : `오전 ${h}시`;
+      });
+    }
+    return out;
+  }
+
+  // Case B: "X:00 in the morning" / "X in the morning" (until 없는 경우)
+  const inMorningMatch = sourceText.match(/(?:^|,|\s)(?:like\s+)?(\d{1,2})(?::\d{2})?\s+in\s+the\s+morning/i);
+  if (inMorningMatch) {
+    const hour = parseInt(inMorningMatch[1], 10);
+    if (hour >= 1 && hour <= 6) {
+      out = out.replace(RE_MORNING_TIME_KO, (_, h) => `새벽 ${h}시`);
+      out = out.replace(/오전\s*(\d{1,2})시/g, (_, h) => {
+        const hNum = parseInt(h, 10);
+        return hNum >= 1 && hNum <= 6 ? `새벽 ${h}시` : `오전 ${h}시`;
+      });
+    }
+    return out;
+  }
+
+  // Case C: 도착/행동 시간 "until (like) X:00" (in the morning 없음) → 새벽 제거
+  const untilArrivalMatch = sourceText.match(RE_UNTIL_TIME_ONLY);
+  if (untilArrivalMatch) {
+    const hour = parseInt(untilArrivalMatch[1], 10);
+    if (hour >= 7) {
+      out = out.replace(/새벽\s*(\d{1,2})시/g, (_, h) =>
+        parseInt(h, 10) >= 7 ? `${h}시` : `새벽 ${h}시`
+      );
+    }
+  }
+
+  return out;
+}
+
+// ── [FIX-THAT-KIND-OF] "that kind of" / "kind of" 번역 후처리 ───────────────
+//
+// 판별 우선순위:
+//   1. "that kind of thing"             → "그런 거" / "그런 식"
+//   2. "that kind of + 동사/형용사"     → 약화 표현 ("좀", "그게 좀")
+//   3. "that kind of + 명사"            → 지칭 표현 ("그런 종류의 X")
+//   4. "kind of" 단독                   → 약화어 "좀" / "약간"
+//
+// 적용 규칙:
+//   - 부정문 동반 시 완곡 부정으로 교정: "그게 좀 안 맞아요" 계열
+//   - 오역된 "그런 종류는" 패턴을 실제 의미에 맞게 교정
+//
+function applyThatKindOfFix(out: string, sourceText: string): string {
+  // 원문에 "that kind of" 또는 "kind of"가 없으면 즉시 반환
+  if (!/kind\s+of/i.test(sourceText)) return out;
+
+  const isNegative = RE_NEGATIVE_VERB.test(sourceText);
+
+  // Case 1: "that kind of thing" — 무조건 고정 번역
+  if (RE_THAT_KIND_OF_THING.test(sourceText)) {
+    // 잘못 번역된 "그런 종류의 것", "그런 종류는", "그런 것" 등을 교정
+    out = out
+      .replace(/그런\s+종류의\s+것[은이가을를]?/g, "그런 거")
+      .replace(/그런\s+종류는/g, "그런 거")
+      .replace(/그런\s+종류가/g, "그런 게");
+    return out;
+  }
+
+  // Case 2: "that kind of + 동사/형용사" — 약화 표현
+  if (RE_THAT_KIND_OF_VERB_ADJ.test(sourceText)) {
+    if (isNegative) {
+      // 부정 맥락: "그건 좀 안 맞아요" / "그게 좀 저한테는 안 돼요" 계열
+      // 잘못된 "그런 종류는" → "그게"로 교정
+      out = out
+        .replace(/그런\s+종류는\s+/g, "그게 좀 ")
+        .replace(/그런\s+종류가\s+/g, "그게 좀 ")
+        .replace(/^그런\s+종류는/, "그게 좀");
+    } else {
+      // 긍정 맥락: "그게 좀 ~해요"
+      out = out
+        .replace(/그런\s+종류는\s+/g, "그게 좀 ")
+        .replace(/그런\s+종류가\s+/g, "그게 좀 ");
+    }
+    return out;
+  }
+
+  // Case 3: "that kind of + 명사" — 지칭 표현 (현재 번역 유지 또는 경미한 교정)
+  // "그런 종류의" 표현은 이 경우에만 올바름 → 교정 불필요
+  const nounMatch = sourceText.match(RE_THAT_KIND_OF_NOUN);
+  if (nounMatch) {
+    // 명사 지칭이므로 기존 번역 유지 (오역 방어만 수행)
+    // "그게 좀"처럼 약화어로 오역된 경우를 명사 표현으로 교정
+    out = out.replace(/그게\s+좀\s+(연구|기술|능력|역량|자료|정보)/g, "그런 종류의 $1");
+    return out;
+  }
+
+  // Case 4: "kind of" 단독 (not "that kind of") — 약화어
+  if (RE_KIND_OF_ALONE.test(sourceText)) {
+    // 잘못된 "그런 종류" 번역을 "좀" / "약간"으로 교정
+    out = out
+      .replace(/그런\s+종류의\s+/g, "좀 ")
+      .replace(/그런\s+종류로\s+/g, "좀 ");
+  }
+
+  return out;
+}
+
+// ── 발화자 전환 가능성 판단 ───────────────────────────────────────────────────
 function likelySpeakerChange(prevText: string, currText: string, gap: number): boolean {
   const prev = prevText.trim();
   const curr = currText.trim();
 
-  // gap이 충분히 크면 기본 로직에서 이미 분리됨 — 여기선 짧은 gap에서의 판단
   if (gap >= MERGE_GAP_HARD_LIMIT_S) return false;
 
-  // 이전이 질문으로 끝나고 현재가 응답 패턴이면 전환 가능성 높음
   if (RE_LIKELY_QUESTION_END.test(prev) && RE_LIKELY_RESPONSE_START.test(curr)) return true;
 
-  // 이전이 완결 문장(마침표/느낌표)이고 현재가 백채널/단답이면 전환 가능성
   if (/[.!]$/.test(prev) && /^(yes|no|yeah|nope|hmm|uh|oh|ok|okay|right|sure|i do|i don't)\b/i.test(curr)) return true;
 
-  // 이전이 단답(yes/no 계열)이고 현재가 그렇지 않으면 전환 가능성
   if (/^(yes|no|yeah|nope|hmm|uh|oh|ok|okay|right|sure)\.?$/i.test(prev) && curr.split(/\s+/).length >= 3) return true;
+
+  if (/^who\b/i.test(prev) && /^i\s+(do|did|don't|doesn't|am|was)\b/i.test(curr)) return true;
 
   return false;
 }
@@ -254,7 +423,7 @@ function isFillerText(text: string): boolean {
   return text.trim().length === 0 || /^[\d\s.,;:!?'"()[\]-]+$/.test(text.trim());
 }
 
-// ── isShortIndependent — 1~3단어 독립 발화 보호 ───────────────────────────────
+// ── isShortIndependent ────────────────────────────────────────────────────────
 function isShortIndependent(t: string): boolean {
   const trimmed = t.trim();
   const words = trimmed.split(/\s+/).filter(Boolean);
@@ -264,25 +433,12 @@ function isShortIndependent(t: string): boolean {
 
   const word = words[0];
 
-  // 케이스 1: 단일 단어 물음표
   if (wc === 1 && word.endsWith("?")) return true;
-
-  // 케이스 2: yes/no 계열
   if (/^(no|yes|yeah|nope|yep|nah|not\s+really|okay\s+yes|alright|sure|right)$/i.test(trimmed)) return true;
-
-  // 케이스 3: 감탄사/호응어 (1단어)
   if (wc === 1 && /^(hmm|hm|uh|um|oh|wow|okay|ok|hey|right|sure|fine|well|whoa|ow|ugh|yikes|oops)$/i.test(word)) return true;
-
-  // 케이스 4: 단일 고유명사 호칭 (대문자 시작, 알파벳만, 2~12자)
   if (wc === 1 && /^[A-Z][a-zA-Z]{1,11}$/.test(word)) return true;
-
-  // 케이스 5: 짧은 완결 동사 구문 ("I do", "I will", "You do", "I get it")
   if (wc <= 3 && /^(i|you|we|they)\s+(do|did|will|won't|can|can't|get|got|know|see|am|was)(\s+\w+)?$/i.test(trimmed)) return true;
-
-  // 케이스 6: 2~3단어 + 마침표/느낌표 (완결된 짧은 문장)
   if (wc >= 2 && wc <= 3 && /[.!]$/.test(trimmed)) return true;
-
-  // 케이스 7: "That's [형용사]" 패턴
   if (wc === 2 && /^that's\s+\w+$/i.test(trimmed)) return true;
 
   return false;
@@ -329,7 +485,6 @@ function mergeFragments(segments: TranslationSegment[]): MergedGroup[] {
       const gap = next.start - group.end;
       const wc = group.text.split(/\s+/).length;
 
-      // [Fix A] 발화자 전환 가능성이 높은 경우 더 엄격한 gap 적용
       const speakerChange = likelySpeakerChange(group.text, next.text, gap);
       const effectiveLimit = speakerChange ? MERGE_GAP_SPEAKER_CHANGE_S : MERGE_GAP_HARD_LIMIT_S;
 
@@ -376,7 +531,6 @@ function enforceSentence(groups: MergedGroup[]): MergedGroup[] {
 
     const gap = g.start - buffer.end;
 
-    // [Fix A] 여기서도 발화자 전환 체크
     const speakerChange = likelySpeakerChange(buffer.text, g.text, gap);
     if (speakerChange || gap >= MERGE_GAP_HARD_LIMIT_S) {
       result.push(buffer);
@@ -821,7 +975,7 @@ function cleanWhisperText(text: string): string {
     .trim();
 }
 
-// ── buildBatchMessage — 숫자/시간 토큰 마스킹 포함 ───────────────────────────
+// ── buildBatchMessage ─────────────────────────────────────────────────────────
 function buildBatchMessage(batch: TranslationSegment[]): {
   message: string;
   tokenMaps: MaskedToken[][];
@@ -839,37 +993,55 @@ function buildBatchMessage(batch: TranslationSegment[]): {
   return { message: lines.join("\n"), tokenMaps };
 }
 
-// ── [Fix B] 번역문 후처리 — 환각 추가 내용 및 시간대 오류 교정 ──────────────
+// ── [FIX-ALL] postProcessTranslation — 통합 후처리 ───────────────────────────
+// 수정사항:
+//   FIX-TIME:          convertTimeExpressionKo를 restoreNumericTokens 이후에만 호출
+//   FIX-TIME-DEDUP:    deduplicateTimeUnits로 "8시 시" 중복 제거
+//   FIX-2:             applyDawnTimeCorrection으로 새벽 판정 통합
+//   FIX-3:             stripLeakedPlaceholders로 placeholder 잔존 방어
+//   FIX-THAT-KIND-OF:  applyThatKindOfFix로 약화 표현 / 지칭 표현 교정
 function postProcessTranslation(translated: string, sourceText: string, targetLanguage: string): string {
   let out = translated;
 
-  // 타겟이 한국어일 때만 적용
+  // [FIX-3] Placeholder 잔존 방어 — 어느 언어든 적용
+  if (RE_PLACEHOLDER_LEAK.test(out)) {
+    console.warn(`[POST] Placeholder leak detected: "${out}" (src: "${sourceText}")`);
+    out = stripLeakedPlaceholders(out);
+  }
+
+  // ── 한국어 전용 후처리 ────────────────────────────────────────────────────
   if (targetLanguage === "Korean" || targetLanguage === "ko") {
-    // [Fix B-1] 원문에 없는 환각 추가 표현 제거
-    // 원문에 감탄/놀람 표현이 없는데 번역에 추가된 경우
+
+    // [FIX-TIME] 시간 표기 변환: HH:MM → 한국어 (+ 내부에서 deduplicateTimeUnits 호출)
+    out = convertTimeExpressionKo(out);
+
+    // [FIX-TIME-DEDUP] 안전망: convertTimeExpressionKo 이후에도 중복이 남아있을 경우 추가 제거
+    // (이미 한국어로 변환된 텍스트에 convertTimeExpressionKo가 재적용된 극단적 경우 방어)
+    out = deduplicateTimeUnits(out);
+
+    // [FIX-2] 새벽/아침 시간대 교정
+    out = applyDawnTimeCorrection(out, sourceText);
+
+    // [FIX-THAT-KIND-OF] "that kind of" / "kind of" 약화 표현 교정
+    out = applyThatKindOfFix(out, sourceText);
+
+    // 환각 추가 표현 제거
     const srcHasSurprise = /surprised|amazing|incredible|unbelievable|wow|astonish/i.test(sourceText);
     if (!srcHasSurprise) {
       out = out.replace(RE_HALLUCINATED_ADDITION_KO, "").trim();
     }
 
-    // [Fix B-2] 시간대 오역 교정 — "until X:00 in the morning" 패턴
-    // 원문에 "until ... in the morning"이 있고 시간이 1~6시면 새벽, 7~11시면 아침
-    const morningUntilMatch = sourceText.match(/until\s+(?:like\s+)?(\d{1,2})(?::\d{2})?\s+in\s+the\s+morning/i);
-    if (morningUntilMatch) {
-      const hour = parseInt(morningUntilMatch[1], 10);
-      // 1~6시는 새벽(새벽), 7~ 이면 아침 유지
-      if (hour >= 1 && hour <= 6) {
-        // "아침 X시"를 "새벽 X시"로 교정
-        out = out.replace(RE_MORNING_TIME_KO, (_, h) => `새벽 ${h}시`);
-        // "아침까지"를 "새벽까지"로 교정
-        out = out.replace(/아침까지/, "새벽까지");
-      }
-    }
-
-    // [Fix B-3] HR director 오역 교정 — 후처리에서 확실히 보호
-    // "감독" 계열 표현이 HR director 번역에 섞인 경우
+    // HR director 오역 보호
     if (/\bHR\b/i.test(sourceText) && /감독/.test(out)) {
       out = out.replace(/인사\s*감독/g, "인사 담당자").replace(/감독님/g, "인사 책임자").trim();
+    }
+
+    // "you don't work here" 어순 교정
+    if (/you\s+don'?t\s+work\s+here/i.test(sourceText)) {
+      out = out
+        .replace(/여기는\s+당신이\s+일하지\s+않아요/, "당신은 여기서 일하지 않아요")
+        .replace(/여기는\s+네가\s+일하지\s+않아/, "너는 여기서 일하지 않아")
+        .replace(/여기는\s+([^\s]+이|[^\s]+가)\s+일\s+안\s+해/, "너 여기서 일 안 해");
     }
   }
 
@@ -888,6 +1060,9 @@ export function sanitizeTranslationOutput(text: string, sourceText: string): str
 
   if (!RE_HALLUCINATION_GUARD.test(sourceText)) out = out.replace(RE_HALLUCINATED_TERMS_KO, "");
   if (!sourceText.includes("(") && !sourceText.includes(")")) out = out.replace(RE_PARENS_ANY, "");
+
+  out = stripLeakedPlaceholders(out);
+
   return out.replace(/\s{2,}/g, " ").trim();
 }
 
@@ -926,22 +1101,20 @@ function isCorruptedOutput(text: string): boolean {
     /^Translation:/i.test(text) ||
     /^\[미번역\]/.test(text) ||
     /^---/.test(text) ||
-    text.includes("\n\n")
+    text.includes("\n\n") ||
+    RE_PLACEHOLDER_LEAK.test(text)
   );
 }
 
-// [Fix B] isOvergenerated — 단문 원본 기준 강화
-// 원문이 짧을수록(3단어 이하) 오버제너레이션 감지를 더 엄격하게
 function isOvergenerated(input: string, output: string, targetLanguage = "Korean"): boolean {
   const inLen = input.split(/\s+/).filter(Boolean).length;
   const outLen = output.split(/\s+/).filter(Boolean).length;
   const baseThreshold = targetLanguage === "Korean" ? 2.0 : 1.7;
-  // 원문이 짧을수록(1~3단어) 더 엄격한 기준 적용
   const strictThreshold = inLen <= 3 ? 1.5 : baseThreshold;
   return outLen > Math.max(inLen * strictThreshold, 4);
 }
 
-// ── 배치 응답 파싱 — 숫자 토큰 복원 포함 ────────────────────────────────────
+// ── 배치 응답 파싱 ────────────────────────────────────────────────────────────
 function parseBatchResponse(
   response: string,
   batch: TranslationSegment[],
@@ -968,13 +1141,12 @@ function parseBatchResponse(
     }
   }
 
-  // [Fix] restoreAndClean — idx는 항상 배치 내 0-based 인덱스
-  // 폴백 경로에서도 tokenMaps[i]를 올바르게 참조
   const restoreAndClean = (raw: string, batchIdx: number, srcText: string): string => {
     if (!raw) return srcText;
     const tokens = tokenMaps[batchIdx] ?? [];
-    const restored = restoreNumericTokens(raw, tokens);
-    const sanitized = sanitizeTranslationOutput(applyProperNounFixes(restored, patterns), srcText);
+    const restored = tokens.length > 0 ? restoreNumericTokens(raw, tokens) : raw;
+    const deLeaked = stripLeakedPlaceholders(restored);
+    const sanitized = sanitizeTranslationOutput(applyProperNounFixes(deLeaked, patterns), srcText);
     return sanitized;
   };
 
@@ -982,17 +1154,14 @@ function parseBatchResponse(
     return batch.map((seg, i) => restoreAndClean(tmap.get(i + 1) ?? "", i, seg.text));
   }
 
-  // positional fallback — 라인 수가 정확히 일치할 때
   const contentLines = lines
     .map(l => l.replace(/^[\d]+[.):\-\s]+/, "").trim())
     .filter(Boolean);
   if (contentLines.length === batch.length) {
     console.warn(`[TRANSLATE] positional fallback: parsed=${tmap.size} expected=${batch.length}`);
-    // [Fix] i를 배치 인덱스로 정확히 사용
     return batch.map((seg, i) => restoreAndClean(contentLines[i], i, seg.text));
   }
 
-  // 부분 매핑 — 파싱된 것만 사용, 나머지는 원문 유지
   return batch.map((seg, i) => {
     const raw = tmap.get(i + 1);
     if (!raw) {
@@ -1035,6 +1204,7 @@ async function validateTranslations(
     const leftoverEn = hasLeftoverEnglish(t, src, patterns, targetLanguage);
     const foreignLatin = profile.isLatinScript && /[가-힣\u4e00-\u9fff\u3040-\u30ff\u0400-\u04FF]/.test(t);
     const goodFitBad = /\bgood\s+fit\b/i.test(src) && /몸|체형|체격|사이즈|맞는 몸/.test(t);
+    const placeholderLeak = RE_PLACEHOLDER_LEAK.test(t);
 
     const needsRetry =
       t.length === 0 ||
@@ -1045,7 +1215,8 @@ async function validateTranslations(
       negDropped ||
       leftoverEn ||
       foreignLatin ||
-      goodFitBad;
+      goodFitBad ||
+      placeholderLeak;
 
     if (!needsRetry) continue;
     console.warn(`[VALIDATE] retry ${i}: "${src}" → "${t}"`);
@@ -1067,7 +1238,8 @@ async function validateTranslations(
         stop: ["</s>", "<end_of_turn>", "<|end|>", "\n"],
       });
       const restored = restoreNumericTokens(r.text.trim(), tokens);
-      const c = sanitizeTranslationOutput(restored, src);
+      const deLeaked = stripLeakedPlaceholders(restored);
+      const c = sanitizeTranslationOutput(deLeaked, src);
       result[i] =
         c &&
         !isLikelyUntranslated(c, targetLanguage) &&
@@ -1126,6 +1298,14 @@ function buildSystemPrompt(
     ...[...PROTECTED_ACRONYMS],
   ].join(", ");
 
+  const timeRuleKo = (targetLanguage === "Korean" || targetLanguage === "ko")
+    ? `- Time format: NEVER output "HH:MM" clock notation (e.g. 8:00, 3:00, 10:00). ` +
+      `Instead use Korean spoken form: "8시", "3시", "10시 30분". ` +
+      `With AM/PM context: "오전 8시", "새벽 3시", "오후 2시".\n` +
+      `- "X in the morning" where X is 1–6: ALWAYS use "새벽 X시" (deep night), NOT "아침 X시".\n` +
+      `- "until like X:00" as an arrival/action time (no "in the morning"): just "X시", no 새벽/아침 prefix.\n`
+    : "";
+
   return (
     `You are a professional subtitle translator. Translate English subtitles to ${targetLanguage}.\n\n` +
     (genrePersona ? genrePersona + "\n\n" : "") +
@@ -1148,10 +1328,19 @@ function buildSystemPrompt(
     `- "not really" → translate as mild negation in context\n` +
     `- "good fit" in work/interview context → compatibility match, NOT physical fitness\n` +
     `- "mental health day" → a day off for mental wellbeing\n` +
-    `- "you don't work here" → factual statement that the person is NOT an employee here\n` +
-    `- "are you firing me" → question about being dismissed from a job\n` +
+    `- "you don't work here" → factual: this person is NOT an employee here\n` +
+    `- "didn't say X" / "didn't mention X" → someone failed to verbally state X, NOT about saving/storing\n` +
+    `- "the big ones" in listing context (apps, brands) → "유명한 것들" or "큰 것들", NOT "큰 회사들"\n` +
+    `- "until like X:00" as arrival/action time → time the person arrives or does something, NOT a staying-up time\n` +
     `- Conversational "That's/That is" → use proximal pronoun (그건/그게), never distal (저것은/저것이)\n` +
     `- Time expressions: "until X in the morning" — if X is 1–6, it is the middle of the night (새벽), not 아침\n` +
+    `- "like X in the morning" or "until like X in the morning" follows same rule as above\n` +
+    // [FIX-THAT-KIND-OF] 프롬프트에 "that kind of" 규칙 명시
+    `- "that kind of thing" → always "그런 거" or "그런 식". NEVER "그런 종류의 것".\n` +
+    `- "that kind of + verb/adj" (e.g. "that kind of doesn't work") → softening expression: "그게 좀 안 맞아요". NEVER "그런 종류는".\n` +
+    `- "that kind of + noun" (e.g. "that kind of research") → noun reference: "그런 종류의 연구". This is the ONLY case where "그런 종류의" is correct.\n` +
+    `- "kind of" alone (without "that") → softening adverb: "좀" or "약간". Not a noun reference.\n` +
+    timeRuleKo +
     `\n` +
     langRules +
     nounHint
@@ -1176,7 +1365,7 @@ export async function translateSegments(
     text: normalizeSocialMediaNames(cleanWhisperText(seg.text)),
   }));
 
-  // Step A: 프래그먼트 병합 (발화자 전환 감지 포함)
+  // Step A: 프래그먼트 병합
   let merged = mergeFragments(cleaned);
   merged = enforceSentence(merged);
   const mergedSegs = merged.map(g => ({ start: g.start, end: g.end, text: g.text, translated: "" }));
@@ -1264,7 +1453,7 @@ export async function translateSegments(
     }
   }
 
-  // Step E.2: [Fix B] 후처리 — 시간대 오역, 환각 추가, HR 교정
+  // Step E.2: 후처리 — 시간 표기, 시간대, "that kind of", HR, 어순 교정
   for (let i = 0; i < cleaned.length; i++) {
     if (translatedTexts[i]) {
       translatedTexts[i] = postProcessTranslation(translatedTexts[i], cleaned[i].text, targetLanguage);
@@ -1281,7 +1470,8 @@ export async function translateSegments(
         !t.trim() ||
         (t.trim() === src && src.length > 10) ||
         /^\d+\.?$/.test(t.trim()) ||
-        isCorruptedOutput(t)
+        isCorruptedOutput(t) ||
+        RE_PLACEHOLDER_LEAK.test(t)
       ) {
         return [...acc, i];
       }
