@@ -5,8 +5,7 @@
  * ✅ [수정 1] parseJson3WordLevel - GROUPING 단계에서 단답 단어를 독립 그룹으로 분리
  * ✅ [수정 2] premergeRawSegments - ORPHAN_WORDS 흡수 시 단답이면 건너뜀
  * ✅ [수정 3] buildDisplaySegments - isSingleResponse일 때 gap > 0.3s면 독립 출력
- *
- * 나머지 로직은 v19 그대로 유지
+ * ✅ [수정 4] buildDisplaySegments - 열거형 명사구 나열 감지 시 조기 flush (grande chai latte 케이스)
  */
 
 import express from "express";
@@ -88,6 +87,26 @@ const FORCE_NO_UTT_BREAK = new Set([
 ]);
 
 const ORPHAN_MERGE_GAP_S = 3.0;
+
+// ── [수정 4] 열거형 명사구 감지 헬퍼 ─────────────────────────────────────────
+// 주어+동사 조합이 없는 순수 명사구 나열인지 판단
+// "grande chai latte three pumps skim milk" 같은 케이스를 잡기 위함
+const VERB_RE = /\b(is|are|was|were|be|been|being|have|has|had|do|does|did|will|would|could|should|may|might|must|get|gets|got|go|goes|went|work|works|worked|think|feel|know|see|say|said|told|need|want|like|look|take|make|come|give|send|find|tell|ask|try|use|keep|let|seem|become|show|turn|help|start|call|end|put|mean|run|set|move|follow|add|change|stand|hear|play|run|live|talk|include)\b/i;
+const SUBJECT_VERB_RE = /\b(i|you|we|they|he|she|it)\s+\w+/i;
+
+function isEnumerationPhrase(text) {
+  const t = text.trim();
+  // 동사가 있으면 열거형이 아님
+  if (VERB_RE.test(t)) return false;
+  // 주어+동사 패턴이 있으면 아님
+  if (SUBJECT_VERB_RE.test(t)) return false;
+  // 단어 수가 DISPLAY_MIN_WORDS 이상이어야 의미 있음
+  const words = t.split(/\s+/).filter(Boolean);
+  if (words.length < DISPLAY_MIN_WORDS) return false;
+  // 문장 종결 부호가 없어야 함 (완결 문장 제외)
+  if (/[.!?]$/.test(t)) return false;
+  return true;
+}
 
 // ── ASR 판별 ──────────────────────────────────────────────────────────────────
 function isSlidingWindow(events) {
@@ -171,24 +190,16 @@ function parseJson3WordLevel(data) {
     }
 
     // ✅ [수정 1] 단답 단어 독립 분리
-    // 현재 단어가 단독으로 SPEAKER_CHANGE_RE에 해당하고
-    // 앞뒤 gap이 충분하면 독립 그룹으로 분리
-    // - gap(앞) > 275ms: 앞 발화와 분리
-    // - gap(뒤) 체크는 다음 iteration에서 자연스럽게 처리됨
-    // 기존 gap split(400ms)보다 낮은 275ms 기준을 단답에만 적용
     const isCurrShortResponse = SPEAKER_CHANGE_RE.test(curr.text.trim());
     const isPrevShortResponse = SPEAKER_CHANGE_RE.test(prev.text.trim());
 
     if (isCurrShortResponse && gap > 275 && !isSticky) {
-      // 현재 단어가 단답이고 앞과 gap이 275ms 이상이면 독립 그룹
       if (group.length > 0) utterances.push(group);
       group = [curr];
       continue;
     }
 
     if (isPrevShortResponse && gap > 275 && !isSticky) {
-      // 이전 단어가 단답이고 현재와 gap이 275ms 이상이면
-      // 이전 그룹을 flush하고 새 그룹 시작
       if (group.length > 0) utterances.push(group);
       group = [curr];
       continue;
@@ -265,8 +276,6 @@ function premergeRawSegments(segs) {
       const isOrphan = curWords.length === 1 && ORPHAN_WORDS.has(curWord);
 
       // ✅ [수정 2] 단답이면 ORPHAN_WORDS 흡수에서 제외
-      // SPEAKER_CHANGE_RE에 해당하는 단어(hmm, uh, wow 등)는
-      // ORPHAN_WORDS에 있어도 다음 세그먼트에 강제 병합하지 않음
       const isShortResponseWord = SPEAKER_CHANGE_RE.test(cur.text.trim());
 
       if (isOrphan && !isShortResponseWord && next) {
@@ -340,9 +349,7 @@ function buildDisplaySegments(rawSegs) {
     );
 
     if (isSingleResponse && !isSticky && !isOrphanWord) {
-      // ✅ [수정 3] _uttBreak 없어도 prevGap > 0.3s 또는 nextGap > 0.3s이면 독립 출력
-      // 기존: seg._uttBreak || nextGap > 0.5 일 때만 독립
-      // 수정: 앞뒤 간격이 0.3s 이상이면 독립 발화로 판단 (발화자 전환 가능성)
+      // ✅ [수정 3] prevGap > 0.3s 또는 nextGap > 0.3s이면 독립 출력
       const isIsolated = seg._uttBreak || nextGap > 0.5 || prevGap > 0.3;
 
       if (isIsolated) {
@@ -388,7 +395,15 @@ function buildDisplaySegments(rawSegs) {
     const lastBufWord = buffer.length > 0 ? buffer[buffer.length - 1].text.trim().split(/\s+/).pop().toLowerCase() : "";
     const sentenceFinalFlush = SENTENCE_FINAL_WORDS.has(lastBufWord) && nextSeg && nextGap < 0.8 && wordCount >= 3;
 
-    if (forceFlush || naturalFlush || nextIsBreakResponse || clauseBoundaryFlush || sentenceFinalFlush) {
+    // ✅ [수정 4] 열거형 명사구 나열 감지 시 조기 flush
+    // "grande chai latte three pumps skim milk" 같이 동사/주어 없는 명사 나열이
+    // DISPLAY_MIN_WORDS 이상 쌓이면 다음 세그먼트가 이어져도 flush
+    const bufferIsEnumeration = isEnumerationPhrase(bufferText);
+    const nextIsAlsoEnumeration = nextSeg && isEnumerationPhrase(nextSeg.text.trim());
+    // 열거형이 쌓였고 다음도 열거형 조각이면 현재 버퍼를 flush하고 새로 시작
+    const enumerationFlush = bufferIsEnumeration && nextIsAlsoEnumeration && wordCount >= DISPLAY_MIN_WORDS;
+
+    if (forceFlush || naturalFlush || nextIsBreakResponse || clauseBoundaryFlush || sentenceFinalFlush || enumerationFlush) {
       flushBuffer();
     }
   }
