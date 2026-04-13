@@ -173,21 +173,21 @@ function parseJson3WordLevel(data) {
     // ✅ [수정 1] 단답 단어 독립 분리
     // 현재 단어가 단독으로 SPEAKER_CHANGE_RE에 해당하고
     // 앞뒤 gap이 충분하면 독립 그룹으로 분리
-    // - gap(앞) > 200ms: 앞 발화와 분리
+    // - gap(앞) > 275ms: 앞 발화와 분리
     // - gap(뒤) 체크는 다음 iteration에서 자연스럽게 처리됨
-    // 기존 gap split(400ms)보다 낮은 200ms 기준을 단답에만 적용
+    // 기존 gap split(400ms)보다 낮은 275ms 기준을 단답에만 적용
     const isCurrShortResponse = SPEAKER_CHANGE_RE.test(curr.text.trim());
     const isPrevShortResponse = SPEAKER_CHANGE_RE.test(prev.text.trim());
 
-    if (isCurrShortResponse && gap > 200 && !isSticky) {
-      // 현재 단어가 단답이고 앞과 gap이 200ms 이상이면 독립 그룹
+    if (isCurrShortResponse && gap > 275 && !isSticky) {
+      // 현재 단어가 단답이고 앞과 gap이 275ms 이상이면 독립 그룹
       if (group.length > 0) utterances.push(group);
       group = [curr];
       continue;
     }
 
-    if (isPrevShortResponse && gap > 200 && !isSticky) {
-      // 이전 단어가 단답이고 현재와 gap이 200ms 이상이면
+    if (isPrevShortResponse && gap > 275 && !isSticky) {
+      // 이전 단어가 단답이고 현재와 gap이 275ms 이상이면
       // 이전 그룹을 flush하고 새 그룹 시작
       if (group.length > 0) utterances.push(group);
       group = [curr];

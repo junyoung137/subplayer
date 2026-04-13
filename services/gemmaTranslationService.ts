@@ -26,6 +26,17 @@ interface MergedGroup {
   originalIndices: number[];
 }
 
+// ── SBD 관련 타입 ─────────────────────────────────────────────────────────────
+interface SBDSentence {
+  /** 이 문장에 포함된 원본 세그먼트 인덱스 배열 */
+  segmentIndices: number[];
+  /** 합쳐진 원문 텍스트 */
+  text: string;
+  /** 타이밍: 첫 세그먼트 start ~ 마지막 세그먼트 end */
+  start: number;
+  end: number;
+}
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 const MODEL_PATH = FileSystem.documentDirectory + "gemma-models/gemma-3n-e2b-q4.gguf";
 const BATCH_SIZE = 5;
@@ -45,11 +56,30 @@ const NETFLIX_MIN_CHARS_FOR_SPLIT = 15;
 // expand: gap 기준 자연 분할 임계값
 const EXPAND_GAP_THRESHOLD_S = 0.8;
 
-// 기본 병합 gap 상한
+// 기본 병합 gap 상한 (SBD fallback 용)
 const MERGE_GAP_HARD_LIMIT_S = 0.6;
 
 // 발화자 전환이 강하게 의심될 때 적용하는 더 엄격한 gap 상한
 const MERGE_GAP_SPEAKER_CHANGE_S = 0.35;
+
+// ── SBD 관련 상수 ─────────────────────────────────────────────────────────────
+/**
+ * SBD 배치 크기: 한 번의 LLM 호출에서 처리할 세그먼트 최대 수
+ * 너무 크면 context 초과, 너무 작으면 문맥 파악 부족
+ */
+const SBD_BATCH_SIZE = 30;
+
+/**
+ * SBD fallback 임계값: SBD 결과의 문장 수가 원본 세그먼트의
+ * 이 비율보다 많으면 SBD가 거의 분리를 안 한 것이므로 fallback
+ */
+const SBD_FALLBACK_RATIO = 0.9;
+
+/**
+ * 프래그먼트 판별: 텍스트가 이 패턴으로 끝나면 불완전 프래그먼트
+ * 전치사, 접속사, 관계사, 관사, 조동사로 끝나는 경우
+ */
+const RE_DANGLING_FRAGMENT = /\b(with|for|and|but|or|to|in|at|on|of|by|a|an|the|is|are|was|were|be|been|being|have|has|had|will|would|could|should|may|might|must|do|does|did|not|no|i|you|we|they|he|she|it)\s*$/i;
 
 // ── 소셜미디어 앱명 정규화 ────────────────────────────────────────────────────
 const SOCIAL_MEDIA_NORMALIZATION: Record<string, string> = {
@@ -85,12 +115,9 @@ const RE_HALLUCINATED_ADDITION_KO = /놀랍네요|놀랍습니다|놀랍군요|�
 const RE_MORNING_TIME_KO = /아침\s*(\d{1,2})시/g;
 
 // ── [FIX-TIME] 시간 표기 변환 패턴 ─────────────────────────────────────────
-// 반드시 restoreNumericTokens 이후에만 적용
-// 핵심: __NUM 플레이스홀더가 없는 순수 HH:MM 형태만 매칭
 const RE_TIME_HHMM = /\b(\d{1,2}):(\d{2})(?::\d{2})?(?:\s*(AM|PM|am|pm))?\b/g;
 
 // ── [FIX-TIME-DEDUP] "8시 시" 중복 감지 패턴 ────────────────────────────────
-// convertTimeExpressionKo 적용 후 중복 단위가 생기는 경우 제거
 const RE_TIME_UNIT_DEDUP = /(\d{1,2})시\s*시/g;
 const RE_MINUTE_UNIT_DEDUP = /(\d{1,2})분\s*분/g;
 
@@ -103,16 +130,11 @@ const RE_UNTIL_TIME_ONLY = /until\s+(?:like\s+)?(\d{1,2})(?::\d{2})?\b(?!\s+in\s
 // ── [FIX-3] Placeholder 잔존 감지 ────────────────────────────────────────────
 const RE_PLACEHOLDER_LEAK = /__NUM\d+__/g;
 
-// ── [FIX-THAT-KIND-OF] "that kind of" / "kind of" 판별 패턴 ────────────────
-// 1. "that kind of thing" → 무조건 "그런 거" / "그런 식"
+// ── [FIX-THAT-KIND-OF] 패턴 ─────────────────────────────────────────────────
 const RE_THAT_KIND_OF_THING = /that\s+kind\s+of\s+thing/i;
-// 2. "that kind of + 명사" → 지칭 용법 ("그런 종류의")
 const RE_THAT_KIND_OF_NOUN = /that\s+kind\s+of\s+([a-z]+(?:\s+[a-z]+)?)/i;
-// 3. "that kind of + 동사/형용사" → 약화 용법 ("좀" / "그게 좀")
 const RE_THAT_KIND_OF_VERB_ADJ = /that\s+kind\s+of\s+(is|was|are|were|feels|feel|seems|seem|looks|look|sounds|sound|works|work|makes|make|does|do|did|doesn't|don't|won't|can't|isn't|wasn't)/i;
-// 4. "kind of" 단독 (not preceded by "that") → 약화어 "좀" / "약간"
 const RE_KIND_OF_ALONE = /(?<!that\s)kind\s+of\b/i;
-// 5. 부정 동사 동반 패턴
 const RE_NEGATIVE_VERB = /\b(doesn't|don't|won't|can't|isn't|wasn't|didn't|never|no|not)\b/i;
 
 // ── 장르 페르소나 ─────────────────────────────────────────────────────────────
@@ -193,54 +215,40 @@ function restoreNumericTokens(text: string, tokens: MaskedToken[]): string {
   return r;
 }
 
-// ── [FIX-3] Placeholder 잔존 시 강제 제거 ────────────────────────────────────
 function stripLeakedPlaceholders(text: string): string {
   return text.replace(RE_PLACEHOLDER_LEAK, "").replace(/\s{2,}/g, " ").trim();
 }
 
-// ── [FIX-TIME-DEDUP] 중복 시간 단위 제거 ────────────────────────────────────
-// "8시 시" → "8시", "30분 분" → "30분"
-// convertTimeExpressionKo 이후 반드시 호출
 function deduplicateTimeUnits(text: string): string {
   return text
     .replace(RE_TIME_UNIT_DEDUP, "$1시")
     .replace(RE_MINUTE_UNIT_DEDUP, "$1분");
 }
 
-// ── [FIX-TIME] 한국어 시간 표기 변환 ─────────────────────────────────────────
-// "8:00" → "8시", "3:30" → "3시 30분", "10:45 AM" → "오전 10시 45분"
-// 반드시 restoreNumericTokens 이후에 호출
 function convertTimeExpressionKo(text: string): string {
   RE_TIME_HHMM.lastIndex = 0;
   const converted = text.replace(RE_TIME_HHMM, (match, hour, minute, ampm) => {
     const h = parseInt(hour, 10);
     const m = parseInt(minute, 10);
-
     if (ampm) {
       const isAm = /am/i.test(ampm);
       const prefix = isAm ? "오전" : "오후";
       if (m === 0) return `${prefix} ${h}시`;
       return `${prefix} ${h}시 ${m}분`;
     }
-
     if (m === 0) return `${h}시`;
     return `${h}시 ${m}분`;
   });
-
-  // 변환 직후 중복 단위 제거 — "8시 시" 같은 이중 변환 방어
   return deduplicateTimeUnits(converted);
 }
 
-// ── [FIX-2] 새벽 시간대 판정 — 원문 기반 ────────────────────────────────────
 function applyDawnTimeCorrection(out: string, sourceText: string): string {
-  // Case A: "until (like) X in the morning" → 새벽 판정
   const morningMatch = sourceText.match(RE_UNTIL_IN_MORNING);
   if (morningMatch) {
     const hour = parseInt(morningMatch[1], 10);
     if (hour >= 1 && hour <= 6) {
       out = out.replace(RE_MORNING_TIME_KO, (_, h) => `새벽 ${h}시`);
       out = out.replace(/아침까지/, "새벽까지");
-      // [FIX-TIME-DAWN] "오전 X시"가 새벽 시간대인 경우도 교정
       out = out.replace(/오전\s*(\d{1,2})시/g, (_, h) => {
         const hNum = parseInt(h, 10);
         return hNum >= 1 && hNum <= 6 ? `새벽 ${h}시` : `오전 ${h}시`;
@@ -248,8 +256,6 @@ function applyDawnTimeCorrection(out: string, sourceText: string): string {
     }
     return out;
   }
-
-  // Case B: "X:00 in the morning" / "X in the morning" (until 없는 경우)
   const inMorningMatch = sourceText.match(/(?:^|,|\s)(?:like\s+)?(\d{1,2})(?::\d{2})?\s+in\s+the\s+morning/i);
   if (inMorningMatch) {
     const hour = parseInt(inMorningMatch[1], 10);
@@ -262,8 +268,6 @@ function applyDawnTimeCorrection(out: string, sourceText: string): string {
     }
     return out;
   }
-
-  // Case C: 도착/행동 시간 "until (like) X:00" (in the morning 없음) → 새벽 제거
   const untilArrivalMatch = sourceText.match(RE_UNTIL_TIME_ONLY);
   if (untilArrivalMatch) {
     const hour = parseInt(untilArrivalMatch[1], 10);
@@ -273,74 +277,42 @@ function applyDawnTimeCorrection(out: string, sourceText: string): string {
       );
     }
   }
-
   return out;
 }
 
-// ── [FIX-THAT-KIND-OF] "that kind of" / "kind of" 번역 후처리 ───────────────
-//
-// 판별 우선순위:
-//   1. "that kind of thing"             → "그런 거" / "그런 식"
-//   2. "that kind of + 동사/형용사"     → 약화 표현 ("좀", "그게 좀")
-//   3. "that kind of + 명사"            → 지칭 표현 ("그런 종류의 X")
-//   4. "kind of" 단독                   → 약화어 "좀" / "약간"
-//
-// 적용 규칙:
-//   - 부정문 동반 시 완곡 부정으로 교정: "그게 좀 안 맞아요" 계열
-//   - 오역된 "그런 종류는" 패턴을 실제 의미에 맞게 교정
-//
 function applyThatKindOfFix(out: string, sourceText: string): string {
-  // 원문에 "that kind of" 또는 "kind of"가 없으면 즉시 반환
   if (!/kind\s+of/i.test(sourceText)) return out;
-
   const isNegative = RE_NEGATIVE_VERB.test(sourceText);
-
-  // Case 1: "that kind of thing" — 무조건 고정 번역
   if (RE_THAT_KIND_OF_THING.test(sourceText)) {
-    // 잘못 번역된 "그런 종류의 것", "그런 종류는", "그런 것" 등을 교정
     out = out
       .replace(/그런\s+종류의\s+것[은이가을를]?/g, "그런 거")
       .replace(/그런\s+종류는/g, "그런 거")
       .replace(/그런\s+종류가/g, "그런 게");
     return out;
   }
-
-  // Case 2: "that kind of + 동사/형용사" — 약화 표현
   if (RE_THAT_KIND_OF_VERB_ADJ.test(sourceText)) {
     if (isNegative) {
-      // 부정 맥락: "그건 좀 안 맞아요" / "그게 좀 저한테는 안 돼요" 계열
-      // 잘못된 "그런 종류는" → "그게"로 교정
       out = out
         .replace(/그런\s+종류는\s+/g, "그게 좀 ")
         .replace(/그런\s+종류가\s+/g, "그게 좀 ")
         .replace(/^그런\s+종류는/, "그게 좀");
     } else {
-      // 긍정 맥락: "그게 좀 ~해요"
       out = out
         .replace(/그런\s+종류는\s+/g, "그게 좀 ")
         .replace(/그런\s+종류가\s+/g, "그게 좀 ");
     }
     return out;
   }
-
-  // Case 3: "that kind of + 명사" — 지칭 표현 (현재 번역 유지 또는 경미한 교정)
-  // "그런 종류의" 표현은 이 경우에만 올바름 → 교정 불필요
   const nounMatch = sourceText.match(RE_THAT_KIND_OF_NOUN);
   if (nounMatch) {
-    // 명사 지칭이므로 기존 번역 유지 (오역 방어만 수행)
-    // "그게 좀"처럼 약화어로 오역된 경우를 명사 표현으로 교정
     out = out.replace(/그게\s+좀\s+(연구|기술|능력|역량|자료|정보)/g, "그런 종류의 $1");
     return out;
   }
-
-  // Case 4: "kind of" 단독 (not "that kind of") — 약화어
   if (RE_KIND_OF_ALONE.test(sourceText)) {
-    // 잘못된 "그런 종류" 번역을 "좀" / "약간"으로 교정
     out = out
       .replace(/그런\s+종류의\s+/g, "좀 ")
       .replace(/그런\s+종류로\s+/g, "좀 ");
   }
-
   return out;
 }
 
@@ -348,17 +320,11 @@ function applyThatKindOfFix(out: string, sourceText: string): string {
 function likelySpeakerChange(prevText: string, currText: string, gap: number): boolean {
   const prev = prevText.trim();
   const curr = currText.trim();
-
   if (gap >= MERGE_GAP_HARD_LIMIT_S) return false;
-
   if (RE_LIKELY_QUESTION_END.test(prev) && RE_LIKELY_RESPONSE_START.test(curr)) return true;
-
   if (/[.!]$/.test(prev) && /^(yes|no|yeah|nope|hmm|uh|oh|ok|okay|right|sure|i do|i don't)\b/i.test(curr)) return true;
-
   if (/^(yes|no|yeah|nope|hmm|uh|oh|ok|okay|right|sure)\.?$/i.test(prev) && curr.split(/\s+/).length >= 3) return true;
-
   if (/^who\b/i.test(prev) && /^i\s+(do|did|don't|doesn't|am|was)\b/i.test(curr)) return true;
-
   return false;
 }
 
@@ -423,7 +389,269 @@ function isFillerText(text: string): boolean {
   return text.trim().length === 0 || /^[\d\s.,;:!?'"()[\]-]+$/.test(text.trim());
 }
 
-// ── isShortIndependent ────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// ── [NEW] SBD: Sentence Boundary Detection ────────────────────────────────────
+//
+// 핵심 아이디어:
+//   ASR이 임의로 쪼갠 세그먼트들을 gap이 아닌 텍스트 문맥으로 재구성.
+//   LLM이 전체 텍스트를 보고 "어디서 문장이 나뉘는가"를 판단.
+//   이후 번역은 완전한 문장 단위로 진행 → 환각 대폭 감소.
+//
+// 동작 흐름:
+//   1. 세그먼트 배열 → 텍스트 목록으로 변환
+//   2. LLM에게 "문장 경계 인덱스"를 출력하게 함
+//   3. 경계 기준으로 세그먼트 그룹핑 → SBDSentence[]
+//   4. SBD 실패 시 기존 mergeFragments fallback
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * SBD 시스템 프롬프트
+ * LLM이 세그먼트 번호 목록을 받아 "문장 경계 직후 번호" 목록만 출력
+ */
+const SBD_SYSTEM_PROMPT = `You are a sentence boundary detector for ASR (speech recognition) subtitles.
+
+ASR splits speech into arbitrary fragments. Your job is to identify which fragments belong to the same complete sentence.
+
+INPUT: Numbered ASR fragments (possibly incomplete mid-sentence breaks)
+OUTPUT: A JSON array of segment numbers that START a new sentence.
+        Always include 1 as the first element.
+        Output ONLY the JSON array, nothing else.
+
+RULES:
+- Fragments ending with prepositions (with, for, to, in, at, of, by), conjunctions (and, but, or), articles (a, an, the), or auxiliary verbs MUST be joined with the next fragment
+- A new sentence starts when:
+  * Previous fragment ends with . ! ?
+  * Clear topic/speaker change (question → answer, statement → reaction)
+  * Response words at start: Yes/No/Yeah/Nope/Hmm/Oh/Okay/Right/Sure/I do/I don't
+  * New independent clause with subject+verb
+- Short responses (Yes, No, I do, Hmm, Oh wow) are ALWAYS their own sentence
+- When in doubt, keep fragments together
+
+EXAMPLE:
+Input:
+1. for this meeting with
+2. you you've given me no
+3. encouragement no supervision is there
+4. an HR director somewhere
+5. I need to speak
+6. to someone
+
+Output: [1, 4, 5]
+(fragments 1+2+3 form one sentence, 4 is new, 5+6 form one sentence)`;
+
+/**
+ * SBD 파싱: LLM 출력에서 JSON 배열 추출
+ */
+function parseSBDResponse(response: string, segCount: number): number[] | null {
+  try {
+    // JSON 배열 패턴 추출
+    const jsonMatch = response.match(/\[[\d,\s]+\]/);
+    if (!jsonMatch) return null;
+
+    const parsed = JSON.parse(jsonMatch[0]);
+    if (!Array.isArray(parsed)) return null;
+
+    // 유효한 번호만 필터링 (1-based, segCount 이하)
+    const valid = parsed
+      .filter((n) => typeof n === "number" && n >= 1 && n <= segCount)
+      .map((n) => Math.floor(n));
+
+    // 중복 제거 + 정렬
+    const unique = [...new Set(valid)].sort((a, b) => a - b);
+
+    // 항상 1로 시작해야 함
+    if (unique.length === 0 || unique[0] !== 1) unique.unshift(1);
+
+    return unique;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * SBD 경계 배열로 세그먼트 그룹핑
+ * boundaries: 1-based 인덱스, 각 경계가 새 문장의 시작
+ */
+function groupSegmentsByBoundaries(
+  segments: TranslationSegment[],
+  boundaries: number[]
+): SBDSentence[] {
+  const sentences: SBDSentence[] = [];
+  const boundarySet = new Set(boundaries);
+
+  let currentGroup: number[] = [];
+
+  for (let i = 0; i < segments.length; i++) {
+    const oneBased = i + 1;
+
+    if (boundarySet.has(oneBased) && currentGroup.length > 0) {
+      // 현재 그룹 마감
+      const segs = currentGroup.map((idx) => segments[idx]);
+      sentences.push({
+        segmentIndices: [...currentGroup],
+        text: segs.map((s) => s.text).join(" ").trim(),
+        start: segs[0].start,
+        end: segs[segs.length - 1].end,
+      });
+      currentGroup = [];
+    }
+
+    currentGroup.push(i);
+  }
+
+  // 마지막 그룹
+  if (currentGroup.length > 0) {
+    const segs = currentGroup.map((idx) => segments[idx]);
+    sentences.push({
+      segmentIndices: [...currentGroup],
+      text: segs.map((s) => s.text).join(" ").trim(),
+      start: segs[0].start,
+      end: segs[segs.length - 1].end,
+    });
+  }
+
+  return sentences;
+}
+
+/**
+ * 단일 배치에 대해 SBD LLM 호출
+ * segments: 이 배치에 포함된 세그먼트들 (전체 배열의 슬라이스)
+ * returns: 1-based 경계 인덱스 배열 (이 배치 내에서의 인덱스)
+ */
+async function runSBDBatch(segments: TranslationSegment[]): Promise<number[]> {
+  if (!llamaContext) return [1];
+
+  const inputLines = segments
+    .map((seg, i) => `${i + 1}. ${seg.text}`)
+    .join("\n");
+
+  try {
+    const result = await llamaContext.completion({
+      messages: [
+        { role: "system", content: SBD_SYSTEM_PROMPT },
+        { role: "user", content: inputLines },
+      ],
+      n_predict: segments.length * 8,  // 번호 목록만 출력하므로 짧음
+      temperature: 0.05,               // 결정적 출력
+      top_p: 0.9,
+      stop: ["</s>", "<end_of_turn>", "<|end|>"],
+    });
+
+    const parsed = parseSBDResponse(result.text, segments.length);
+    if (!parsed || parsed.length === 0) {
+      console.warn("[SBD] parse failed, treating all as one sentence");
+      return [1];
+    }
+
+    console.log(`[SBD] batch(${segments.length}) → boundaries: [${parsed.join(",")}]`);
+    return parsed;
+  } catch (e) {
+    console.warn("[SBD] LLM error:", e);
+    return [1];
+  }
+}
+
+/**
+ * 전체 세그먼트 배열에 SBD 적용
+ * SBD_BATCH_SIZE 단위로 나눠서 처리 (배치 간 문맥 연결을 위해 앞 배치의 마지막 문장을 컨텍스트로 제공)
+ */
+async function detectSentenceBoundaries(
+  segments: TranslationSegment[]
+): Promise<SBDSentence[]> {
+  if (segments.length === 0) return [];
+  if (segments.length === 1) {
+    return [{
+      segmentIndices: [0],
+      text: segments[0].text,
+      start: segments[0].start,
+      end: segments[0].end,
+    }];
+  }
+
+  console.log(`[SBD] Starting boundary detection for ${segments.length} segments`);
+
+  const allSentences: SBDSentence[] = [];
+  let globalOffset = 0;
+
+  while (globalOffset < segments.length) {
+    const batchEnd = Math.min(globalOffset + SBD_BATCH_SIZE, segments.length);
+    const batch = segments.slice(globalOffset, batchEnd);
+
+    // 이 배치 내 1-based 경계 인덱스
+    const localBoundaries = await runSBDBatch(batch);
+
+    // 전역 인덱스로 변환 후 그룹핑
+    const globalBoundaries = localBoundaries.map((b) => b); // 이미 1-based
+
+    const batchSentences = groupSegmentsByBoundaries(batch, globalBoundaries);
+
+    // 배치 경계에서 앞 배치의 마지막 문장이 불완전하면 현재 배치 첫 문장과 병합
+    if (
+      allSentences.length > 0 &&
+      batchSentences.length > 0
+    ) {
+      const lastSentence = allSentences[allSentences.length - 1];
+      const lastText = lastSentence.text;
+
+      // 마지막 문장이 dangling fragment인지 확인
+      const isDangling = RE_DANGLING_FRAGMENT.test(lastText);
+
+      if (isDangling) {
+        // 현재 배치의 첫 문장과 병합
+        const firstOfBatch = batchSentences.shift()!;
+        const mergedIndices = [
+          ...lastSentence.segmentIndices.map((idx) => idx), // 이미 절대 인덱스
+          ...firstOfBatch.segmentIndices.map((idx) => idx + globalOffset),
+        ];
+        const mergedSegs = mergedIndices.map((idx) => segments[idx]);
+
+        allSentences[allSentences.length - 1] = {
+          segmentIndices: mergedIndices,
+          text: [lastText, firstOfBatch.text].join(" ").trim(),
+          start: mergedSegs[0].start,
+          end: mergedSegs[mergedSegs.length - 1].end,
+        };
+      }
+    }
+
+    // 나머지 문장들 추가 (segmentIndices를 전역 인덱스로 변환)
+    for (const sent of batchSentences) {
+      allSentences.push({
+        ...sent,
+        segmentIndices: sent.segmentIndices.map((idx) => idx + globalOffset),
+      });
+    }
+
+    globalOffset = batchEnd;
+  }
+
+  // SBD 품질 검사: 결과가 원본의 SBD_FALLBACK_RATIO 이상이면 거의 분리 안 된 것
+  const sentenceRatio = allSentences.length / segments.length;
+  if (sentenceRatio >= SBD_FALLBACK_RATIO && segments.length > 5) {
+    console.warn(`[SBD] Low grouping rate (${allSentences.length}/${segments.length} = ${sentenceRatio.toFixed(2)}), falling back to mergeFragments`);
+    return []; // 빈 배열 반환 → caller에서 fallback 처리
+  }
+
+  console.log(`[SBD] Done: ${segments.length} segments → ${allSentences.length} sentences`);
+  return allSentences;
+}
+
+/**
+ * SBDSentence[]를 MergedGroup[]으로 변환 (기존 파이프라인 호환)
+ */
+function sbdSentencesToMergedGroups(sentences: SBDSentence[]): MergedGroup[] {
+  return sentences.map((sent) => ({
+    start: sent.start,
+    end: sent.end,
+    text: sent.text,
+    originalIndices: sent.segmentIndices,
+  }));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ── [LEGACY] Fragment merging (SBD fallback) ──────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+
 function isShortIndependent(t: string): boolean {
   const trimmed = t.trim();
   const words = trimmed.split(/\s+/).filter(Boolean);
@@ -436,6 +664,8 @@ function isShortIndependent(t: string): boolean {
   if (wc === 1 && word.endsWith("?")) return true;
   if (/^(no|yes|yeah|nope|yep|nah|not\s+really|okay\s+yes|alright|sure|right)$/i.test(trimmed)) return true;
   if (wc === 1 && /^(hmm|hm|uh|um|oh|wow|okay|ok|hey|right|sure|fine|well|whoa|ow|ugh|yikes|oops)$/i.test(word)) return true;
+  // [개선] "I do" 같은 독립 단답은 명시적으로 독립 발화로 처리
+  if (/^i\s+(do|did|don'?t|will|won'?t|am|was|can|can'?t)$/i.test(trimmed)) return true;
   if (wc === 1 && /^[A-Z][a-zA-Z]{1,11}$/.test(word)) return true;
   if (wc <= 3 && /^(i|you|we|they)\s+(do|did|will|won't|can|can't|get|got|know|see|am|was)(\s+\w+)?$/i.test(trimmed)) return true;
   if (wc >= 2 && wc <= 3 && /[.!]$/.test(trimmed)) return true;
@@ -444,7 +674,6 @@ function isShortIndependent(t: string): boolean {
   return false;
 }
 
-// ── Fragment merging ──────────────────────────────────────────────────────────
 const MAX_MERGE_WORDS = 12;
 
 function mergeFragments(segments: TranslationSegment[]): MergedGroup[] {
@@ -515,7 +744,6 @@ function mergeFragments(segments: TranslationSegment[]): MergedGroup[] {
   return groups;
 }
 
-// ── enforceSentence ───────────────────────────────────────────────────────────
 function enforceSentence(groups: MergedGroup[]): MergedGroup[] {
   const result: MergedGroup[] = [];
   let buffer: MergedGroup | null = null;
@@ -976,7 +1204,7 @@ function cleanWhisperText(text: string): string {
 }
 
 // ── buildBatchMessage ─────────────────────────────────────────────────────────
-function buildBatchMessage(batch: TranslationSegment[]): {
+function buildBatchMessage(batch: MergedGroup[]): {
   message: string;
   tokenMaps: MaskedToken[][];
 } {
@@ -993,50 +1221,39 @@ function buildBatchMessage(batch: TranslationSegment[]): {
   return { message: lines.join("\n"), tokenMaps };
 }
 
-// ── [FIX-ALL] postProcessTranslation — 통합 후처리 ───────────────────────────
-// 수정사항:
-//   FIX-TIME:          convertTimeExpressionKo를 restoreNumericTokens 이후에만 호출
-//   FIX-TIME-DEDUP:    deduplicateTimeUnits로 "8시 시" 중복 제거
-//   FIX-2:             applyDawnTimeCorrection으로 새벽 판정 통합
-//   FIX-3:             stripLeakedPlaceholders로 placeholder 잔존 방어
-//   FIX-THAT-KIND-OF:  applyThatKindOfFix로 약화 표현 / 지칭 표현 교정
+// ── postProcessTranslation ────────────────────────────────────────────────────
 function postProcessTranslation(translated: string, sourceText: string, targetLanguage: string): string {
   let out = translated;
 
-  // [FIX-3] Placeholder 잔존 방어 — 어느 언어든 적용
   if (RE_PLACEHOLDER_LEAK.test(out)) {
     console.warn(`[POST] Placeholder leak detected: "${out}" (src: "${sourceText}")`);
     out = stripLeakedPlaceholders(out);
   }
 
-  // ── 한국어 전용 후처리 ────────────────────────────────────────────────────
   if (targetLanguage === "Korean" || targetLanguage === "ko") {
-
-    // [FIX-TIME] 시간 표기 변환: HH:MM → 한국어 (+ 내부에서 deduplicateTimeUnits 호출)
     out = convertTimeExpressionKo(out);
-
-    // [FIX-TIME-DEDUP] 안전망: convertTimeExpressionKo 이후에도 중복이 남아있을 경우 추가 제거
-    // (이미 한국어로 변환된 텍스트에 convertTimeExpressionKo가 재적용된 극단적 경우 방어)
     out = deduplicateTimeUnits(out);
-
-    // [FIX-2] 새벽/아침 시간대 교정
     out = applyDawnTimeCorrection(out, sourceText);
-
-    // [FIX-THAT-KIND-OF] "that kind of" / "kind of" 약화 표현 교정
     out = applyThatKindOfFix(out, sourceText);
 
-    // 환각 추가 표현 제거
     const srcHasSurprise = /surprised|amazing|incredible|unbelievable|wow|astonish/i.test(sourceText);
     if (!srcHasSurprise) {
       out = out.replace(RE_HALLUCINATED_ADDITION_KO, "").trim();
     }
 
-    // HR director 오역 보호
     if (/\bHR\b/i.test(sourceText) && /감독/.test(out)) {
       out = out.replace(/인사\s*감독/g, "인사 담당자").replace(/감독님/g, "인사 책임자").trim();
     }
 
-    // "you don't work here" 어순 교정
+    // [개선] "guidance", "validation" 등 오역 보호
+    // "no guidance no validation no encouragement no supervision" 패턴
+    if (/no\s+(guidance|validation|encouragement|supervision)/i.test(sourceText)) {
+      out = out
+        .replace(/감독\s*없이\s*격려/g, "격려도, 감독도 없이")
+        .replace(/감독합니다/g, "감독도 없어요")
+        .trim();
+    }
+
     if (/you\s+don'?t\s+work\s+here/i.test(sourceText)) {
       out = out
         .replace(/여기는\s+당신이\s+일하지\s+않아요/, "당신은 여기서 일하지 않아요")
@@ -1117,7 +1334,7 @@ function isOvergenerated(input: string, output: string, targetLanguage = "Korean
 // ── 배치 응답 파싱 ────────────────────────────────────────────────────────────
 function parseBatchResponse(
   response: string,
-  batch: TranslationSegment[],
+  batch: MergedGroup[],
   patterns: CompiledNounPattern[],
   tokenMaps: MaskedToken[][]
 ): string[] {
@@ -1183,7 +1400,7 @@ function isLikelyUntranslated(translated: string, targetLanguage: string): boole
 }
 
 async function validateTranslations(
-  segments: TranslationSegment[],
+  segments: MergedGroup[],
   translatedTexts: string[],
   systemPrompt: string,
   targetLanguage: string,
@@ -1281,7 +1498,10 @@ async function deleteCheckpoint(videoHash: string): Promise<void> {
   await AsyncStorage.removeItem(checkpointKey(videoHash));
 }
 
-function mergeWithTranslations(segments: TranslationSegment[], translatedTexts: string[]): TranslationSegment[] {
+function mergeWithTranslations(
+  segments: TranslationSegment[],
+  translatedTexts: string[]
+): TranslationSegment[] {
   return segments.map((seg, i) => ({ ...seg, translated: translatedTexts[i] || seg.text }));
 }
 
@@ -1323,6 +1543,7 @@ function buildSystemPrompt(
     `- "baby" as an informal address (non-romantic) → use the person's name or omit. NEVER translate as 자기야.\n` +
     `- NEVER add 자기야/여보/honey/darling unless that exact term is in the source.\n` +
     `- "HR" always means Human Resources. "HR director" → 인사 담당자 or 인사 책임자. NEVER 감독님.\n` +
+    `- "no guidance", "no validation", "no encouragement", "no supervision" → each is a SEPARATE lack of support. Translate each phrase independently with negation.\n` +
     `- Tokens like __NUM0__, __NUM1__ are number/time placeholders. Copy them EXACTLY as-is. Do not translate or remove.\n` +
     `- These proper nouns must NOT be translated — keep or phonetically transliterate only: ${protectedNounList}\n` +
     `- "not really" → translate as mild negation in context\n` +
@@ -1335,7 +1556,6 @@ function buildSystemPrompt(
     `- Conversational "That's/That is" → use proximal pronoun (그건/그게), never distal (저것은/저것이)\n` +
     `- Time expressions: "until X in the morning" — if X is 1–6, it is the middle of the night (새벽), not 아침\n` +
     `- "like X in the morning" or "until like X in the morning" follows same rule as above\n` +
-    // [FIX-THAT-KIND-OF] 프롬프트에 "that kind of" 규칙 명시
     `- "that kind of thing" → always "그런 거" or "그런 식". NEVER "그런 종류의 것".\n` +
     `- "that kind of + verb/adj" (e.g. "that kind of doesn't work") → softening expression: "그게 좀 안 맞아요". NEVER "그런 종류는".\n` +
     `- "that kind of + noun" (e.g. "that kind of research") → noun reference: "그런 종류의 연구". This is the ONLY case where "그런 종류의" is correct.\n` +
@@ -1347,7 +1567,9 @@ function buildSystemPrompt(
   );
 }
 
-// ── Main ──────────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// ── Main: translateSegments ───────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
 export async function translateSegments(
   segments: TranslationSegment[],
   onProgress?: (completed: number, total: number, partial: TranslationSegment[]) => void,
@@ -1358,22 +1580,15 @@ export async function translateSegments(
   console.log("[TRANSLATE]", segments.length, "segs |", targetLanguage, "|", videoGenre);
   if (!llamaContext) throw new Error("모델이 로드되지 않았습니다. loadModel()을 먼저 호출하세요.");
 
-  // Step 0: 중복 제거 + ASR 정리
+  // ── Step 0: 중복 제거 + ASR 정리 ────────────────────────────────────────────
   const deduped = deduplicateOverlappingSegments(segments);
   const cleaned = deduped.map(seg => ({
     ...seg,
     text: normalizeSocialMediaNames(cleanWhisperText(seg.text)),
   }));
 
-  // Step A: 프래그먼트 병합
-  let merged = mergeFragments(cleaned);
-  merged = enforceSentence(merged);
-  const mergedSegs = merged.map(g => ({ start: g.start, end: g.end, text: g.text, translated: "" }));
-  const total = mergedSegs.length;
-  const totalBatches = Math.ceil(total / BATCH_SIZE);
-  console.log(`[TRANSLATE] merged → ${total} groups (${totalBatches} batches)`);
-
-  // Step B: 고유명사 + 프롬프트 구성
+  // ── Step A: 고유명사 + 프롬프트 구성 ────────────────────────────────────────
+  // SBD 전에 먼저 준비 (SBD와 번역이 같은 프롬프트 컨텍스트 공유)
   const profile = getLanguageProfile(targetLanguage);
   const properNouns = await buildProperNounDict(deduped, videoHash, targetLanguage);
   const nounHint = formatNounHint(properNouns);
@@ -1381,10 +1596,38 @@ export async function translateSegments(
   const genrePersona = GENRE_PERSONA[videoGenre] ?? "";
   const langRules = profile.systemPromptRules.join(" ");
 
-  // Step C: 체크포인트 복원
+  // ── Step B: SBD — 문장 경계 탐지 ────────────────────────────────────────────
+  //
+  // SBD가 성공하면: 완전한 문장 단위로 번역 (환각 대폭 감소)
+  // SBD가 실패하면: 기존 mergeFragments + enforceSentence fallback
+  //
+  let merged: MergedGroup[];
+  let usedSBD = false;
+
+  const sbdSentences = await detectSentenceBoundaries(cleaned);
+
+  if (sbdSentences.length > 0) {
+    // SBD 성공
+    merged = sbdSentencesToMergedGroups(sbdSentences);
+    usedSBD = true;
+    console.log(`[TRANSLATE] SBD success: ${cleaned.length} segs → ${merged.length} sentences`);
+  } else {
+    // SBD fallback: 기존 방식
+    console.log(`[TRANSLATE] SBD fallback: using mergeFragments`);
+    let fallbackMerged = mergeFragments(cleaned);
+    fallbackMerged = enforceSentence(fallbackMerged);
+    merged = fallbackMerged;
+  }
+
+  const total = merged.length;
+  const totalBatches = Math.ceil(total / BATCH_SIZE);
+  console.log(`[TRANSLATE] ${usedSBD ? "SBD" : "fallback"} → ${total} groups (${totalBatches} batches)`);
+
+  // ── Step C: 체크포인트 복원 ──────────────────────────────────────────────────
   const checkpoint = await loadCheckpoint(videoHash);
   let startBatch = 0;
   const mergedTranslations: string[] = new Array(total).fill("");
+
   if (checkpoint && checkpoint.translatedTexts.length === total) {
     startBatch = checkpoint.lastBatchIndex + 1;
     for (let i = 0; i < checkpoint.translatedTexts.length; i++) {
@@ -1393,11 +1636,11 @@ export async function translateSegments(
     console.log(`[Gemma] Resuming from batch ${startBatch}/${totalBatches}`);
   }
 
-  // Step D: 배치 번역
+  // ── Step D: 배치 번역 ────────────────────────────────────────────────────────
   try {
     for (let bi = startBatch; bi < totalBatches; bi++) {
       const offset = bi * BATCH_SIZE;
-      const batch = mergedSegs.slice(offset, offset + BATCH_SIZE);
+      const batch = merged.slice(offset, offset + BATCH_SIZE);
       console.log(`[TRANSLATE] batch ${bi + 1}/${totalBatches} (${batch.length})`);
 
       const sysPrompt = buildSystemPrompt(targetLanguage, langRules, genrePersona, nounHint, batch.length);
@@ -1443,7 +1686,7 @@ export async function translateSegments(
 
   await deleteCheckpoint(videoHash);
 
-  // Step E: 재분배
+  // ── Step E: 재분배 ───────────────────────────────────────────────────────────
   const translatedTexts = expandGroupTranslations(merged, mergedTranslations, cleaned);
 
   // Step E.1: 호칭어 환각 제거
@@ -1453,14 +1696,14 @@ export async function translateSegments(
     }
   }
 
-  // Step E.2: 후처리 — 시간 표기, 시간대, "that kind of", HR, 어순 교정
+  // Step E.2: 후처리
   for (let i = 0; i < cleaned.length; i++) {
     if (translatedTexts[i]) {
       translatedTexts[i] = postProcessTranslation(translatedTexts[i], cleaned[i].text, targetLanguage);
     }
   }
 
-  // Step F: 실패 세그먼트 재시도
+  // ── Step F: 실패 세그먼트 재시도 ─────────────────────────────────────────────
   for (let attempt = 0; attempt < 2; attempt++) {
     const failed = cleaned.reduce<number[]>((acc, seg, i) => {
       const t = translatedTexts[i];
@@ -1481,9 +1724,16 @@ export async function translateSegments(
     if (failed.length === 0) break;
     console.log(`[Gemma] Retry ${attempt + 1}: ${failed.length} segs`);
 
-    const retryBatch = failed.map(i => cleaned[i]);
-    const retryPrompt = buildSystemPrompt(targetLanguage, langRules, genrePersona, nounHint, retryBatch.length);
-    const { message: retryMessage, tokenMaps: retryTokenMaps } = buildBatchMessage(retryBatch);
+    // 실패한 세그먼트들을 MergedGroup으로 래핑해서 재시도
+    const retryGroups: MergedGroup[] = failed.map(i => ({
+      start: cleaned[i].start,
+      end: cleaned[i].end,
+      text: cleaned[i].text,
+      originalIndices: [i],
+    }));
+
+    const retryPrompt = buildSystemPrompt(targetLanguage, langRules, genrePersona, nounHint, retryGroups.length);
+    const { message: retryMessage, tokenMaps: retryTokenMaps } = buildBatchMessage(retryGroups);
 
     try {
       const rr = await llamaContext.completion({
@@ -1491,7 +1741,7 @@ export async function translateSegments(
           { role: "system", content: retryPrompt },
           { role: "user", content: retryMessage },
         ],
-        n_predict: retryBatch.length * 80,
+        n_predict: retryGroups.length * 80,
         temperature: 0.1,
         top_p: 0.9,
         top_k: 40,
@@ -1499,11 +1749,11 @@ export async function translateSegments(
         stop: ["</s>", "<end_of_turn>", "<|end|>"],
       } as any);
 
-      const rt = parseBatchResponse(rr.text, retryBatch, patterns, retryTokenMaps);
+      const rt = parseBatchResponse(rr.text, retryGroups, patterns, retryTokenMaps);
 
       for (let j = 0; j < failed.length; j++) {
         if (rt[j] && rt[j].trim() && !isCorruptedOutput(rt[j])) {
-          translatedTexts[failed[j]] = postProcessTranslation(rt[j], retryBatch[j].text, targetLanguage);
+          translatedTexts[failed[j]] = postProcessTranslation(rt[j], retryGroups[j].text, targetLanguage);
         }
       }
     } catch (e) {
@@ -1514,14 +1764,46 @@ export async function translateSegments(
     if (attempt < 1) await sleep(SLEEP_BETWEEN_MS);
   }
 
-  // Step G: 검증
+  // ── Step G: 검증 ─────────────────────────────────────────────────────────────
   const finalPrompt = buildSystemPrompt(targetLanguage, langRules, genrePersona, nounHint, BATCH_SIZE);
-  const validated = await validateTranslations(cleaned, translatedTexts, finalPrompt, targetLanguage, patterns);
 
-  // Step H: Netflix 포맷팅
-  const formatted = validated.map(t => formatNetflixSubtitle(t));
+  // 검증은 merged 그룹 단위로 (SBD 문장 단위)
+  const mergedForValidation: MergedGroup[] = merged.map((g, i) => ({
+    ...g,
+    // 이 그룹의 번역문은 첫 번째 세그먼트의 translatedText 사용
+    text: g.text,
+  }));
 
-  // Step I: 타이밍 조정 + 최종 조립
+  // 그룹별 번역 텍스트 재조합 (검증용)
+  const groupTranslationsForValidation = merged.map((g) => {
+    const texts = g.originalIndices
+      .map((idx) => translatedTexts[idx])
+      .filter(Boolean);
+    return texts.join(" ").trim();
+  });
+
+  const validatedGroupTexts = await validateTranslations(
+    mergedForValidation,
+    groupTranslationsForValidation,
+    finalPrompt,
+    targetLanguage,
+    patterns
+  );
+
+  // 검증된 그룹 번역을 다시 개별 세그먼트로 재분배
+  const revalidatedTexts = expandGroupTranslations(merged, validatedGroupTexts, cleaned);
+
+  // 최종 후처리
+  for (let i = 0; i < cleaned.length; i++) {
+    if (revalidatedTexts[i]) {
+      revalidatedTexts[i] = postProcessTranslation(revalidatedTexts[i], cleaned[i].text, targetLanguage);
+    }
+  }
+
+  // ── Step H: Netflix 포맷팅 ───────────────────────────────────────────────────
+  const formatted = revalidatedTexts.map(t => formatNetflixSubtitle(t));
+
+  // ── Step I: 타이밍 조정 + 최종 조립 ─────────────────────────────────────────
   const completed = adjustTimingsForReadability(mergeWithTranslations(cleaned, formatted));
   console.log(`[Gemma] Done: ${completed.length} segments.`);
   return completed;
