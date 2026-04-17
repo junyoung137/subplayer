@@ -478,33 +478,6 @@ export async function unloadModel(): Promise<void> {
   // (llamaContext was already set to null before release — no further assignment needed)
 }
 
-/**
- * Called by backgroundTranslationTask when isHeadlessContext=true, BEFORE loadModel().
- * Ensures any FG unloadModel() race is resolved cleanly:
- *   1. Waits for any in-progress _loadModelPromise to settle
- *   2. Releases and nulls llamaContext so loadModel() always does a fresh init
- *   3. Resets inference counters to prevent INFERENCE_CANCELLED on first enqueue
- */
-export async function resetForHeadlessRestart(): Promise<void> {
-  // 1. Wait for any pending load to settle first
-  if (_loadModelPromise) {
-    try { await _loadModelPromise; } catch {}
-    _loadModelPromise = null;
-  }
-  // 2. Release existing context if still held (handles the race where FG unloadModel
-  //    was in progress but not yet null-assigned)
-  if (llamaContext) {
-    try { await llamaContext.release(); } catch {}
-    llamaContext = null;
-  }
-  // 3. Re-align counters: set _enqueueId = _activeJobId so next enqueueInference
-  //    call gets myEnqueueId === _activeJobId + 1 (immediately wins the active slot)
-  _enqueueId = _activeJobId;
-  _isInferenceRunning = false;
-  _bgJobProtected = false;
-  console.log('[GEMMA] resetForHeadlessRestart() complete — llamaContext=null, counters realigned');
-}
-
 // ── Deduplication ─────────────────────────────────────────────────────────────
 function deduplicateOverlappingSegments(segments: TranslationSegment[]): TranslationSegment[] {
   if (segments.length === 0) return [];

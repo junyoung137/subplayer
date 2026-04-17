@@ -3,7 +3,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 // [FIX BUG1] Import async resolver — getProxyBaseUrl() reads AsyncStorage on
 // first call in HeadlessJS context (where __DEV__ is always false).
 import { fetchYoutubeSubtitles, getProxyBaseUrl, clearProxyUrlCache } from './youtubeTimedText';
-import { loadModel, unloadModel, translateSegments, isModelBusy, debugInferenceCounters, setBgJobProtection, cancelFgInference, resetForHeadlessRestart } from './gemmaTranslationService';
+import { loadModel, unloadModel, translateSegments, isModelBusy, debugInferenceCounters, setBgJobProtection, cancelFgInference } from './gemmaTranslationService';
 import { getLocalModelPath } from './modelDownloadService';
 
 export const BG_TASK_STATUS_KEY  = 'bg_translation_status';
@@ -28,9 +28,6 @@ export interface BgTranslationTask {
   language: string;
   genre: string;
   enqueuedAt: number;
-  // Fix 1: when true the task is running inside a HeadlessJS context — all
-  // AppState 'change' (background detection) logic is completely disabled.
-  isHeadlessContext?: boolean;
 }
 
 export interface BgTranslationResult {
@@ -99,7 +96,7 @@ async function sendFailureNotification(videoTitle: string, reason?: string): Pro
 }
 
 export async function backgroundTranslationTask(taskData: BgTranslationTask): Promise<void> {
-  const { videoId, videoTitle, language, genre, isHeadlessContext } = taskData;
+  const { videoId, videoTitle, language, genre } = taskData;
   const statusBase = { videoId, updatedAt: Date.now() };
 
   // [DEBUG] If counters are 0 this task runs in a FRESH JS context (separate from FG).
@@ -108,7 +105,7 @@ export async function backgroundTranslationTask(taskData: BgTranslationTask): Pr
   const ctrs = debugInferenceCounters();
   console.log(
     `[BG_TASK] Starting. JS context: enqueueId=${ctrs.enqueueId} activeJobId=${ctrs.activeJobId} ` +
-    `(0/0 = fresh context; >0 = shared with FG) isHeadlessContext=${!!isHeadlessContext}`
+    `(0/0 = fresh context; >0 = shared with FG)`
   );
   // [FIX BUG1] Log the resolved proxy URL so logcat shows what URL HeadlessJS is using.
   // getProxyBaseUrl() reads AsyncStorage (seeded by setProxyBaseUrl in FG _layout.tsx).
@@ -119,7 +116,7 @@ export async function backgroundTranslationTask(taskData: BgTranslationTask): Pr
   // Fix 4: if _isRunning is true the previous task may still be in its finally block.
   // Wait up to 3 s for it to clear before proceeding.
   if (_isRunning) {
-    const waitMs = isHeadlessContext ? 8000 : 3000;
+    const waitMs = 3000;
     console.warn(`[BG_TASK] _isRunning=true on entry — waiting ${waitMs}ms for previous task to clear...`);
     await sleep(waitMs);
     if (_isRunning) {
@@ -139,12 +136,6 @@ export async function backgroundTranslationTask(taskData: BgTranslationTask): Pr
 
   let keepAliveInterval: ReturnType<typeof setInterval> | null = null;
   let memWarnSub: ReturnType<typeof AppState.addEventListener> | null = null;
-  // Fix 1: bgStateSub is only ever assigned when !isHeadlessContext.
-  let bgStateSub: ReturnType<typeof AppState.addEventListener> | null = null;
-  // Fix 1: this flag is only ever set to true when !isHeadlessContext.
-  // In HeadlessJS mode it stays false for the entire execution so the
-  // APP_BACKGROUNDED throw path is structurally unreachable.
-  let appHasGoneBackground = false;
 
   try {
     await AsyncStorage.setItem(BG_PENDING_TASK_KEY, JSON.stringify(taskData)).catch(() => {});
@@ -282,16 +273,6 @@ export async function backgroundTranslationTask(taskData: BgTranslationTask): Pr
     await saveStatus({ ...statusBase, status: 'fetching', progress: 0.05,
       translatedCount: checkpoint?.translatedCount ?? 0, totalCount });
 
-    // HeadlessJS restart: ensure any FG unloadModel() race is fully resolved before
-    // loading the model. resetForHeadlessRestart() waits for any in-progress release,
-    // nulls llamaContext, and realigns inference counters.
-    if (isHeadlessContext) {
-      try {
-        await resetForHeadlessRestart();
-      } catch (e) {
-        console.warn('[BG_TASK] resetForHeadlessRestart() error (non-fatal):', e);
-      }
-    }
     try {
       await loadModel();
     } catch (e: any) {
@@ -320,18 +301,6 @@ export async function backgroundTranslationTask(taskData: BgTranslationTask): Pr
       console.warn('[BG_TASK] Memory warning received — will abort after checkpoint save');
       _memoryWarningAbort = true;
     });
-
-    // Fix 1: only watch for app backgrounding in the foreground UI context.
-    // In HeadlessJS (isHeadlessContext=true) the app IS already in the background,
-    // so the 'background' AppState event is meaningless and must not trigger a yield.
-    if (!isHeadlessContext) {
-      bgStateSub = AppState.addEventListener('change', (state) => {
-        if (state === 'background') {
-          console.log('[BG_TASK] App went to background — will yield after next checkpoint save');
-          appHasGoneBackground = true;
-        }
-      });
-    }
 
     const allInput = subtitleResult.segments.map(seg => ({
       start: seg.startTime, end: seg.endTime, text: seg.text, translated: '',
@@ -437,13 +406,6 @@ export async function backgroundTranslationTask(taskData: BgTranslationTask): Pr
             throw new Error('MEMORY_WARNING_ABORT');
           }
 
-          // Fix 1: APP_BACKGROUNDED is only reachable when !isHeadlessContext.
-          // When isHeadlessContext=true, appHasGoneBackground is always false
-          // (the listener that sets it is never registered), so this path is
-          // structurally unreachable in HeadlessJS mode.
-          if (!isHeadlessContext && appHasGoneBackground) {
-            throw new Error('APP_BACKGROUNDED');
-          }
         }
 
         // IPC는 2초 throttle 유지 (네이티브 알림 과부하 방지)
@@ -481,16 +443,6 @@ export async function backgroundTranslationTask(taskData: BgTranslationTask): Pr
               translatedCount: 0, totalCount,
               error: '메모리 부족 — 재시작 시 이어서 번역됩니다' });
             await sendFailureNotification(videoTitle, '메모리 부족 (재시작 시 재개)');
-            return;
-          }
-          if (e?.message === 'APP_BACKGROUNDED') {
-            // Checkpoint already saved by progress callback logic above.
-            // Notify native watchdog via SharedPreferences bridge so it triggers
-            // a RETRYING transition → HeadlessJS resumes from checkpoint.
-            // CONTRACT: only reachable when isHeadlessContext=false (FG UI context).
-            console.log('[BG_TASK] App backgrounded — yielding to HeadlessJS for resume');
-            NativeModules.TranslationService?.notifyJsYielded?.();
-            // No error status written — HeadlessJS picks up BG_TASK_CHECKPOINT_KEY and resumes.
             return;
           }
           if (e?.message === 'INFERENCE_CANCELLED') {
@@ -587,10 +539,6 @@ export async function backgroundTranslationTask(taskData: BgTranslationTask): Pr
     if (memWarnSub !== null) {
       memWarnSub.remove();
       memWarnSub = null;
-    }
-    if (bgStateSub !== null) {
-      bgStateSub.remove();
-      bgStateSub = null;
     }
     _memoryWarningAbort = false;
     // Fix 4: explicit log so logcat confirms the guard is cleared for the next invocation.

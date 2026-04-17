@@ -196,42 +196,29 @@ export function useBackgroundTranslation(activeVideoId?: string): UseBackgroundT
     // Clear any stale lock from a previous crashed session before starting fresh
     await AsyncStorage.removeItem(BG_TASK_LOCK_KEY).catch(() => {});
 
-    // Start native Android ForegroundService: provides persistent notification
-    // + wake-lock so the process survives screen-off and app backgrounding.
-    // Non-fatal if unavailable — the direct JS call below handles execution.
+    // Start native Android ForegroundService.
+    // This keeps the process and JS context alive when the app goes to background.
+    // Without this, the OS can kill the process mid-translation.
+    // This is NOT for triggering HeadlessJS — HeadlessJS has been removed.
+    // The ForegroundService simply holds a WakeLock and foreground notification
+    // so Android does not kill the process during background translation.
     if (NativeModules.TranslationService) {
       try {
-        console.log('[BG_TRANSLATE] Starting native ForegroundService...');
         await NativeModules.TranslationService.startTranslation({
           videoId:    task.videoId,
           videoTitle: task.videoTitle,
           language:   task.language,
           genre:      task.genre,
         });
-        console.log('[BG_TRANSLATE] ForegroundService start OK');
       } catch (e) {
-        console.warn('[BG_TRANSLATE] Native service start failed (non-fatal):', e);
+        console.warn('[BG_TRANSLATE] ForegroundService start failed (non-fatal):', e);
       }
-    } else {
-      console.warn('[BG_TRANSLATE] TranslationService native module not found — JS-only mode');
     }
 
-    // Run the translation pipeline directly in the current JS context while the
-    // app is in the foreground. This is the PRIMARY execution path.
-    //
-    // When the user leaves the app, backgroundTranslationTask throws APP_BACKGROUNDED,
-    // saves a checkpoint, and calls notifyJsYielded(). The ForegroundService then
-    // triggers HeadlessJS (index.ts, isHeadlessContext=true) which resumes from
-    // the checkpoint in the background.
-    //
-    // The _isRunning guard in backgroundTranslationTask detects and skips any
-    // concurrent HeadlessJS invocation that fires while this call is active,
-    // preventing double-translation.
-    console.log('[BG_TRANSLATE] Starting direct JS translation runner (isHeadlessContext=false)');
+    console.log('[BG_TRANSLATE] Starting direct JS translation runner');
     const fullTask: BgTranslationTask = {
       ...task,
       enqueuedAt: Date.now(),
-      isHeadlessContext: false,
     };
     backgroundTranslationTask(fullTask).catch(e => {
       console.warn('[BG_TRANSLATE] Direct JS runner error:', e);
