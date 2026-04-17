@@ -38,9 +38,10 @@ interface SBDSentence {
 // ── Constants ─────────────────────────────────────────────────────────────────
 const MODEL_PATH = FileSystem.documentDirectory + "gemma-models/gemma-3n-e2b-q4.gguf";
 const BATCH_SIZE = 5;
-const SLEEP_BETWEEN_MS = 600;
-const SLEEP_THERMAL_MS = 2500;
+const SLEEP_BETWEEN_MS = 150;
+const SLEEP_THERMAL_MS = 1200;
 const THERMAL_EVERY_N = 5;
+const SAVE_INTERVAL_MS = 1500;
 const CHECKPOINT_TTL_MS = 24 * 60 * 60 * 1000;
 const PROPER_NOUN_MIN_COUNT = 3;
 
@@ -1813,12 +1814,14 @@ export async function translateSegments(
 
   // ── Step D: 배치 번역 ────────────────────────────────────────────────────────
   try {
+    let lastSaveTime = 0;
     for (let bi = startBatch; bi < totalBatches; bi++) {
       if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
       const offset = bi * BATCH_SIZE;
       const batch = merged.slice(offset, offset + BATCH_SIZE);
       console.log(`[TRANSLATE] batch ${bi + 1}/${totalBatches} (${batch.length})`);
 
+      const batchStartTime = Date.now();
       const sysPrompt = buildSystemPrompt(targetLanguage, langRules, genrePersona, nounHint, batch.length);
       const { message: batchMessage, tokenMaps } = buildBatchMessage(batch);
 
@@ -1849,22 +1852,42 @@ export async function translateSegments(
       // backgroundTranslationTask's saveStatus(done, 100%) — the poll only sees 'done'.
       if (onProgress) await onProgress(offset + batch.length, total, mergeWithTranslations(cleaned, partial));
 
-      await saveCheckpoint(videoHash, {
-        translatedTexts: mergedTranslations,
-        lastBatchIndex: bi,
-        properNouns,
-        totalBatches,
-      });
+      const now = Date.now();
+      if (now - lastSaveTime >= SAVE_INTERVAL_MS) {
+        lastSaveTime = now;
+        await saveCheckpoint(videoHash, {
+          translatedTexts: mergedTranslations,
+          lastBatchIndex: bi,
+          properNouns,
+          totalBatches,
+        });
+      }
       if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
 
       if (!_isAppBackgrounded && bi < totalBatches - 1) {
         // Skip inter-batch sleep when backgrounded — thermal protection is only relevant
         // when the screen is on. Android's kernel thermal governor manages CPU frequency
         // when the display is off. Zero inter-batch delay maximises throughput in background.
-        await sleep((bi + 1) % THERMAL_EVERY_N === 0 ? SLEEP_THERMAL_MS : SLEEP_BETWEEN_MS);
+        if ((bi + 1) % THERMAL_EVERY_N === 0) {
+          await sleep(SLEEP_THERMAL_MS);
+        } else {
+          const batchEndTime = Date.now();
+          const batchDuration = batchEndTime - batchStartTime;
+          const adaptiveSleep =
+            bi === startBatch
+              ? 100
+              : Math.min(200, Math.max(100, Math.round(batchDuration * 0.15)));
+          await sleep(adaptiveSleep);
+        }
         if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
       }
     }
+    await saveCheckpoint(videoHash, {
+      translatedTexts: mergedTranslations,
+      lastBatchIndex: totalBatches - 1,
+      properNouns,
+      totalBatches,
+    });
   } catch (e: any) {
     if (e?.message === 'INFERENCE_CANCELLED') throw e;
     if (e?.message === 'APP_BACKGROUNDED') throw e;
