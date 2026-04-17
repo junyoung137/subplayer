@@ -123,6 +123,15 @@ type SubtitlePhase =
   | "no_subtitles"
   | "fallback_whisper";
 
+function formatRemaining(secs: number): string {
+  if (secs <= 0) return '';
+  if (secs <= 3)  return '거의 완료';
+  if (secs < 60)  return `약 ${Math.ceil(secs)}초 남음`;
+  const m = Math.floor(secs / 60);
+  const s = Math.ceil(secs % 60);
+  return s > 0 ? `약 ${m}분 ${s}초 남음` : `약 ${m}분 남음`;
+}
+
 function getSubtitleStatusLabel(phase: SubtitlePhase, progress: number): string {
   switch (phase) {
     case "fetching":         return "📡 자막 데이터 가져오는 중...";
@@ -253,6 +262,23 @@ export default function YoutubePlayerScreen() {
   const bannerOpacity          = useRef(new Animated.Value(0.7)).current;
   const lastProgressTimestampRef = useRef<number>(0);
 
+  // Animation refs for smooth progress bar interpolation
+  const animProgressRef = useRef(0);
+  const animFrameRef    = useRef<number | null>(null);
+  const animTargetRef   = useRef(0);
+
+  // FG remaining-time estimation refs
+  const batchStartTimeRef   = useRef<number>(0);
+  const lastCompletedRef    = useRef<number>(0);
+  const secsPerSegmentRef   = useRef<number>(0);
+  const fgAnimThrottleRef   = useRef<number>(0);
+
+  // BG remaining-time estimation refs
+  const bgPrevProgressRef  = useRef<number>(0);
+  const bgPrevTimestampRef = useRef<number>(0);
+  const bgSecsPerPctRef    = useRef<number>(0);
+  const bgUpdateCountRef   = useRef<number>(0);
+
   // [BUG FIX 1] isBgRunning을 비동기 콜백에서 참조하기 위한 ref
   // useState는 클로저에서 stale해지므로 ref로 최신값 동기화
   const isBgRunningRef = useRef(false);
@@ -289,10 +315,13 @@ export default function YoutubePlayerScreen() {
     return () => { StatusBar.setHidden(false); };
   }, [isLandscape]);
 
-  const [subtitlePhase,    setSubtitlePhase]    = useState<SubtitlePhase>("idle");
+  const [subtitlePhase,    setSubtitlePhase_DO_NOT_CALL] = useState<SubtitlePhase>("idle");
+  const subtitlePhaseRef = useRef<SubtitlePhase>("idle");
   const [subtitleProgress, setSubtitleProgress] = useState(0);
   const [totalSegments,    setTotalSegments]     = useState(0);
   const [translatedCount,  setTranslatedCount]   = useState(0);
+  const [remainingSecs,    setRemainingSecs]      = useState<number | null>(null);
+  const [bgRemainingSecs,  setBgRemainingSecs]    = useState<number | null>(null);
   // [FIX BUG2] Guards the save button — true only when a translation or BG result
   // has fully completed in the current screen session.  Prevents premature save
   // button appearance on cache-restore before BG state is confirmed.
@@ -301,6 +330,19 @@ export default function YoutubePlayerScreen() {
   const [showBgDoneBanner, setShowBgDoneBanner]  = useState(false);
   const bgDoneTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [isStale, setIsStale] = useState(false);
+
+  // ── Loading sub-label (stage hint inside the progress card sub-text) ──────
+  const [loadingSubLabel, setLoadingSubLabel] = useState<string>('');
+  const loadingSubLabelRef = useRef<string>('');
+  const setLoadingLabel = useCallback((label: string) => {
+    setLoadingSubLabel(label);
+    loadingSubLabelRef.current = label;
+  }, []);
+
+  const setPhase = useCallback((phase: SubtitlePhase) => {
+    subtitlePhaseRef.current = phase;        // ← ref FIRST, always
+    setSubtitlePhase_DO_NOT_CALL(phase);
+  }, []);
 
   const playbackRate = SPEEDS[speedIdx];
   const videoHeight  = Math.round(screenWidth * (9 / 16));
@@ -331,6 +373,12 @@ export default function YoutubePlayerScreen() {
         cancelAnimationFrame(rafHandleRef.current);
         rafHandleRef.current = null;
       }
+      if (animFrameRef.current !== null) {
+        cancelAnimationFrame(animFrameRef.current);
+        animFrameRef.current = null;
+      }
+      animProgressRef.current = 0;
+      animTargetRef.current   = 0;
       // [BUG 5] Do NOT unload the model if BG is actively translating.
       // Two guards in combination:
       //   • isBgRunningRef.current  — set synchronously in startBgTranslation,
@@ -355,6 +403,9 @@ export default function YoutubePlayerScreen() {
   // Keyed on video + language + genre so retranslation starts fresh.
   useEffect(() => {
     highWaterProgressRef.current = 0;
+    secsPerSegmentRef.current = 0;
+    bgUpdateCountRef.current = 0;
+    setRemainingSecs(null);
   }, [youtubeVideoId, targetLanguage, selectedGenre]);
 
   // ── no_subtitles → Whisper 전환 ──────────────────────────────────────────
@@ -365,7 +416,7 @@ export default function YoutubePlayerScreen() {
 
     whisperStartedRef.current = true;
     setUsingWhisper(true);
-    setSubtitlePhase("fallback_whisper");
+    setPhase("fallback_whisper");
 
     Alert.alert(
       "자막 없음",
@@ -448,13 +499,59 @@ export default function YoutubePlayerScreen() {
     const interval = setInterval(() => {
       const activePhase =
         subtitlePhase === 'translating' || subtitlePhase === 'resuming' || isBgRunning;
+      // Do not arm staleness while a loading-stage label is showing.
+      // SBD / mergeFragments / model restore can legitimately take 10–20 s
+      // with zero onProgress ticks — this is not a stall.
+      const stillInLoadingStage = loadingSubLabelRef.current !== '';
       if (!activePhase || lastProgressTimestampRef.current === 0) return;
+      if (stillInLoadingStage) return;
       if (Date.now() - lastProgressTimestampRef.current > 30_000) {
         setIsStale(true);
       }
     }, 5_000);
     return () => clearInterval(interval);
   }, [subtitlePhase, isBgRunning]);
+
+  // ── BG remaining-time estimation ─────────────────────────────────────────
+  useEffect(() => {
+    if (!isBgRunning || !bgStatus || bgStatus.status !== 'translating') {
+      setBgRemainingSecs(null);
+      bgSecsPerPctRef.current = 0;
+      bgPrevProgressRef.current = 0;
+      bgPrevTimestampRef.current = 0;
+      return;
+    }
+    bgUpdateCountRef.current += 1;
+    const p   = bgStatus.progress ?? 0;
+    const now = Date.now();
+    if (
+      bgPrevProgressRef.current > 0 &&
+      p > bgPrevProgressRef.current
+    ) {
+      const deltaPct  = p - bgPrevProgressRef.current;
+      const elapsedMs = now - bgPrevTimestampRef.current;
+      const elapsedS  = elapsedMs / 1000;
+      if (elapsedS >= 0.05 && deltaPct >= 0.001) {
+        const rate = deltaPct / elapsedS;
+        const secPerPct = 1 / rate;
+        bgSecsPerPctRef.current =
+          bgSecsPerPctRef.current === 0
+            ? secPerPct
+            : 0.7 * bgSecsPerPctRef.current + 0.3 * secPerPct;
+      }
+    }
+    bgPrevProgressRef.current  = p;
+    bgPrevTimestampRef.current = now;
+    if (bgSecsPerPctRef.current > 0 && p > 0.06) {
+      const remainingSecs = (1 - p) * bgSecsPerPctRef.current;
+      const clamped = Math.ceil(remainingSecs);
+      if (bgUpdateCountRef.current >= 3 && clamped > 3) {
+        setBgRemainingSecs(clamped);
+      } else if (clamped <= 3) {
+        setBgRemainingSecs(clamped);
+      }
+    }
+  }, [bgStatus, isBgRunning]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── BUG 4: bgResultApplied reset on videoId change ─────────────────────────
   // Must run BEFORE handlePlayerReady fires and BEFORE the restore effect below.
@@ -500,7 +597,7 @@ export default function YoutubePlayerScreen() {
       }));
       bgResultApplied.current = true;
       setSubtitles(restored);
-      setSubtitlePhase('done');
+      setPhase('done');
       setSubtitleProgress(1);
       setTotalSegments(restored.length);
       setTranslatedCount(restored.length);
@@ -539,7 +636,7 @@ export default function YoutubePlayerScreen() {
       allSegmentsRef.current  = bgFetchResult;
       lastFetchResult.current = bgFetchResult;
       setSubtitles(restored);
-      setSubtitlePhase('done');
+      setPhase('done');
       setSubtitleProgress(1);
       setTotalSegments(restored.length);
       setTranslatedCount(restored.length);
@@ -577,6 +674,36 @@ export default function YoutubePlayerScreen() {
     });
   }, [setSubtitles]);
 
+  // ── Smooth progress bar animation ─────────────────────────────────────
+  const animateTo = useCallback((target: number) => {
+    animTargetRef.current = target;
+    // If an animation loop is already running, only update the target.
+    // The running frame() closure reads animTargetRef.current on every tick
+    // so it will naturally converge to the new target without restarting.
+    if (animFrameRef.current !== null) return;
+
+    const duration  = 400;
+    const startVal  = animProgressRef.current;
+    const startTime = performance.now();
+
+    function frame(now: number) {
+      const t = Math.min((now - startTime) / duration, 1);
+      const eased = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
+      const value = animProgressRef.current
+        + (animTargetRef.current - animProgressRef.current) * eased;
+      animProgressRef.current = value;
+      setSubtitleProgress(value);
+      if (t < 1) {
+        animFrameRef.current = requestAnimationFrame(frame);
+      } else {
+        animProgressRef.current = animTargetRef.current;
+        setSubtitleProgress(animTargetRef.current);
+        animFrameRef.current = null;
+      }
+    }
+    animFrameRef.current = requestAnimationFrame(frame);
+  }, []);
+
   // ── 번역 파이프라인 ──────────────────────────────────────────────────────
   const translateFromResult = useCallback(async (
     result: SubtitleFetchResult,
@@ -599,7 +726,7 @@ export default function YoutubePlayerScreen() {
     cancelledRef.current = false;
 
     if (!result || result.segments.length === 0) {
-      setSubtitlePhase("no_subtitles");
+      setPhase("no_subtitles");
       return;
     }
 
@@ -628,15 +755,86 @@ export default function YoutubePlayerScreen() {
     setSubtitles(originalOnly);
     setTotalSegments(result.segments.length);
     setTranslatedCount(0);
-    setSubtitlePhase(isResume ? "resuming" : "translating");
+    setPhase(isResume ? "resuming" : "translating");
     setSubtitleProgress(0);
+    batchStartTimeRef.current  = 0;
+    lastCompletedRef.current   = 0;
+    secsPerSegmentRef.current  = 0;
+    setRemainingSecs(null);
+    // Only clear for fresh jobs — resume jobs keep their
+    // "⏳ 이전 번역 이어서 준비 중..." label visible through model load.
+    if (!isResume) setLoadingLabel('');
 
+    setLoadingLabel('🔄 모델 로딩 중...');
     const hasGemma = await ensureGemma();
     if (isBgRunningRef.current || myJobId !== jobIdRef.current) return;
 
+    if (isResume) {
+      setLoadingLabel('⏳ 이전 번역 복원 중...');
+    } else {
+      // Show analysis label immediately — no await, UI must respond instantly.
+      setLoadingLabel('🧠 문장 분석 중...');
+
+      // Non-blocking probe: a gemma checkpoint may exist even when
+      // existingTranslations is empty (checkpoint survived but DB partial cache
+      // was cleared). The engine will resume internally — show the correct label.
+      const jobIdAtProbe = myJobId;
+      AsyncStorage.getItem(`gemma_checkpoint_v4_${youtubeVideoId ?? ''}`)
+        .then(v => {
+          if (!v) return;
+          // Verify job is still valid before touching UI.
+          if (jobIdAtProbe !== jobIdRef.current) return;
+          setLoadingLabel('⏳ 이전 번역 복원 중...');
+        })
+        .catch(() => {});
+    }
+
+    // 10% visual anchor — model loaded, translation imminent.
+    // Placed BEFORE hasGemma check: if model failed to load, this must NOT fire.
+    if (!isResume) {
+      animateTo(0.1);
+
+      // Slowly crawl 10% → 18% over 15 s to signal activity during SBD.
+      // Self-terminates once real onProgress pushes animProgressRef past 18%,
+      // or when the job is cancelled / superseded.
+      const SBD_CRAWL_TARGET   = 0.18;
+      const SBD_CRAWL_DURATION = 15_000;
+      const crawlJobId    = myJobId;
+      const crawlStart    = performance.now();
+      const crawlStartVal = 0.1;
+      let   crawlLastRender = 0; // timestamp of last setSubtitleProgress call
+
+      const crawlFrame = () => {
+        const now     = performance.now();
+        const elapsed = now - crawlStart;
+        const t       = Math.min(elapsed / SBD_CRAWL_DURATION, 1);
+
+        // ── Early-exit guards — in this order, no code before them ──────────
+        if (crawlJobId !== jobIdRef.current)              return; // job superseded
+        if (animProgressRef.current > SBD_CRAWL_TARGET)  return; // real progress took over
+        if (t >= 1)                                       return; // duration elapsed
+        // ────────────────────────────────────────────────────────────────────
+
+        const value = crawlStartVal + (SBD_CRAWL_TARGET - crawlStartVal) * t;
+
+        // Only update if value actually moved forward AND 200ms have passed.
+        // This prevents setState from being called on every single frame (~60fps),
+        // which causes the "Maximum update depth exceeded" loop.
+        if (value > animProgressRef.current && now - crawlLastRender >= 200) {
+          animProgressRef.current = value;
+          setSubtitleProgress(value);
+          crawlLastRender = now;
+        }
+
+        requestAnimationFrame(crawlFrame);
+      };
+      requestAnimationFrame(crawlFrame);
+    }
+
     if (!hasGemma) {
-      setSubtitlePhase("done");
-      setSubtitleProgress(1);
+      setPhase("done");
+      setRemainingSecs(null);
+      animateTo(1);
       setTranslationEverCompleted(true); // [FIX BUG2]
       saveSubtitles(youtubeVideoId ?? "default", useLang, useGenre, originalOnly).catch(() => {});
       return;
@@ -659,8 +857,9 @@ export default function YoutubePlayerScreen() {
     const alreadyDoneCount = result.segments.length - inputFiltered.length;
 
     if (inputFiltered.length === 0) {
-      setSubtitlePhase("done");
-      setSubtitleProgress(1);
+      setPhase("done");
+      setRemainingSecs(null);
+      animateTo(1);
       setTranslatedCount(result.segments.length);
       setTranslationEverCompleted(true); // [FIX BUG2]
       saveSubtitles(youtubeVideoId ?? "default", useLang, useGenre, originalOnly).catch(() => {});
@@ -679,13 +878,52 @@ export default function YoutubePlayerScreen() {
       const translated = await translateSegments(
         translateInput,
         (completed, total, partial) => {
+          if (loadingSubLabelRef.current !== '') {
+            setLoadingLabel('');
+          }
           if (myJobId !== jobIdRef.current) return;
           if (isBgRunningRef.current) return; // BG started mid-translation — stop updating UI
 
           const totalDone = alreadyDoneCount + completed;
-          const totalAll  = result.segments.length;
+          const totalAll  = total;   // authoritative value from translateSegments
           setTranslatedCount(totalDone);
-          setSubtitleProgress(totalAll > 0 ? totalDone / totalAll : 0);
+          const newProgress = totalAll > 0 ? totalDone / totalAll : 0;
+          if (newProgress > animProgressRef.current) animateTo(newProgress);
+
+          // Update rolling rate (exponential moving average, α = 0.3)
+          const now = performance.now();
+          if (lastCompletedRef.current > 0 && completed > lastCompletedRef.current) {
+            const delta   = completed - lastCompletedRef.current;
+            const elapsed = (now - batchStartTimeRef.current) / 1000;
+            if (elapsed >= 0.05) {
+              const rate = delta / elapsed;
+              const secPerSeg = 1 / rate;
+              if (secsPerSegmentRef.current === 0) {
+                secsPerSegmentRef.current = secPerSeg;
+              } else {
+                secsPerSegmentRef.current =
+                  0.7 * secsPerSegmentRef.current + 0.3 * secPerSeg;
+              }
+            }
+          }
+          batchStartTimeRef.current = now;
+          lastCompletedRef.current  = completed;
+
+          const remaining = totalAll - totalDone;
+          if (
+            secsPerSegmentRef.current > 0.02 &&
+            remaining > 0 &&
+            completed > 5
+          ) {
+            const nextEstimate = remaining * secsPerSegmentRef.current;
+            setRemainingSecs(prev => {
+              if (prev === null) return Math.ceil(nextEstimate);
+              const clamped = Math.min(prev * 1.3, Math.max(prev * 0.7, nextEstimate));
+              return Math.ceil(clamped);
+            });
+          } else {
+            setRemainingSecs(null);
+          }
 
           const shouldUpdateUI = (completed % 3 === 0) || (completed === total);
 
@@ -703,7 +941,7 @@ export default function YoutubePlayerScreen() {
               translated: newTranslatedMap.get(sub.id) ?? sub.translated ?? "",
             }));
 
-            setSubtitlePhase("translating");
+            setPhase("translating");
             scheduleSetSubtitles(updatedSubs, myJobId);
 
             savePartialSubtitles(
@@ -744,8 +982,9 @@ export default function YoutubePlayerScreen() {
       });
 
       setSubtitles(finalSubs);
-      setSubtitlePhase("done");
-      setSubtitleProgress(1);
+      setPhase("done");
+      setRemainingSecs(null);
+      animateTo(1);
       setTranslatedCount(result.segments.length);
       setTranslationEverCompleted(true); // [FIX BUG2] FG translation fully finished
 
@@ -756,9 +995,9 @@ export default function YoutubePlayerScreen() {
       if (e?.message === 'INFERENCE_CANCELLED') return; // clean exit — not an error
       if (myJobId !== jobIdRef.current) return;
       console.error("[YT_SCREEN] 번역 오류:", e);
-      setSubtitlePhase("error");
+      setPhase("error");
     }
-  }, [targetLanguage, selectedGenre, youtubeVideoId, setSubtitles, scheduleSetSubtitles]);
+  }, [targetLanguage, selectedGenre, youtubeVideoId, setSubtitles, scheduleSetSubtitles, setLoadingLabel, setPhase]);
 
   // ── onSubtitleData 콜백 ──────────────────────────────────────────────────
   const handleSubtitleData = useCallback((_result: SubtitleFetchResult) => {}, []);
@@ -779,7 +1018,7 @@ export default function YoutubePlayerScreen() {
     autoFetchCompletedRef.current = true;
 
     if (!segments || segments.length === 0) {
-      setSubtitlePhase("no_subtitles");
+      setPhase("no_subtitles");
       return;
     }
 
@@ -822,7 +1061,7 @@ export default function YoutubePlayerScreen() {
       ? new Map(partialTranslationsRef.current)
       : null;
 
-    setSubtitlePhase(existingMap ? "resuming" : "translating");
+    setPhase(existingMap ? "resuming" : "translating");
     translateFromResult(result, undefined, undefined, existingMap);
     partialTranslationsRef.current = new Map();
   }, [translateFromResult, setSubtitles]);
@@ -830,6 +1069,22 @@ export default function YoutubePlayerScreen() {
   // ── 플레이어 준비 + 캐시 체크 ─────────────────────────────────────────────
   const handlePlayerReady = useCallback(async () => {
     if (!youtubeVideoId) return;
+
+    // Probe gemma checkpoint so user sees a resume hint within
+    // milliseconds of returning to the screen — before any network
+    // request or model load begins.
+    AsyncStorage.getItem(`gemma_checkpoint_v4_${youtubeVideoId}`)
+      .then(raw => {
+        // Guard: only set if nothing has written a label yet.
+        // Prevents a race where the cache-miss fetch label (📡) has
+        // already been written before this async probe resolves,
+        // which would cause an incorrect ⏳ → 📡 → ⏳ overwrite sequence.
+        if (raw && loadingSubLabelRef.current === '') {
+          setLoadingLabel('⏳ 이전 번역 이어서 준비 중...');
+          setPhase('resuming');
+        }
+      })
+      .catch(() => {});
 
     setPlaying(true);
 
@@ -849,7 +1104,7 @@ export default function YoutubePlayerScreen() {
         jobIdRef.current++;
         cancelledRef.current = true;
         setSubtitles(restored);
-        setSubtitlePhase('done');
+        setPhase('done');
         setSubtitleProgress(1);
         setTotalSegments(restored.length);
         setTranslatedCount(restored.length);
@@ -861,8 +1116,8 @@ export default function YoutubePlayerScreen() {
       }
       // BG still in progress — trigger subtitle fetch so handleSubtitlesLoaded
       // can store segments and show raw subtitles while BG translates.
-      setSubtitlePhase('idle');
-      ytPlayerRef.current?.fetchSubtitles();
+      setPhase('idle');
+      ytPlayerRef.current?.fetchSubtitles(); // BG path — no label
       return;
     }
 
@@ -870,7 +1125,7 @@ export default function YoutubePlayerScreen() {
 
     // Re-check ref after the async gap — BG may have started while we awaited
     if (isBgRunningRef.current) {
-      setSubtitlePhase('idle');
+      setPhase('idle');
       return;
     }
 
@@ -897,15 +1152,18 @@ export default function YoutubePlayerScreen() {
 
         // partial 캐시: allSegmentsRef를 null로 유지하여 fetchSubtitles 허용
         allSegmentsRef.current = null;
-        setSubtitlePhase("resuming");
         if (!autoFetchCompletedRef.current) {
-          ytPlayerRef.current?.fetchSubtitles();
+          setLoadingLabel('⏳ 이전 번역 이어서 준비 중...');
+          setPhase("resuming");                              // ref updated synchronously
+          ytPlayerRef.current?.fetchSubtitles();             // must come AFTER setPhase
+        } else {
+          setPhase("resuming");
         }
         // else: auto-fetch already ran — handleSubtitlesLoaded will pick up
         // partialTranslationsRef and resume translation on its own
       } else {
         if (isBgRunningRef.current) {
-          setSubtitlePhase('idle');
+          setPhase('idle');
           return;
         }
         if (bgResultApplied.current) {
@@ -929,9 +1187,12 @@ export default function YoutubePlayerScreen() {
         setSubtitleProgress(
           cached.segments.length > 0 ? cached.translatedCount / cached.segments.length : 0
         );
-        setSubtitlePhase("resuming");
         if (!autoFetchCompletedRef.current) {
-          ytPlayerRef.current?.fetchSubtitles();
+          setLoadingLabel('⏳ 이전 번역 이어서 준비 중...');
+          setPhase("resuming");                              // ref updated synchronously
+          ytPlayerRef.current?.fetchSubtitles();             // must come AFTER setPhase
+        } else {
+          setPhase("resuming");
         }
       }
       return;
@@ -952,9 +1213,14 @@ export default function YoutubePlayerScreen() {
       return;
     }
     console.log("[CACHE] Cache miss → start fetch");
-    setSubtitlePhase("fetching");
+    // Cache miss — fetch is actually starting, safe to show the label.
+    // FIX 2: guard against checkpoint probe having already set resuming phase.
+    if (subtitlePhaseRef.current !== 'resuming') {
+      setLoadingLabel('📡 자막 가져오는 중...');
+    }
+    setPhase("fetching");
     ytPlayerRef.current?.fetchSubtitles();
-  }, [youtubeVideoId, targetLanguage, selectedGenre, setPlaying, setSubtitles]);
+  }, [youtubeVideoId, targetLanguage, selectedGenre, setPlaying, setSubtitles, setLoadingLabel, setPhase]);
 
   // ── 뒤로가기 ─────────────────────────────────────────────────────────────
   const handleBack = useCallback(async () => {
@@ -1037,7 +1303,12 @@ export default function YoutubePlayerScreen() {
     translationCacheRef.current      = new Map();
     partialTranslationsRef.current   = new Map();
     autoFetchCompletedRef.current    = false;
-    setSubtitlePhase("fetching");
+    batchStartTimeRef.current        = 0;
+    lastCompletedRef.current         = 0;
+    secsPerSegmentRef.current        = 0;
+    setRemainingSecs(null);
+    setLoadingLabel('');
+    setPhase("fetching");
     setSubtitleProgress(0);
     setTranslatedCount(0);
     setTotalSegments(0);
@@ -1045,13 +1316,13 @@ export default function YoutubePlayerScreen() {
       cancelledRef.current = false;
       ytPlayerRef.current?.fetchSubtitles();
     }, 300);
-  }, [clearSubtitles]);
+  }, [clearSubtitles, setLoadingLabel]);
 
   // ── 자막 불러오기 중지 (fetching 단계에서 취소, retry 없음) ─────────────────
   const handleCancelFetch = useCallback(() => {
     jobIdRef.current++;
     cancelledRef.current  = true;
-    setSubtitlePhase("idle");
+    setPhase("idle");
   }, []);
 
   // ── 장르 변경 ─────────────────────────────────────────────────────────────
@@ -1135,10 +1406,10 @@ export default function YoutubePlayerScreen() {
       });
       // Only clear phase after BG is confirmed started — prevents flicker when
       // transitioning from phase='done' or phase='translating'.
-      setSubtitlePhase('idle');
+      setPhase('idle');
     } catch (e: any) {
       isBgRunningRef.current = false; // rollback — BG never started
-      setSubtitlePhase('error');
+      setPhase('error');
       Alert.alert('오류', e?.message ?? '백그라운드 서비스를 시작할 수 없습니다.');
     }
   }, [youtubeVideoId, videoName, targetLanguage, selectedGenre,
@@ -1276,7 +1547,7 @@ export default function YoutubePlayerScreen() {
           isFullscreen={isLandscape}
           onStateChange={(state) => {
             if (state === "playing" && subtitlePhase === "idle" && !isBgRunningRef.current) {
-              setSubtitlePhase("fetching");
+              setPhase("fetching");
             }
           }}
           onError={(code) => {
@@ -1313,7 +1584,7 @@ export default function YoutubePlayerScreen() {
           <Text style={progressCard.pct}>
             {displayPhase === 'fetching'
               ? '--'
-              : `${Math.round(subtitleProgress * 100)}%`}
+              : subtitleProgress > 0 ? `${Math.round(subtitleProgress * 100)}%` : '--'}
           </Text>
           <View style={{ flex: 1 }}>
             <Text style={progressCard.title}>
@@ -1323,11 +1594,19 @@ export default function YoutubePlayerScreen() {
               {isStale
                 ? '⚠️ 응답 없음 — 재시도 중...'
                 : displayPhase === 'fetching'
-                  ? '자막 요청 중...'
-                  : totalSegments > 0
+                  ? (loadingSubLabel || '자막 요청 중...')
+                  : (displayPhase === 'translating' || displayPhase === 'resuming') &&
+                    translatedCount > 0 && totalSegments > 0
                     ? `${translatedCount} / ${totalSegments}`
-                    : '번역 준비 중...'}
+                    : loadingSubLabel !== ''
+                      ? loadingSubLabel
+                      : '번역 준비 중...'}
             </Text>
+            {(displayPhase === 'translating' || displayPhase === 'resuming') && remainingSecs !== null && remainingSecs > 0 && (
+              <Text style={progressCard.eta}>
+                {formatRemaining(remainingSecs)}
+              </Text>
+            )}
           </View>
           <TouchableOpacity onPress={handleCancelFetch} style={progressCard.cancelBtn}>
             <Text style={progressCard.cancelBtnText}>중지</Text>
@@ -1389,6 +1668,11 @@ export default function YoutubePlayerScreen() {
                 return '번역 준비 중...';
               })()}
             </Text>
+            {bgRemainingSecs !== null && bgRemainingSecs > 0 && (
+              <Text style={progressCard.eta}>
+                {formatRemaining(bgRemainingSecs)}
+              </Text>
+            )}
           </View>
           <TouchableOpacity onPress={cancelTranslation} style={progressCard.cancelBtn}>
             <Text style={progressCard.cancelBtnText}>취소</Text>
@@ -1794,4 +2078,10 @@ const progressCard = StyleSheet.create({
     borderWidth: 1, borderColor: '#ef4444',
   },
   cancelBtnText: { color: '#fca5a5', fontSize: 11, fontWeight: '600' },
+  eta: {
+    color: '#818cf8',
+    fontSize: 10,
+    marginTop: 2,
+    fontVariant: ['tabular-nums'],
+  },
 });

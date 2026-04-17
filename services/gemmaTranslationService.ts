@@ -2035,6 +2035,16 @@ export async function translateSegments(
   const totalBatches = Math.ceil(total / BATCH_SIZE);
   console.log(`[TRANSLATE] ${usedSBD ? "SBD" : "fallback"} → ${total} groups (${totalBatches} batches)`);
 
+  const segmentCountUpToGroup: number[] = new Array(merged.length).fill(0);
+  let cumulativeSegs = 0;
+  for (let i = 0; i < merged.length; i++) {
+    cumulativeSegs += merged[i].originalIndices.length;
+    segmentCountUpToGroup[i] = cumulativeSegs;
+  }
+  if (cumulativeSegs !== cleaned.length) {
+    console.warn('[TRANSLATE] segment count mismatch', cumulativeSegs, cleaned.length);
+  }
+
   // ── Step C: 체크포인트 복원 ──────────────────────────────────────────────────
   const checkpoint = await loadCheckpoint(videoHash);
   if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
@@ -2057,6 +2067,8 @@ export async function translateSegments(
       const offset = bi * BATCH_SIZE;
       const batch = merged.slice(offset, offset + BATCH_SIZE);
       console.log(`[TRANSLATE] batch ${bi + 1}/${totalBatches} (${batch.length})`);
+
+      if (batch.length === 0) continue;
 
       const batchStartTime = Date.now();
       const sysPrompt = buildSystemPrompt(targetLanguage, langRules, genrePersona, nounHint, batch.length);
@@ -2087,7 +2099,11 @@ export async function translateSegments(
       // and React state updates (FG mode) complete BEFORE the next batch begins.
       // Without await, the last batch's saveStatus(translating, X%) races with
       // backgroundTranslationTask's saveStatus(done, 100%) — the poll only sees 'done'.
-      if (onProgress) await onProgress(offset + batch.length, total, mergeWithTranslations(cleaned, partial));
+      if (onProgress) {
+        const lastGroupInBatch = Math.min(offset + batch.length - 1, merged.length - 1);
+        const segmentsCompletedSoFar = segmentCountUpToGroup[lastGroupInBatch];
+        await onProgress(segmentsCompletedSoFar, cleaned.length, mergeWithTranslations(cleaned, partial));
+      }
 
       const now = Date.now();
       if (now - lastSaveTime >= SAVE_INTERVAL_MS) {

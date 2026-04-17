@@ -378,7 +378,8 @@ export async function backgroundTranslationTask(taskData: BgTranslationTask): Pr
         completedSegments = [...alreadyDoneSegments, ...newlyTranslated];
 
         const totalDone = alreadyDoneCount + completed;
-        const fraction = totalCount > 0 ? totalDone / totalCount : 0;
+        const rawFraction = totalCount > 0 ? totalDone / totalCount : 0;
+        const fraction = Math.min(1, Math.max(0, rawFraction));
         const pct = Math.round(20 + fraction * 75);
 
         // Save checkpoint every PROGRESS_SAVE_EVERY_N=5 segments (or on last segment).
@@ -437,6 +438,17 @@ export async function backgroundTranslationTask(taskData: BgTranslationTask): Pr
       // One retry is attempted if INFERENCE_CANCELLED slips through (counter misalign race).
       let translateAttempt = 0;
       const MAX_TRANSLATE_ATTEMPTS = 2;
+      const initialProgress = Math.min(
+        0.06,
+        totalCount > 0 ? alreadyDoneCount / totalCount : 0
+      );
+      await saveStatus({
+        ...statusBase,
+        status: 'translating',
+        progress: initialProgress,
+        translatedCount: alreadyDoneCount,
+        totalCount,
+      });
       while (translateAttempt < MAX_TRANSLATE_ATTEMPTS) {
         setBgJobProtection(true);
         try {
