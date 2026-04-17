@@ -1502,8 +1502,17 @@ function isOvergenerated(input: string, output: string, targetLanguage = "Korean
   const inLen = input.split(/\s+/).filter(Boolean).length;
   const outLen = output.split(/\s+/).filter(Boolean).length;
   const baseThreshold = targetLanguage === "Korean" ? 2.0 : 1.7;
-  const strictThreshold = inLen <= 3 ? 1.5 : baseThreshold;
+  const strictThreshold = inLen <= 3 ? 1.3 : baseThreshold;
   return outLen > Math.max(inLen * strictThreshold, 4);
+}
+
+function detectFragment(src: string): boolean {
+  const wordCount = src.split(/\s+/).filter(Boolean).length;
+  return (
+    wordCount <= 4 &&
+    !/[.!?]$/.test(src.trim()) &&
+    RE_DANGLING_FRAGMENT.test(src)
+  );
 }
 
 // ── 배치 응답 파싱 ────────────────────────────────────────────────────────────
@@ -1579,71 +1588,299 @@ async function validateTranslations(
   translatedTexts: string[],
   systemPrompt: string,
   targetLanguage: string,
-  patterns: CompiledNounPattern[]
+  patterns: CompiledNounPattern[],
+  isCancelled: () => boolean = () => false
 ): Promise<string[]> {
+
   if (!llamaContext) return translatedTexts;
   const result = [...translatedTexts];
+
+  // ── Step 0: Local helpers ────────────────────────────────────────────────
+
+  type AttemptState = { batchedTried: boolean; individualTried: boolean };
+  const attemptMap = new Map<number, AttemptState>();
+  function getState(i: number): AttemptState {
+    if (!attemptMap.has(i)) attemptMap.set(i, { batchedTried: false, individualTried: false });
+    return attemptMap.get(i)!;
+  }
+
+  const passedSet = new Set<number>();
+
+  function passesValidation(src: string, output: string): boolean {
+    if (!output || !output.trim()) return false;
+    if (isLikelyUntranslated(output, targetLanguage)) return false;
+    if (isCorruptedOutput(output)) return false;
+    if (isOvergenerated(src, output, targetLanguage)) return false;
+    if (RE_PLACEHOLDER_LEAK.test(output)) return false;
+    const srcHasNeg = /\bdon't think\b|\bnot a\b|\bdoesn't work\b|\bdon't work\b|\bcan't\b|\bwon't\b|\bnot going to\b|\bnot gonna\b/i.test(src);
+    if (srcHasNeg && !/않|안|못|없|아니|모르/.test(output)) return false;
+    if (hasLeftoverEnglish(output, src, patterns, targetLanguage)) return false;
+    const profile = getLanguageProfile(targetLanguage);
+    if (profile.isLatinScript && /[가-힣\u4e00-\u9fff\u3040-\u30ff\u0400-\u04FF]/.test(output)) return false;
+    if (/good\s+fit/i.test(src) && /몸|체형|체격|사이즈|맞는 몸/.test(output)) return false;
+    return true;
+  }
+
+  function chunk<T>(arr: T[], size: number): T[][] {
+    const result: T[][] = [];
+    for (let i = 0; i < arr.length; i += size) result.push(arr.slice(i, i + size));
+    return result;
+  }
+
+  // ── Step 1: Initial sanitize pass and failure collection ─────────────────
 
   for (let i = 0; i < segments.length; i++) {
     const src = segments[i].text.trim();
     if (isFillerText(src)) continue;
-    result[i] = sanitizeTranslationOutput(result[i]?.trim() ?? "", src);
-    const t = result[i];
+    result[i] = sanitizeTranslationOutput(result[i]?.trim() ?? '', src);
+    if (passesValidation(src, result[i])) passedSet.add(i);
+  }
 
-    const srcHasNeg = /\bdon't think\b|\bnot a\b|\bdoesn't work\b|\bdon't work\b|\bcan't\b|\bwon't\b|\bnot going to\b|\bnot gonna\b/i.test(src);
-    const negDropped = srcHasNeg && t.length > 0 && !/않|안|못|없|아니|모르/.test(t);
-    const profile = getLanguageProfile(targetLanguage);
-    const leftoverEn = hasLeftoverEnglish(t, src, patterns, targetLanguage);
-    const foreignLatin = profile.isLatinScript && /[가-힣\u4e00-\u9fff\u3040-\u30ff\u0400-\u04FF]/.test(t);
-    const goodFitBad = /\bgood\s+fit\b/i.test(src) && /몸|체형|체격|사이즈|맞는 몸/.test(t);
-    const placeholderLeak = RE_PLACEHOLDER_LEAK.test(t);
+  const failedIndices: number[] = [];
+  for (let i = 0; i < segments.length; i++) {
+    const src = segments[i].text.trim();
+    if (isFillerText(src)) continue;
+    if (!passedSet.has(i)) failedIndices.push(i);
+  }
 
-    const needsRetry =
-      t.length === 0 ||
-      /^[.…]{2,}$/.test(t) ||
-      isLikelyUntranslated(t, targetLanguage) ||
-      isCorruptedOutput(t) ||
-      isOvergenerated(src, t, targetLanguage) ||
-      negDropped ||
-      leftoverEn ||
-      foreignLatin ||
-      goodFitBad ||
-      placeholderLeak;
+  if (failedIndices.length === 0) return result;
 
-    if (!needsRetry) continue;
-    console.warn(`[VALIDATE] retry ${i}: "${src}" → "${t}"`);
+  // ── Step 2: Stage 1 — Batched retry ──────────────────────────────────────
+
+  const fragmentIndices = failedIndices.filter(i => detectFragment(segments[i].text));
+  const normalIndices   = failedIndices.filter(i => !detectFragment(segments[i].text));
+
+  const allBatches: number[][] = [
+    ...chunk(fragmentIndices, BATCH_SIZE),
+    ...chunk(normalIndices, BATCH_SIZE),
+  ];
+
+  for (const i of failedIndices) getState(i).batchedTried = true;
+
+  for (const batch of allBatches) {
+    if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
+
+    const isFragmentBatch = batch.every(i => detectFragment(segments[i].text));
+
+    const isolationBlock =
+      'CRITICAL ISOLATION RULE:\n' +
+      'Each numbered line is a completely separate input from a different speaker\n' +
+      'and a different context. Do NOT reference, infer from, or use information\n' +
+      'from any other numbered line. Treat each line as if it were the only input.\n\n';
+
+    const fragmentNote = isFragmentBatch
+      ? 'NOTE: All inputs in this batch are incomplete ASR fragments cut mid-sentence.\n' +
+        'For each one, translate ONLY what is literally present.\n' +
+        'Do NOT reconstruct or complete the surrounding sentence.\n' +
+        'Keep output SHORT (typically 2-5 words), but allow slightly longer output\n' +
+        'if required for natural Korean grammar. Do NOT expand into a full sentence.\n'
+      : 'These are retry translations. Be concise and accurate.\n' +
+        'Do NOT add explanations or content not present in the source.\n';
+
+    const stage1SystemPrompt = isolationBlock + systemPrompt + '\n\n' + fragmentNote;
+
+    const batchGroups: MergedGroup[] = batch.map(i => ({
+      start: segments[i].start,
+      end: segments[i].end,
+      text: segments[i].text,
+      originalIndices: [i],
+    }));
+
+    const { message: batchMsg, tokenMaps } = buildBatchMessage(batchGroups);
+
+    let parsed: string[] = [];
+    try {
+      const r = await llamaContext.completion({
+        messages: [
+          { role: 'system', content: stage1SystemPrompt },
+          { role: 'user', content: batchMsg },
+        ],
+        n_predict: batch.length * 60,
+        temperature: 0.05,
+        top_p: 0.9,
+        stop: ['</s>', '<end_of_turn>', '<|end|>'],
+      });
+      parsed = parseBatchResponse(r.text, batchGroups, patterns, tokenMaps);
+    } catch (e: any) {
+      if (e?.message === 'INFERENCE_CANCELLED') throw e;
+      console.warn('[VALIDATE] Stage 1 batch error:', e);
+      continue;
+    }
+
+    const validCount = parsed.filter(p => p && p.trim().length > 0).length;
+    const threshold = Math.ceil(batch.length * 0.5);
+
+    if (validCount < threshold) {
+      console.warn(`[VALIDATE] Stage 1 batch discarded: validCount=${validCount} < threshold=${threshold}`);
+      continue;
+    }
+
+    for (let bi = 0; bi < batch.length; bi++) {
+      const idx = batch[bi];
+      const rawOutput = parsed[bi];
+      if (!rawOutput || !rawOutput.trim()) continue;
+
+      const src = segments[idx].text;
+      const batchTokens = tokenMaps[bi] ?? maskNumericTokens(src).tokens;
+
+      let processed = restoreNumericTokens(rawOutput, batchTokens);
+      processed = stripLeakedPlaceholders(processed);
+      processed = sanitizeTranslationOutput(applyProperNounFixes(processed, patterns), src);
+      processed = postProcessTranslation(processed, src, targetLanguage);
+
+      if (!passesValidation(src, processed)) continue;
+
+      const oldLen = result[idx]?.length ?? 0;
+      const newLen = processed.length;
+      if (
+        newLen > oldLen * 1.5 &&
+        !detectFragment(src) &&
+        passesValidation(src, result[idx])
+      ) continue;
+
+      result[idx] = processed;
+      passedSet.add(idx);
+    }
+  }
+
+  // ── Step 3: Stage 2 — Individual retry ───────────────────────────────────
+
+  if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
+
+  const stage2Targets = failedIndices.filter(i => {
+    const state = getState(i);
+    if (passedSet.has(i)) return false;
+    if (!state.batchedTried) return false;   // must have gone through Stage 1
+    if (state.individualTried) return false; // must not have been tried individually
+    const src = segments[i].text;
+    const output = result[i];
+    return (
+      isCorruptedOutput(output) ||
+      isLikelyUntranslated(output, targetLanguage) ||
+      hasLeftoverEnglish(output, src, patterns, targetLanguage) ||
+      isOvergenerated(src, output, targetLanguage) ||
+      RE_PLACEHOLDER_LEAK.test(output) ||
+      (
+        /\bdon't think\b|\bnot a\b|\bdoesn't work\b|\bdon't work\b|\bcan't\b|\bwon't\b|\bnot going to\b|\bnot gonna\b/i.test(src) &&
+        !/않|안|못|없|아니|모르/.test(output)
+      )
+    );
+  });
+
+  for (const i of stage2Targets) getState(i).individualTried = true;
+
+  for (const index of stage2Targets) {
+    if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
+
+    const src = segments[index].text;
+    const wordCount = src.split(/\s+/).filter(Boolean).length;
+    const isFragment = detectFragment(src);
+    const currentOutput = result[index];
+
+    const isOvergenerated_flag = isOvergenerated(src, currentOutput, targetLanguage);
+    const negDropped_flag =
+      /\bdon't think\b|\bnot a\b|\bdoesn't work\b|\bdon't work\b|\bcan't\b|\bwon't\b|\bnot going to\b|\bnot gonna\b/i.test(src) &&
+      !/않|안|못|없|아니|모르/.test(currentOutput);
+    const leftoverEn_flag = hasLeftoverEnglish(currentOutput, src, patterns, targetLanguage);
+    const untranslated_flag = isLikelyUntranslated(currentOutput, targetLanguage);
+    const corrupted_flag = isCorruptedOutput(currentOutput);
+    const goodFitBad_flag = /good\s+fit/i.test(src) && /몸|체형|체격|사이즈/.test(currentOutput);
+
+    let userPrompt = `Translate to ${targetLanguage}. Output ONLY the translation, nothing else.`;
+
+    if (negDropped_flag) {
+      userPrompt +=
+        '\nCRITICAL: Preserve NEGATIVE meaning. The source contains explicit negation ' +
+        "(don't/can't/never/not). The output MUST reflect this negation clearly.";
+    }
+    if (leftoverEn_flag) {
+      userPrompt +=
+        `\nCRITICAL: Output must contain NO untranslated English words except proper nouns. ` +
+        `Every English word must be transliterated or translated into ${targetLanguage}.`;
+    }
+    if (isOvergenerated_flag && isFragment) {
+      userPrompt +=
+        `\nCRITICAL: Input is a short ASR fragment (${wordCount} words), cut mid-sentence. ` +
+        `Translate ONLY what is literally present. Do NOT reconstruct or complete the sentence. ` +
+        `Target output: ${wordCount} to ${Math.min(wordCount + 2, 6)} words.`;
+    } else if (isOvergenerated_flag) {
+      userPrompt +=
+        '\nCRITICAL: Keep translation concise. Do not add explanations, context, ' +
+        'or content not present in the source text.';
+    }
+    if (untranslated_flag) {
+      userPrompt +=
+        `\nCRITICAL: Output must be entirely in ${targetLanguage}. ` +
+        'Do not output any English or romanized text.';
+    }
+    if (goodFitBad_flag) {
+      userPrompt +=
+        "\nCRITICAL: 'good fit' means suitability for a role or job, NOT physical " +
+        'body shape. Translate as compatibility or suitability.';
+    }
+    if (corrupted_flag) {
+      userPrompt +=
+        '\nCRITICAL: The previous output was structurally corrupted (contained labels, ' +
+        'prefixes, or invalid characters). Return ONLY a clean translation with no ' +
+        'formatting, no labels, no special characters.';
+    }
 
     const { masked: maskedSrc, tokens } = maskNumericTokens(src);
 
     try {
       const r = await llamaContext.completion({
         messages: [
-          { role: "system", content: systemPrompt },
-          {
-            role: "user",
-            content: `Translate to ${targetLanguage}. Output ONLY translation:\n${maskedSrc}${negDropped ? "\nCRITICAL: Preserve NEGATIVE meaning." : ""}`,
-          },
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: `${userPrompt}\n\n${maskedSrc}` },
         ],
-        n_predict: 80,
+        n_predict: isFragment ? 40 : 80,
         temperature: 0.1,
         top_p: 0.9,
-        stop: ["</s>", "<end_of_turn>", "<|end|>", "\n"],
+        stop: ['</s>', '<end_of_turn>', '<|end|>', '\n'],
       });
+
       const restored = restoreNumericTokens(r.text.trim(), tokens);
-      const deLeaked = stripLeakedPlaceholders(restored);
-      const c = sanitizeTranslationOutput(deLeaked, src);
-      result[i] =
-        c &&
-        !isLikelyUntranslated(c, targetLanguage) &&
-        !isCorruptedOutput(c) &&
-        !isOvergenerated(src, c, targetLanguage)
-          ? applyProperNounFixes(c, patterns)
-          : src;
-    } catch (e) {
-      result[i] = src;
-      console.warn(`[VALIDATE] error ${i}:`, e);
+      const processed = postProcessTranslation(
+        sanitizeTranslationOutput(
+          applyProperNounFixes(stripLeakedPlaceholders(restored), patterns),
+          src
+        ),
+        src,
+        targetLanguage
+      );
+
+      if (passesValidation(src, processed)) {
+        result[index] = processed;
+        passedSet.add(index);
+      } else {
+        if (!isCorruptedOutput(currentOutput) && !isLikelyUntranslated(currentOutput, targetLanguage)) {
+          result[index] = currentOutput;
+        } else {
+          result[index] = src;
+        }
+      }
+    } catch (e: any) {
+      if (e?.message === 'INFERENCE_CANCELLED') throw e;
+      if (!isCorruptedOutput(currentOutput) && !isLikelyUntranslated(currentOutput, targetLanguage)) {
+        result[index] = currentOutput;
+      } else {
+        result[index] = src;
+      }
+      console.warn(`[VALIDATE] Stage 2 error at ${index}:`, e);
     }
   }
+
+  // ── Step 4: Final fallback ────────────────────────────────────────────────
+
+  for (const i of failedIndices) {
+    if (!passedSet.has(i)) {
+      const current = result[i];
+      if (isCorruptedOutput(current) || isLikelyUntranslated(current, targetLanguage)) {
+        result[i] = segments[i].text;
+      }
+    }
+  }
+
   return result;
 }
 
@@ -2000,7 +2237,8 @@ export async function translateSegments(
     groupTranslationsForValidation,
     finalPrompt,
     targetLanguage,
-    patterns
+    patterns,
+    isCancelled
   );
   if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
 
