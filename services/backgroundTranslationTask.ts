@@ -3,7 +3,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 // [FIX BUG1] Import async resolver — getProxyBaseUrl() reads AsyncStorage on
 // first call in HeadlessJS context (where __DEV__ is always false).
 import { fetchYoutubeSubtitles, getProxyBaseUrl, clearProxyUrlCache } from './youtubeTimedText';
-import { loadModel, unloadModel, translateSegments, isModelBusy, debugInferenceCounters, setBgJobProtection, cancelFgInference } from './gemmaTranslationService';
+import { loadModel, unloadModel, translateSegments, isModelBusy, debugInferenceCounters, setBgJobProtection, cancelFgInference, setAppBackgroundedHint } from './gemmaTranslationService';
 import { getLocalModelPath } from './modelDownloadService';
 
 export const BG_TASK_STATUS_KEY  = 'bg_translation_status';
@@ -72,6 +72,10 @@ let _isRunning = false;
 // The progress callback checks this flag and throws to abort gracefully after
 // saving the checkpoint — preventing an OOM kill mid-translation.
 let _memoryWarningAbort = false;
+// Counts in-flight fire-and-forget AsyncStorage checkpoint writes inside progressCallback.
+// Capped at 3 to prevent write queue buildup on low-end devices when batches run at full
+// speed in background. Reset to 0 in the finally block between task invocations.
+let _pendingCheckpointWrites = 0;
 
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
@@ -136,6 +140,7 @@ export async function backgroundTranslationTask(taskData: BgTranslationTask): Pr
 
   let keepAliveInterval: ReturnType<typeof setInterval> | null = null;
   let memWarnSub: ReturnType<typeof AppState.addEventListener> | null = null;
+  let bgStateSub: ReturnType<typeof AppState.addEventListener> | null = null;
 
   try {
     await AsyncStorage.setItem(BG_PENDING_TASK_KEY, JSON.stringify(taskData)).catch(() => {});
@@ -295,11 +300,19 @@ export async function backgroundTranslationTask(taskData: BgTranslationTask): Pr
     // Memory pressure guard: when Android signals low memory, set the abort flag so
     // the progress callback throws after saving the current checkpoint. This gives us
     // a clean exit (with resume data) rather than a hard OOM kill.
-    // memoryWarning is valid in both FG and HeadlessJS contexts.
     _memoryWarningAbort = false;
     memWarnSub = AppState.addEventListener('memoryWarning', () => {
       console.warn('[BG_TASK] Memory warning received — will abort after checkpoint save');
       _memoryWarningAbort = true;
+    });
+
+    // Background state hint for gemmaTranslationService — drives sleep() branch selection
+    // and inter-batch sleep skip. AppState listener is event-driven so the flag is always
+    // current; AppState.currentState has a propagation delay and must not be used inside
+    // the per-batch hot path.
+    setAppBackgroundedHint(AppState.currentState !== 'active');
+    bgStateSub = AppState.addEventListener('change', (nextState) => {
+      setAppBackgroundedHint(nextState !== 'active');
     });
 
     const allInput = subtitleResult.segments.map(seg => ({
@@ -368,28 +381,31 @@ export async function backgroundTranslationTask(taskData: BgTranslationTask): Pr
         const fraction = totalCount > 0 ? totalDone / totalCount : 0;
         const pct = Math.round(20 + fraction * 75);
 
-        // Fix 3: save checkpoint every PROGRESS_SAVE_EVERY_N=5 segments (or on last segment)
-        // to reduce AsyncStorage write pressure on low-end devices.
+        // Save checkpoint every PROGRESS_SAVE_EVERY_N=5 segments (or on last segment).
+        // Both writes are fire-and-forget so they never block the batch loop — awaiting
+        // AsyncStorage inside progressCallback causes Stall #3 when Hermes is throttled.
+        // _pendingCheckpointWrites guards against write queue buildup on low-end devices.
         if (completed % PROGRESS_SAVE_EVERY_N === 0 || completed === total) {
-          // Checkpoint first — must happen before any throw so resume data is always current.
-          try {
-            const ckpt: BgTranslationCheckpoint = {
-              videoId, language, genre,
-              translatedSegments: completedSegments.map(s => ({
-                start: s.startTime, end: s.endTime,
-                text: s.original, translated: s.translated,
-              })),
-              translatedCount: totalDone,
-              totalCount,
-              updatedAt: Date.now(),
-            };
-            await AsyncStorage.setItem(BG_TASK_CHECKPOINT_KEY, JSON.stringify(ckpt));
-          } catch (ckptErr) {
-            console.warn('[BG_TASK] Checkpoint write failed:', ckptErr);
+          const ckpt: BgTranslationCheckpoint = {
+            videoId, language, genre,
+            translatedSegments: completedSegments.map(s => ({
+              start: s.startTime, end: s.endTime,
+              text: s.original, translated: s.translated,
+            })),
+            translatedCount: totalDone,
+            totalCount,
+            updatedAt: Date.now(),
+          };
+
+          if (_pendingCheckpointWrites < 3) {
+            _pendingCheckpointWrites++;
+            AsyncStorage.setItem(BG_TASK_CHECKPOINT_KEY, JSON.stringify(ckpt))
+              .catch((e) => console.warn('[BG_TASK] Checkpoint write failed:', e))
+              .finally(() => { _pendingCheckpointWrites--; });
           }
 
           // status에 progress를 즉시 기록 — 500ms 폴링이 읽어감
-          await saveStatus({
+          saveStatus({
             ...statusBase,
             status: 'translating',
             progress: fraction,
@@ -397,11 +413,10 @@ export async function backgroundTranslationTask(taskData: BgTranslationTask): Pr
             totalCount,
             completedSegments: completedSegments.length,
             updatedAt: Date.now(),
-          });
+          }); // saveStatus has internal try/catch; fire-and-forget is intentional
 
-          // Memory pressure abort: checkpoint already saved above, so it is safe
-          // to throw here. The outer catch will write an 'error' status; the
-          // checkpoint will let the user resume from where translation stopped.
+          // Memory pressure abort: both writes dispatched above, safe to throw now.
+          // The outer catch writes 'error' status; checkpoint allows resume.
           if (_memoryWarningAbort) {
             throw new Error('MEMORY_WARNING_ABORT');
           }
@@ -540,7 +555,13 @@ export async function backgroundTranslationTask(taskData: BgTranslationTask): Pr
       memWarnSub.remove();
       memWarnSub = null;
     }
+    if (bgStateSub !== null) {
+      bgStateSub.remove();
+      bgStateSub = null;
+    }
+    setAppBackgroundedHint(false);
     _memoryWarningAbort = false;
+    _pendingCheckpointWrites = 0;
     // Fix 4: explicit log so logcat confirms the guard is cleared for the next invocation.
     console.log('[BG_TASK] _isRunning cleared in finally');
     _isRunning = false;

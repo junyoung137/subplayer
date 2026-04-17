@@ -2,6 +2,7 @@ import { initLlama, LlamaContext } from "llama.rn";
 import * as FileSystem from "expo-file-system/legacy";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { getLanguageProfile } from "../constants/languageProfiles";
+import { NativeModules } from 'react-native';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 export interface TranslationSegment {
@@ -168,6 +169,17 @@ let llamaContext: LlamaContext | null = null;
 // Dedup concurrent loadModel() calls: both callers await the same promise
 let _loadModelPromise: Promise<void> | null = null;
 
+// Tracks whether the app is currently in the background. Set by backgroundTranslationTask
+// via setAppBackgroundedHint() using an AppState listener. This flag is the single source
+// of truth for background state inside gemmaTranslationService — do NOT read
+// AppState.currentState directly here; its propagation delay on Android makes it unreliable
+// for per-batch decisions.
+let _isAppBackgrounded = false;
+
+export function setAppBackgroundedHint(val: boolean): void {
+  _isAppBackgrounded = val;
+}
+
 // ── Inference serialization ─────────────────────────────────────────────────
 // Serialises all translateSegments calls so llama.rn (single-context) is
 // never driven concurrently by FG and BG.  Uses two separate counters to
@@ -282,7 +294,16 @@ function enqueueInference<T>(fn: (isCancelled: () => boolean) => Promise<T>): Pr
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+// When backgrounded, delegates to Handler.postDelayed via the native bridge so the
+// sleep fires regardless of Hermes timer throttling. In foreground, uses setTimeout
+// to avoid the bridge call overhead. Falls back to setTimeout if the native module
+// is unavailable (iOS, or module not yet registered).
+async function sleep(ms: number): Promise<void> {
+  if (_isAppBackgrounded && NativeModules.TranslationService?.nativeSleep) {
+    return NativeModules.TranslationService.nativeSleep(ms);
+  }
+  return new Promise<void>((r) => setTimeout(r, ms));
+}
 function checkpointKey(h: string) { return `gemma_checkpoint_v4_${h}`; }
 function properNounKey(h: string) { return `proper_nouns_${h}`; }
 function escapeRegex(s: string) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
@@ -1836,7 +1857,10 @@ export async function translateSegments(
       });
       if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
 
-      if (bi < totalBatches - 1) {
+      if (!_isAppBackgrounded && bi < totalBatches - 1) {
+        // Skip inter-batch sleep when backgrounded — thermal protection is only relevant
+        // when the screen is on. Android's kernel thermal governor manages CPU frequency
+        // when the display is off. Zero inter-batch delay maximises throughput in background.
         await sleep((bi + 1) % THERMAL_EVERY_N === 0 ? SLEEP_THERMAL_MS : SLEEP_BETWEEN_MS);
         if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
       }
