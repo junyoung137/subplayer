@@ -573,10 +573,41 @@ export default function HomeScreen() {
   const setYoutubeVideo = usePlayerStore((s) => s.setYoutubeVideo); // ← 추가
   const pendingFileRef = useRef<{ uri: string; name: string } | null>(null);
 
+  const [resumeDialog, setResumeDialog] = useState<{
+    visible: boolean;
+    videoId: string;
+    videoTitle: string;
+    language: string;
+    genre: string;
+  } | null>(null);
+
   // ── Load on mount ──────────────────────────────────────────────────────────
   useEffect(() => {
     loadRecent().then(setRecentFiles);
     loadCategories().then(setCategories);
+  }, []);
+
+  // ── Pending background task recovery ──────────────────────────────────────
+  useEffect(() => {
+    (async () => {
+      try {
+        const raw = await AsyncStorage.getItem('bg_translation_pending_task');
+        if (!raw) return;
+        const task = JSON.parse(raw);
+        // Only show resume if task was enqueued within the last 24 hours
+        if (!task.videoId || Date.now() - (task.enqueuedAt ?? 0) > 86400000) {
+          await AsyncStorage.removeItem('bg_translation_pending_task');
+          return;
+        }
+        setResumeDialog({
+          visible: true,
+          videoId:    task.videoId,
+          videoTitle: task.videoTitle ?? 'YouTube 영상',
+          language:   task.language   ?? 'Korean',
+          genre:      task.genre      ?? 'general',
+        });
+      } catch {}
+    })();
   }, []);
 
   useEffect(() => { saveRecent(recentFiles); }, [recentFiles]);
@@ -764,6 +795,19 @@ export default function HomeScreen() {
     }
     // 일반 URL은 향후 확장 가능
   };
+
+  const handleResume = useCallback(() => {
+    if (!resumeDialog) return;
+    setResumeDialog(null);
+    // Restore store state so youtube-player screen can load
+    setYoutubeVideo(resumeDialog.videoId, resumeDialog.videoTitle);
+    router.push('/youtube-player');
+  }, [resumeDialog, setYoutubeVideo]);
+
+  const handleResumeCancel = useCallback(async () => {
+    setResumeDialog(null);
+    await AsyncStorage.removeItem('bg_translation_pending_task').catch(() => {});
+  }, []);
 
   // pickVideo 함수는 더 이상 버튼에서 직접 호출되지 않지만,
   // UrlInputModal 내부에서 로컬 파일 선택 시에도 동일한 로직을 사용하므로 유지
@@ -1244,6 +1288,31 @@ export default function HomeScreen() {
         onSelect={(s) => { setSortOrder(s); setSortModalVisible(false); }}
         onCancel={() => setSortModalVisible(false)}
       />
+
+      {/* ── 번역 재개 모달 ──────────────────────────────────────────────────── */}
+      <Modal
+        visible={!!resumeDialog?.visible}
+        transparent
+        animationType="fade"
+        onRequestClose={handleResumeCancel}
+      >
+        <Pressable style={catModalStyles.backdrop} onPress={handleResumeCancel}>
+          <Pressable style={[catModalStyles.card, { gap: 16 }]} onPress={() => {}}>
+            <Text style={catModalStyles.title}>번역 재개</Text>
+            <Text style={{ color: '#aaa', fontSize: 14, textAlign: 'center', lineHeight: 22 }}>
+              "{resumeDialog?.videoTitle}" 번역이{'\n'}중단됐습니다. 이어서 진행할까요?
+            </Text>
+            <View style={catModalStyles.btnRow}>
+              <TouchableOpacity style={catModalStyles.cancelBtn} onPress={handleResumeCancel}>
+                <Text style={catModalStyles.cancelText}>취소</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={catModalStyles.confirmBtn} onPress={handleResume}>
+                <Text style={catModalStyles.confirmText}>재개</Text>
+              </TouchableOpacity>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </View>
   );
 }

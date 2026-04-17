@@ -58,6 +58,9 @@ const MERGE_GAP_HARD_LIMIT_S = 0.6;
 
 // 발화자 전환이 강하게 의심될 때 적용하는 더 엄격한 gap 상한
 const MERGE_GAP_SPEAKER_CHANGE_S = 0.35;
+// ── 그룹 크기 제한 (추가) ─────────────────────────────────────────────────────
+
+const MAX_WORDS_PER_GROUP = 35;
 
 // ── SBD 관련 상수 ─────────────────────────────────────────────────────────────
 const SBD_BATCH_SIZE = 30;
@@ -162,6 +165,121 @@ const PROTECTED_PROPER_NOUNS = new Set([
 const PROTECTED_ACRONYMS = new Set(["HR", "CEO", "CFO", "CTO", "IT", "PR", "VP"]);
 
 let llamaContext: LlamaContext | null = null;
+// Dedup concurrent loadModel() calls: both callers await the same promise
+let _loadModelPromise: Promise<void> | null = null;
+
+// ── Inference serialization ─────────────────────────────────────────────────
+// Serialises all translateSegments calls so llama.rn (single-context) is
+// never driven concurrently by FG and BG.  Uses two separate counters to
+// avoid the classic race: cancel-FG must NOT cancel the already-queued BG job.
+let _inferenceQueue: Promise<void> = Promise.resolve();
+let _enqueueId    = 0;  // incremented per enqueue call; never reset
+let _activeJobId  = 0;  // set to myEnqueueId when a job starts executing
+let _isInferenceRunning = false;
+
+// BG job protection flag — module-level singleton that survives screen unmount.
+// When true, cancelFgInference() is a no-op so screen unmount cannot interrupt
+// a BG translateSegments call that is already executing in the queue.
+let _bgJobProtected = false;
+
+/**
+ * Set to true immediately before BG calls translateSegments; false in the
+ * finally block after it returns (or throws).  While protected,
+ * cancelFgInference() is a no-op so screen-unmount cleanup cannot cancel BG.
+ */
+export function setBgJobProtection(val: boolean): void {
+  _bgJobProtected = val;
+}
+
+/** Returns true while translateSegments is executing inside the queue. */
+export function isTranslating(): boolean {
+  return _isInferenceRunning;
+}
+
+/**
+ * Returns true while any inference job is actively running.
+ * Use this to gate BG work: the enqueueInference queue serialises execution,
+ * but callers can also poll this to make the waiting intent explicit.
+ */
+export function isModelBusy(): boolean {
+  return _isInferenceRunning;
+}
+
+/**
+ * Cancels only the CURRENTLY EXECUTING job.
+ * Queued-but-not-yet-started jobs are NOT affected.
+ *
+ * ⚠️  Do NOT call this before enqueuing a BG job — use cancelFgInference()
+ *     instead.  This function only bumps _activeJobId; if _activeJobId was
+ *     already ahead of _enqueueId the next BG enqueue will see
+ *     myEnqueueId < _activeJobId and be instantly cancelled.
+ */
+export function cancelCurrentInference(): void {
+  _activeJobId++;
+}
+
+/**
+ * Cancels the currently-executing FG job AND re-aligns the counters so
+ * that the NEXT enqueued job (the BG job) is guaranteed NOT to be treated
+ * as stale by the `myEnqueueId < _activeJobId` guard.
+ *
+ * Why this is necessary instead of cancelCurrentInference():
+ *   cancelCurrentInference() increments _activeJobId.  If _activeJobId was
+ *   already > _enqueueId (e.g. due to a prior cancel or double-tap race),
+ *   the gap widens further and the next BG job's myEnqueueId will be strictly
+ *   less than _activeJobId → instant INFERENCE_CANCELLED for BG.
+ *
+ *   By setting _enqueueId = _activeJobId - 1 after the bump we guarantee:
+ *     next enqueue:  myEnqueueId = _enqueueId + 1 = _activeJobId
+ *     stale check:   myEnqueueId < _activeJobId  →  false  ✓
+ */
+export function cancelFgInference(): void {
+  if (_bgJobProtected) {
+    console.log('[INFERENCE] cancelFgInference() suppressed — BG job is protected');
+    return;
+  }
+  _activeJobId++;
+  // Re-align so the very next enqueueInference call gets myEnqueueId === _activeJobId.
+  _enqueueId = _activeJobId - 1;
+}
+
+/**
+ * Returns current queue counter state for debugging.
+ * Log this at the start of backgroundTranslationTask to determine whether
+ * the HeadlessJS task shares this module instance with the foreground
+ * (counters > 0 → shared context; counters = 0 → fresh context).
+ */
+export function debugInferenceCounters(): { enqueueId: number; activeJobId: number } {
+  return { enqueueId: _enqueueId, activeJobId: _activeJobId };
+}
+
+function enqueueInference<T>(fn: (isCancelled: () => boolean) => Promise<T>): Promise<T> {
+  const myEnqueueId = ++_enqueueId;
+
+  const task = _inferenceQueue.then(async () => {
+    // A prior cancel bumped _activeJobId above this job's ID → stale, skip.
+    // Using strict `<` (not `<=`) so that a queued job whose ID happens to
+    // equal the post-cancel _activeJobId is NOT incorrectly cancelled.
+    if (myEnqueueId < _activeJobId) {
+      throw new Error('INFERENCE_CANCELLED');
+    }
+    _activeJobId = myEnqueueId;
+
+    // isCancelled: true if cancelCurrentInference() was called after this job started.
+    const isCancelled = () => myEnqueueId !== _activeJobId;
+
+    _isInferenceRunning = true;
+    try {
+      return await fn(isCancelled);
+    } finally {
+      _isInferenceRunning = false;
+    }
+  });
+
+  // Drain errors so the queue chain never breaks on cancellation or failure.
+  _inferenceQueue = task.then(() => {}, () => {});
+  return task;
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -315,25 +433,76 @@ function likelySpeakerChange(prevText: string, currText: string, gap: number): b
 // ── Model lifecycle ───────────────────────────────────────────────────────────
 export async function loadModel(onProgress?: (fraction: number) => void): Promise<void> {
   if (llamaContext) return;
-  const info = await FileSystem.getInfoAsync(MODEL_PATH);
-  if (!info.exists) throw new Error("Gemma 모델 파일을 찾을 수 없습니다. 먼저 다운로드해 주세요.");
-  const modelPath = MODEL_PATH.startsWith("file://") ? MODEL_PATH.slice(7) : MODEL_PATH;
-  try {
-    llamaContext = await initLlama(
-      { model: modelPath, n_threads: 4, n_gpu_layers: 0, n_ctx: 4096, use_mlock: true },
-      onProgress ? (p: number) => onProgress(p / 100) : undefined
-    );
-    console.log("[Gemma] Model loaded.");
-  } catch (e) {
-    llamaContext = null;
-    throw new Error(`Gemma 모델 로드 실패: ${(e as Error).message}`);
-  }
+  // If another caller already started loading, share the same promise
+  if (_loadModelPromise) return _loadModelPromise;
+  _loadModelPromise = (async () => {
+    if (llamaContext) return; // recheck after await queue clears
+    const info = await FileSystem.getInfoAsync(MODEL_PATH);
+    if (!info.exists) throw new Error("Gemma 모델 파일을 찾을 수 없습니다. 먼저 다운로드해 주세요.");
+    const modelPath = MODEL_PATH.startsWith("file://") ? MODEL_PATH.slice(7) : MODEL_PATH;
+    try {
+      llamaContext = await initLlama(
+        // use_mlock: false — do NOT pin model pages in RAM.
+        // use_mlock: true caused Android OOM kills during model load: the OS could
+        // not page out the ~1.5 GB allocation and the OOM killer terminated the process.
+        { model: modelPath, n_threads: 4, n_gpu_layers: 0, n_ctx: 4096, use_mlock: false },
+        onProgress ? (p: number) => onProgress(p / 100) : undefined
+      );
+      console.log("[Gemma] Model loaded.");
+    } catch (e) {
+      llamaContext = null;
+      throw new Error(`Gemma 모델 로드 실패: ${(e as Error).message}`);
+    } finally {
+      _loadModelPromise = null;
+    }
+  })();
+  return _loadModelPromise;
 }
+
+let _unloadGeneration = 0; // incremented before each release; checked after to prevent stale null-set
 
 export async function unloadModel(): Promise<void> {
   if (!llamaContext) return;
-  try { await llamaContext.release(); } catch (e) { console.warn("[Gemma] release error:", e); }
-  llamaContext = null;
+  const myGeneration  = ++_unloadGeneration;
+  const ctxToRelease  = llamaContext;
+  llamaContext = null; // null BEFORE release so loadModel() can start a fresh init immediately
+  try {
+    await ctxToRelease.release();
+  } catch (e) {
+    console.warn("[Gemma] release error:", e);
+  }
+  // If a new loadModel() ran during our release, do NOT re-null the new context
+  if (_unloadGeneration !== myGeneration) {
+    console.log('[Gemma] unloadModel: skipping final null-set — new context was loaded during release');
+  }
+  // (llamaContext was already set to null before release — no further assignment needed)
+}
+
+/**
+ * Called by backgroundTranslationTask when isHeadlessContext=true, BEFORE loadModel().
+ * Ensures any FG unloadModel() race is resolved cleanly:
+ *   1. Waits for any in-progress _loadModelPromise to settle
+ *   2. Releases and nulls llamaContext so loadModel() always does a fresh init
+ *   3. Resets inference counters to prevent INFERENCE_CANCELLED on first enqueue
+ */
+export async function resetForHeadlessRestart(): Promise<void> {
+  // 1. Wait for any pending load to settle first
+  if (_loadModelPromise) {
+    try { await _loadModelPromise; } catch {}
+    _loadModelPromise = null;
+  }
+  // 2. Release existing context if still held (handles the race where FG unloadModel
+  //    was in progress but not yet null-assigned)
+  if (llamaContext) {
+    try { await llamaContext.release(); } catch {}
+    llamaContext = null;
+  }
+  // 3. Re-align counters: set _enqueueId = _activeJobId so next enqueueInference
+  //    call gets myEnqueueId === _activeJobId + 1 (immediately wins the active slot)
+  _enqueueId = _activeJobId;
+  _isInferenceRunning = false;
+  _bgJobProtected = false;
+  console.log('[GEMMA] resetForHeadlessRestart() complete — llamaContext=null, counters realigned');
 }
 
 // ── Deduplication ─────────────────────────────────────────────────────────────
@@ -1583,14 +1752,19 @@ function buildSystemPrompt(
 // ═══════════════════════════════════════════════════════════════════════════════
 export async function translateSegments(
   segments: TranslationSegment[],
-  onProgress?: (completed: number, total: number, partial: TranslationSegment[]) => void,
+  onProgress?: (completed: number, total: number, partial: TranslationSegment[]) => void | Promise<void>,
   videoHash = "default",
   targetLanguage = "Korean",
   videoGenre = "general"
 ): Promise<TranslationSegment[]> {
   console.log("[TRANSLATE]", segments.length, "segs |", targetLanguage, "|", videoGenre);
-  if (!llamaContext) throw new Error("모델이 로드되지 않았습니다. loadModel()을 먼저 호출하세요.");
 
+  // NOTE: llamaContext is checked INSIDE enqueueInference (not here) so the check
+  // happens at execution time — by then, any FG job that was running has finished
+  // (and could have changed llamaContext).  Checking before entering the queue would
+  // pass even if FG is mid-inference and then unloads the model before BG runs.
+  return enqueueInference(async (isCancelled) => {
+  if (!llamaContext) throw new Error("모델이 로드되지 않았습니다. loadModel()을 먼저 호출하세요.");
   // ── Step 0: 중복 제거 + ASR 정리 ────────────────────────────────────────────
   const deduped = deduplicateOverlappingSegments(segments);
   const cleaned = deduped.map(seg => ({
@@ -1601,6 +1775,7 @@ export async function translateSegments(
   // ── Step A: 고유명사 + 프롬프트 구성 ────────────────────────────────────────
   const profile = getLanguageProfile(targetLanguage);
   const properNouns = await buildProperNounDict(deduped, videoHash, targetLanguage);
+  if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
   const nounHint = formatNounHint(properNouns);
   const patterns = buildPatterns(properNouns);
   const genrePersona = GENRE_PERSONA[videoGenre] ?? "";
@@ -1611,6 +1786,7 @@ export async function translateSegments(
   let usedSBD = false;
 
   const sbdSentences = await detectSentenceBoundaries(cleaned);
+  if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
 
   if (sbdSentences.length > 0) {
     merged = sbdSentencesToMergedGroups(sbdSentences);
@@ -1629,6 +1805,7 @@ export async function translateSegments(
 
   // ── Step C: 체크포인트 복원 ──────────────────────────────────────────────────
   const checkpoint = await loadCheckpoint(videoHash);
+  if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
   let startBatch = 0;
   const mergedTranslations: string[] = new Array(total).fill("");
 
@@ -1643,6 +1820,7 @@ export async function translateSegments(
   // ── Step D: 배치 번역 ────────────────────────────────────────────────────────
   try {
     for (let bi = startBatch; bi < totalBatches; bi++) {
+      if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
       const offset = bi * BATCH_SIZE;
       const batch = merged.slice(offset, offset + BATCH_SIZE);
       console.log(`[TRANSLATE] batch ${bi + 1}/${totalBatches} (${batch.length})`);
@@ -1662,6 +1840,7 @@ export async function translateSegments(
         repeat_penalty: 1.1,
         stop: ["</s>", "<end_of_turn>", "<|end|>"],
       } as any);
+      if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
 
       const translations = parseBatchResponse(r.text, batch, patterns, tokenMaps);
 
@@ -1670,7 +1849,11 @@ export async function translateSegments(
       }
 
       const partial = expandGroupTranslations(merged, mergedTranslations, cleaned);
-      onProgress?.(offset + batch.length, total, mergeWithTranslations(cleaned, partial));
+      // [FIX ISSUE2] Await onProgress so that AsyncStorage status writes (BG mode)
+      // and React state updates (FG mode) complete BEFORE the next batch begins.
+      // Without await, the last batch's saveStatus(translating, X%) races with
+      // backgroundTranslationTask's saveStatus(done, 100%) — the poll only sees 'done'.
+      if (onProgress) await onProgress(offset + batch.length, total, mergeWithTranslations(cleaned, partial));
 
       await saveCheckpoint(videoHash, {
         translatedTexts: mergedTranslations,
@@ -1678,12 +1861,16 @@ export async function translateSegments(
         properNouns,
         totalBatches,
       });
+      if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
 
       if (bi < totalBatches - 1) {
         await sleep((bi + 1) % THERMAL_EVERY_N === 0 ? SLEEP_THERMAL_MS : SLEEP_BETWEEN_MS);
+        if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
       }
     }
-  } catch (e) {
+  } catch (e: any) {
+    if (e?.message === 'INFERENCE_CANCELLED') throw e;
+    if (e?.message === 'APP_BACKGROUNDED') throw e;
     console.error("[Gemma] Inference error:", e);
     return mergeWithTranslations(cleaned, expandGroupTranslations(merged, mergedTranslations, cleaned));
   }
@@ -1735,6 +1922,7 @@ export async function translateSegments(
       originalIndices: [i],
     }));
 
+    if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
     const retryPrompt = buildSystemPrompt(targetLanguage, langRules, genrePersona, nounHint, retryGroups.length);
     const { message: retryMessage, tokenMaps: retryTokenMaps } = buildBatchMessage(retryGroups);
 
@@ -1751,6 +1939,7 @@ export async function translateSegments(
         repeat_penalty: 1.1,
         stop: ["</s>", "<end_of_turn>", "<|end|>"],
       } as any);
+      if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
 
       const rt = parseBatchResponse(rr.text, retryGroups, patterns, retryTokenMaps);
 
@@ -1759,12 +1948,16 @@ export async function translateSegments(
           translatedTexts[failed[j]] = postProcessTranslation(rt[j], retryGroups[j].text, targetLanguage);
         }
       }
-    } catch (e) {
+    } catch (e: any) {
+      if (e?.message === 'INFERENCE_CANCELLED') throw e;
       console.warn(`[Gemma] Retry ${attempt + 1} error:`, e);
       break;
     }
 
-    if (attempt < 1) await sleep(SLEEP_BETWEEN_MS);
+    if (attempt < 1) {
+      await sleep(SLEEP_BETWEEN_MS);
+      if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
+    }
   }
 
   // ── Step G: 검증 ─────────────────────────────────────────────────────────────
@@ -1789,6 +1982,7 @@ export async function translateSegments(
     targetLanguage,
     patterns
   );
+  if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
 
   const revalidatedTexts = expandGroupTranslations(merged, validatedGroupTexts, cleaned);
 
@@ -1805,4 +1999,5 @@ export async function translateSegments(
   const completed = adjustTimingsForReadability(mergeWithTranslations(cleaned, formatted));
   console.log(`[Gemma] Done: ${completed.length} segments.`);
   return completed;
+  }); // ── end enqueueInference ──────────────────────────────────────────────
 }

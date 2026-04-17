@@ -1,0 +1,452 @@
+/**
+ * subtitleDB.ts — v5
+ *
+ * 변경사항 (v4 → v5):
+ * ─────────────────────────────────────────────────────────────────────────────
+ * [FIX 1] DELETE+INSERT → UPSERT diff 저장
+ *   - subtitle_segments에 UNIQUE(cache_id, segment_id) 인덱스 추가
+ *   - _doSave(isPartial=true): DELETE 제거 → UPSERT only
+ *   - _doSave(isPartial=false): 최종 저장만 DELETE+INSERT (완전 교체 보장)
+ *   - partial 저장 I/O 비용 대폭 감소 (변경된 segment만 update)
+ *
+ * [FIX 2] makeSegmentId: toFixed(3) → Math.round(* 1000) ms 기반
+ *   - float rounding 오류 제거
+ *   - 1.23456 → 1235, 1.23449 → 1234 (ms 정수)
+ *   - YouTube timedtext / Whisper 모두 안전
+ *   - YoutubePlayerScreen의 makeSegmentId와 완전 동일 규칙 유지
+ *
+ * [FIX 3] translated_count 컬럼 추가 — resume 고도화
+ *   - subtitle_cache에 translated_count INTEGER 추가
+ *   - savePartialSubtitles에서 translatedCount 저장
+ *   - loadSubtitles 반환값에 translatedCount 포함
+ *   - 호출자가 "이미 번역된 수" 알고 resume 시작 위치 최적화 가능
+ *
+ * [KEEP v4]
+ *   - segment_id TEXT 컬럼 (DB/메모리 ID 통일)
+ *   - partial overwrite 조건: full → partial 덮어쓰기 금지
+ *   - translatedCount 기준 throttle (PARTIAL_THROTTLE_COUNT=10)
+ *   - WAL 모드, batch INSERT, withTransactionAsync 원자성
+ *   - in-memory lock (race condition 방지)
+ *   - LRU 50개 제한 (IN ASC LIMIT 방식)
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+
+import * as SQLite from "expo-sqlite";
+import { SubtitleSegment } from "../store/usePlayerStore";
+
+// ── 상수 ─────────────────────────────────────────────────────────────────────
+
+const DB_NAME                = "subtitles_v5.db";
+const CACHE_TTL_MS           = 7 * 24 * 60 * 60 * 1000;
+const LRU_MAX_ITEMS          = 50;
+// [FIX 1] partial UPSERT: 6컬럼 → UPSERT 구문 포함해도 안전한 chunk
+const BATCH_CHUNK_SIZE       = 166;
+const PARTIAL_THROTTLE_COUNT = 10;
+
+// ── [FIX 2] segmentId 생성 — ms 기반 정수 (float rounding 완전 제거) ──────────
+// YoutubePlayerScreen.makeSegmentId와 반드시 동일해야 함
+export function makeSegmentId(startTime: number, endTime: number): string {
+  return `${Math.round(startTime * 1000)}_${Math.round(endTime * 1000)}`;
+}
+
+// ── 타입 ──────────────────────────────────────────────────────────────────────
+
+export interface CacheInfo {
+  videoId:          string;
+  language:         string;
+  genre:            string;
+  cachedAt:         number;
+  isPartial:        boolean;
+  count:            number;
+  translatedCount:  number; // [FIX 3]
+}
+
+// ── DB 싱글톤 ─────────────────────────────────────────────────────────────────
+
+let _db: SQLite.SQLiteDatabase | null = null;
+
+function getDB(): SQLite.SQLiteDatabase {
+  if (!_db) throw new Error("[DB] initDB()를 먼저 호출하세요.");
+  return _db;
+}
+
+// ── in-memory lock ────────────────────────────────────────────────────────────
+
+const _inFlight = new Map<string, Promise<void>>();
+
+function lockKey(videoId: string, language: string, genre: string): string {
+  return `${videoId}::${language}::${genre}`;
+}
+
+// ── partial throttle: translatedCount 기준 ────────────────────────────────────
+
+const _partialLastSaved = new Map<string, number>();
+
+// ── 초기화 ────────────────────────────────────────────────────────────────────
+
+export async function initDB(): Promise<void> {
+  _db = await SQLite.openDatabaseAsync(DB_NAME);
+
+  await _db.execAsync(`
+    PRAGMA journal_mode = WAL;
+    PRAGMA foreign_keys = ON;
+    PRAGMA synchronous = NORMAL;
+
+    CREATE TABLE IF NOT EXISTS subtitle_cache (
+      id               INTEGER PRIMARY KEY AUTOINCREMENT,
+      video_id         TEXT    NOT NULL,
+      language         TEXT    NOT NULL,
+      genre            TEXT    NOT NULL,
+      cached_at        INTEGER NOT NULL,
+      is_partial       INTEGER NOT NULL DEFAULT 0,
+      translated_count INTEGER NOT NULL DEFAULT 0,
+      UNIQUE(video_id, language, genre)
+    );
+
+    CREATE TABLE IF NOT EXISTS subtitle_segments (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      cache_id    INTEGER NOT NULL
+                  REFERENCES subtitle_cache(id) ON DELETE CASCADE,
+      segment_id  TEXT    NOT NULL,
+      start_time  REAL    NOT NULL,
+      end_time    REAL    NOT NULL,
+      original    TEXT    NOT NULL,
+      translated  TEXT    NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_cache_lookup
+      ON subtitle_cache(video_id, language, genre);
+
+    CREATE INDEX IF NOT EXISTS idx_segments_order
+      ON subtitle_segments(cache_id, start_time);
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_segments_unique
+      ON subtitle_segments(cache_id, segment_id);
+  `);
+
+  console.log("[DB] v5 초기화 완료");
+}
+
+// ── 저장: 완료 자막 ───────────────────────────────────────────────────────────
+
+export async function saveSubtitles(
+  videoId: string,
+  language: string,
+  genre: string,
+  segments: SubtitleSegment[],
+): Promise<void> {
+  const key = lockKey(videoId, language, genre);
+
+  if (_inFlight.has(key)) {
+    await _inFlight.get(key);
+    return;
+  }
+
+  const p = _doSave(videoId, language, genre, segments, false, segments.length);
+  _inFlight.set(key, p);
+  try {
+    await p;
+  } finally {
+    _inFlight.delete(key);
+    _partialLastSaved.delete(key);
+  }
+}
+
+// ── 저장: 번역 진행 중 partial ────────────────────────────────────────────────
+
+/**
+ * @param translatedCount 현재까지 번역 완료된 세그먼트 수 (throttle 기준)
+ */
+export async function savePartialSubtitles(
+  videoId: string,
+  language: string,
+  genre: string,
+  segments: SubtitleSegment[],
+  translatedCount: number,
+): Promise<void> {
+  const key = lockKey(videoId, language, genre);
+  if (_inFlight.has(key)) return;
+
+  const lastSaved = _partialLastSaved.get(key) ?? 0;
+  if (translatedCount - lastSaved < PARTIAL_THROTTLE_COUNT) return;
+
+  _partialLastSaved.set(key, translatedCount);
+  await _doSave(videoId, language, genre, segments, true, translatedCount);
+}
+
+// ── 내부 저장 로직 ────────────────────────────────────────────────────────────
+
+async function _doSave(
+  videoId: string,
+  language: string,
+  genre: string,
+  segments: SubtitleSegment[],
+  isPartial: boolean,
+  translatedCount: number,
+): Promise<void> {
+  if (segments.length === 0) return;
+
+  const db = getDB();
+
+  await db.withTransactionAsync(async () => {
+    // [FIX 3] translated_count 포함 UPSERT
+    // [FIX 1+v4] partial overwrite 조건: full → partial 덮어쓰기 금지
+    const row = await db.getFirstAsync<{ id: number }>(
+      `INSERT INTO subtitle_cache
+         (video_id, language, genre, cached_at, is_partial, translated_count)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(video_id, language, genre)
+       DO UPDATE SET
+         cached_at        = excluded.cached_at,
+         is_partial       = excluded.is_partial,
+         translated_count = excluded.translated_count
+       WHERE
+         subtitle_cache.cached_at <= excluded.cached_at
+         AND (
+           subtitle_cache.is_partial = 1
+           OR excluded.is_partial = 0
+         )
+       RETURNING id`,
+      [videoId, language, genre, Date.now(), isPartial ? 1 : 0, translatedCount],
+    );
+
+    if (!row) {
+      console.log(`[DB] 덮어쓰기 건너뜀 (full 보호 또는 최신 데이터 존재): ${videoId}/${language}/${genre}`);
+      return;
+    }
+
+    const cacheId = row.id;
+
+    if (isPartial) {
+      // [FIX 1] partial: DELETE 없이 UPSERT only (diff 저장)
+      // 변경된 segment만 update → I/O 최소화
+      await _batchUpsertSegments(db, cacheId, segments);
+    } else {
+      // 최종 저장: 완전 교체 보장 (순서 정합성)
+      await db.runAsync(
+        `DELETE FROM subtitle_segments WHERE cache_id = ?`,
+        [cacheId],
+      );
+      await _batchInsertSegments(db, cacheId, segments);
+    }
+  });
+
+  await _enforceLRU(db);
+
+  console.log(
+    `[DB] 저장 완료${isPartial ? ` (partial ${translatedCount}개)` : ""}: ` +
+    `${videoId}/${language}/${genre} — 총 ${segments.length}개`,
+  );
+}
+
+// ── [FIX 1] batch UPSERT (partial 전용) ──────────────────────────────────────
+// UNIQUE(cache_id, segment_id) 충돌 시 translated만 업데이트
+
+async function _batchUpsertSegments(
+  db: SQLite.SQLiteDatabase,
+  cacheId: number,
+  segments: SubtitleSegment[],
+): Promise<void> {
+  for (let offset = 0; offset < segments.length; offset += BATCH_CHUNK_SIZE) {
+    const chunk = segments.slice(offset, offset + BATCH_CHUNK_SIZE);
+
+    const placeholders = chunk.map(() => "(?, ?, ?, ?, ?, ?)").join(",");
+    const values = chunk.flatMap((seg) => [
+      cacheId,
+      makeSegmentId(seg.startTime, seg.endTime),
+      seg.startTime,
+      seg.endTime,
+      seg.original,
+      seg.translated,
+    ]);
+
+    await db.runAsync(
+      `INSERT INTO subtitle_segments
+         (cache_id, segment_id, start_time, end_time, original, translated)
+       VALUES ${placeholders}
+       ON CONFLICT(cache_id, segment_id)
+       DO UPDATE SET
+         translated = excluded.translated`,
+      values,
+    );
+  }
+}
+
+// ── batch INSERT (최종 저장 전용) ─────────────────────────────────────────────
+
+async function _batchInsertSegments(
+  db: SQLite.SQLiteDatabase,
+  cacheId: number,
+  segments: SubtitleSegment[],
+): Promise<void> {
+  for (let offset = 0; offset < segments.length; offset += BATCH_CHUNK_SIZE) {
+    const chunk = segments.slice(offset, offset + BATCH_CHUNK_SIZE);
+
+    const placeholders = chunk.map(() => "(?, ?, ?, ?, ?, ?)").join(",");
+    const values = chunk.flatMap((seg) => [
+      cacheId,
+      makeSegmentId(seg.startTime, seg.endTime),
+      seg.startTime,
+      seg.endTime,
+      seg.original,
+      seg.translated,
+    ]);
+
+    await db.runAsync(
+      `INSERT INTO subtitle_segments
+         (cache_id, segment_id, start_time, end_time, original, translated)
+       VALUES ${placeholders}`,
+      values,
+    );
+  }
+}
+
+// ── 조회 ─────────────────────────────────────────────────────────────────────
+
+export async function loadSubtitles(
+  videoId: string,
+  language: string,
+  genre: string,
+): Promise<{
+  segments:         SubtitleSegment[];
+  isPartial:        boolean;
+  translatedCount:  number; // [FIX 3]
+} | null> {
+  const db = getDB();
+
+  const cache = await db.getFirstAsync<{
+    id:               number;
+    cached_at:        number;
+    is_partial:       number;
+    translated_count: number;
+  }>(
+    `SELECT id, cached_at, is_partial, translated_count
+     FROM subtitle_cache
+     WHERE video_id = ? AND language = ? AND genre = ?`,
+    [videoId, language, genre],
+  );
+
+  if (!cache) {
+    console.log(`[DB] 캐시 없음: ${videoId}/${language}/${genre}`);
+    return null;
+  }
+
+  if (Date.now() - cache.cached_at > CACHE_TTL_MS) {
+    await db.runAsync(`DELETE FROM subtitle_cache WHERE id = ?`, [cache.id]);
+    console.log(`[DB] 만료 삭제: ${videoId}/${language}/${genre}`);
+    return null;
+  }
+
+  const rows = await db.getAllAsync<{
+    segment_id: string;
+    start_time: number;
+    end_time:   number;
+    original:   string;
+    translated: string;
+  }>(
+    `SELECT segment_id, start_time, end_time, original, translated
+     FROM subtitle_segments
+     WHERE cache_id = ?
+     ORDER BY start_time ASC`,
+    [cache.id],
+  );
+
+  if (rows.length === 0) return null;
+
+  const isPartial = cache.is_partial === 1;
+  console.log(
+    `[DB] 캐시 히트${isPartial ? ` (partial, ${cache.translated_count}/${rows.length})` : ""}: ` +
+    `${videoId}/${language}/${genre}`,
+  );
+
+  const segments: SubtitleSegment[] = rows.map((r) => ({
+    id:         r.segment_id,
+    startTime:  r.start_time,
+    endTime:    r.end_time,
+    original:   r.original,
+    translated: r.translated,
+  }));
+
+  return {
+    segments,
+    isPartial,
+    translatedCount: cache.translated_count,
+  };
+}
+
+// ── 삭제 ─────────────────────────────────────────────────────────────────────
+
+export async function deleteSubtitleCache(videoId: string): Promise<void> {
+  const db = getDB();
+  const result = await db.runAsync(
+    `DELETE FROM subtitle_cache WHERE video_id = ?`,
+    [videoId],
+  );
+  console.log(`[DB] 삭제: ${videoId} — ${result.changes}개`);
+}
+
+export async function purgeExpiredCache(): Promise<void> {
+  const db = getDB();
+  const cutoff = Date.now() - CACHE_TTL_MS;
+  const result = await db.runAsync(
+    `DELETE FROM subtitle_cache WHERE cached_at < ?`,
+    [cutoff],
+  );
+  console.log(`[DB] 만료 정리: ${result.changes}개 삭제`);
+}
+
+// ── LRU ──────────────────────────────────────────────────────────────────────
+
+async function _enforceLRU(db: SQLite.SQLiteDatabase): Promise<void> {
+  const result = await db.runAsync(
+    `DELETE FROM subtitle_cache
+     WHERE id IN (
+       SELECT id FROM subtitle_cache
+       ORDER BY cached_at ASC
+       LIMIT MAX(0, (SELECT COUNT(*) FROM subtitle_cache) - ?)
+     )`,
+    [LRU_MAX_ITEMS],
+  );
+  if (result.changes > 0) {
+    console.log(`[DB] LRU 정리: ${result.changes}개 삭제`);
+  }
+}
+
+// ── 유틸 ─────────────────────────────────────────────────────────────────────
+
+export async function getCacheInfo(): Promise<CacheInfo[]> {
+  const db = getDB();
+
+  const rows = await db.getAllAsync<{
+    video_id:         string;
+    language:         string;
+    genre:            string;
+    cached_at:        number;
+    is_partial:       number;
+    translated_count: number;
+    cnt:              number;
+  }>(
+    `SELECT
+       c.video_id,
+       c.language,
+       c.genre,
+       c.cached_at,
+       c.is_partial,
+       c.translated_count,
+       COUNT(s.id) AS cnt
+     FROM subtitle_cache c
+     LEFT JOIN subtitle_segments s ON s.cache_id = c.id
+     GROUP BY c.id
+     ORDER BY c.cached_at DESC`,
+  );
+
+  return rows.map((r) => ({
+    videoId:         r.video_id,
+    language:        r.language,
+    genre:           r.genre,
+    cachedAt:        r.cached_at,
+    isPartial:       r.is_partial === 1,
+    translatedCount: r.translated_count,
+    count:           r.cnt,
+  }));
+}
