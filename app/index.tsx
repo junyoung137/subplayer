@@ -1644,11 +1644,11 @@ const styles = StyleSheet.create({
   navBtn: {
     flex: 1,
     backgroundColor: "#1a1a1a",
-    borderRadius: 12,
-    padding: 14,
+    borderRadius: 10,
+    padding: 10,
     alignItems: "center",
   },
-  navBtnText: { color: "#ccc", fontSize: 14 },
+  navBtnText: { color: "#ccc", fontSize: 13 },
 });
 
 const modalStyles = StyleSheet.create({
