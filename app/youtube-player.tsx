@@ -559,6 +559,62 @@ export default function YoutubePlayerScreen() {
     }
   }, [bgStatus, isBgRunning]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── BG smooth progress bar ────────────────────────────────────────────────
+  const bgAnimateTo = useCallback((
+    targetFraction: number,
+    durationMs: number,
+    options?: { ignoreCap?: boolean },
+  ) => {
+    if (rafIdRef.current !== null) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+    }
+
+    const real          = bgStatusRef.current?.progress ?? 0;
+    const clampedTarget = options?.ignoreCap
+      ? targetFraction
+      : Math.min(targetFraction, real + 0.03);
+
+    const start = displayedPctRef.current;
+    const diff  = clampedTarget - start;
+    if (Math.abs(diff) < 0.001) return;
+
+    const startTime = performance.now();
+
+    const frame = (now: number) => {
+      if (Math.abs(clampedTarget - displayedPctRef.current) < 0.001) {
+        displayedPctRef.current = clampedTarget;
+        setDisplayedPct(clampedTarget);
+        rafIdRef.current = null;
+        return;
+      }
+
+      const elapsed = now - startTime;
+      const t       = Math.min(elapsed / durationMs, 1);
+      const eased   = 1 - Math.pow(1 - t, 3); // ease-out cubic
+
+      const currentReal = bgStatusRef.current?.progress ?? 0;
+      const maxAllowed  = options?.ignoreCap
+        ? clampedTarget
+        : Math.min(clampedTarget, currentReal + 0.03);
+
+      const next = Math.min(start + diff * eased, maxAllowed);
+
+      if (next > displayedPctRef.current) {
+        displayedPctRef.current = next;
+        setDisplayedPct(next);
+      }
+
+      if (t < 1) {
+        rafIdRef.current = requestAnimationFrame(frame);
+      } else {
+        rafIdRef.current = null;
+      }
+    };
+
+    rafIdRef.current = requestAnimationFrame(frame);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── BG progress: react to real progress updates ───────────────────────────
   useEffect(() => {
     const target = bgStatus?.progress ?? 0;
@@ -817,62 +873,6 @@ export default function YoutubePlayerScreen() {
       requestAnimationFrame(crawlFrame);
     };
     requestAnimationFrame(crawlFrame);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ── BG smooth progress bar ────────────────────────────────────────────────
-  const bgAnimateTo = useCallback((
-    targetFraction: number,
-    durationMs: number,
-    options?: { ignoreCap?: boolean },
-  ) => {
-    if (rafIdRef.current !== null) {
-      cancelAnimationFrame(rafIdRef.current);
-      rafIdRef.current = null;
-    }
-
-    const real          = bgStatusRef.current?.progress ?? 0;
-    const clampedTarget = options?.ignoreCap
-      ? targetFraction
-      : Math.min(targetFraction, real + 0.03);
-
-    const start = displayedPctRef.current;
-    const diff  = clampedTarget - start;
-    if (Math.abs(diff) < 0.001) return;
-
-    const startTime = performance.now();
-
-    const frame = (now: number) => {
-      if (Math.abs(clampedTarget - displayedPctRef.current) < 0.001) {
-        displayedPctRef.current = clampedTarget;
-        setDisplayedPct(clampedTarget);
-        rafIdRef.current = null;
-        return;
-      }
-
-      const elapsed = now - startTime;
-      const t       = Math.min(elapsed / durationMs, 1);
-      const eased   = 1 - Math.pow(1 - t, 3); // ease-out cubic
-
-      const currentReal = bgStatusRef.current?.progress ?? 0;
-      const maxAllowed  = options?.ignoreCap
-        ? clampedTarget
-        : Math.min(clampedTarget, currentReal + 0.03);
-
-      const next = Math.min(start + diff * eased, maxAllowed);
-
-      if (next > displayedPctRef.current) {
-        displayedPctRef.current = next;
-        setDisplayedPct(next);
-      }
-
-      if (t < 1) {
-        rafIdRef.current = requestAnimationFrame(frame);
-      } else {
-        rafIdRef.current = null;
-      }
-    };
-
-    rafIdRef.current = requestAnimationFrame(frame);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── 번역 파이프라인 ──────────────────────────────────────────────────────

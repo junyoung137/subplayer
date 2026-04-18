@@ -10,7 +10,12 @@ export interface TranscribeSegment {
 
 let whisperContext: WhisperContext | null = null;
 let loadedModelPath: string | null = null;
-let transcribeQueue: Promise<unknown> = Promise.resolve(null);
+let transcribeQueue: Promise<void> = Promise.resolve();
+let _interChunkDelayMs = 800;
+
+export function setInterChunkDelay(ms: number): void {
+  _interChunkDelayMs = ms;
+}
 
 export async function loadModel(modelPath: string): Promise<void> {
   if (loadedModelPath === modelPath && whisperContext !== null) return;
@@ -24,8 +29,10 @@ export async function releaseModel(): Promise<void> {
     await whisperContext.release();
     whisperContext = null;
     loadedModelPath = null;
-    transcribeQueue = Promise.resolve(null);
   }
+  // Always reset queue regardless of whether a context existed.
+  // Prevents stale tasks from a previous session blocking the next load.
+  transcribeQueue = Promise.resolve();
 }
 
 export function transcribeChunkSegmented(
@@ -33,11 +40,19 @@ export function transcribeChunkSegmented(
   chunkStartTime: number,
   sourceLanguage: string = "auto"
 ): Promise<TranscribeSegment[]> {
-  const result = transcribeQueue.then(() =>
-    _doTranscribeSegmented(chunkPath, chunkStartTime, sourceLanguage)
-  );
-  transcribeQueue = result;
-  return result as Promise<TranscribeSegment[]>;
+  return new Promise<TranscribeSegment[]>((resolve, reject) => {
+    transcribeQueue = transcribeQueue.then(async () => {
+      const delayMs = _interChunkDelayMs; // snapshot at task-start time
+      try {
+        const result = await _doTranscribeSegmented(chunkPath, chunkStartTime, sourceLanguage);
+        await new Promise<void>(r => setTimeout(r, delayMs)); // delay only on success
+        resolve(result);
+      } catch (e) {
+        reject(e); // skip delay on failure — fast error propagation
+      }
+      // This .then() callback never throws — queue chain stays alive after failures.
+    });
+  });
 }
 
 export function isModelLoaded(): boolean {
