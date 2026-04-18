@@ -217,6 +217,7 @@ export const YouTubePlayer = React.forwardRef<
   useEffect(() => {
     if (!isReady) return;
     const timer = setInterval(async () => {
+      if (!isPlayingRef.current) return;
       try {
         const t = await playerRef.current?.getCurrentTime();
         const d = await playerRef.current?.getDuration();

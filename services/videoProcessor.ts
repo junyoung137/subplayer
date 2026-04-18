@@ -1,9 +1,11 @@
+import * as FileSystem from "expo-file-system/legacy";
 import { SubtitleSegment } from "../store/usePlayerStore";
-import { extractAndChunkAudio, clearChunkDir } from "./audioChunker";
+import { AudioChunk, clearChunkDir, getVideoDuration, extractSingleChunkAt } from "./audioChunker";
 import { transcribeChunkSegmented, releaseModel as releaseWhisper } from "./whisperService";
 import { loadModel as loadGemma, unloadModel as unloadGemma, translateSegments } from "./gemmaTranslationService";
 import { getLocalModelPath } from "./modelDownloadService";
 import { getLanguageByCode } from "../constants/languages";
+import { createThermalController } from "./thermalMonitor";
 
 export interface ProcessingProgress {
   step: "extracting" | "transcribing" | "unloading" | "translating" | "done" | "error";
@@ -25,9 +27,9 @@ const BAND_TRANSLATE_END  = 99;
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-const SENTENCE_END = /[.?!。]$/;
-const MAX_MERGE_DURATION = 2.5;  // seconds (4.0 → 2.5)
-const MAX_MERGE_CHARS    = 60;   // chars   (80 → 60)
+const SENTENCE_END       = /[.?!。]$/;
+const MAX_MERGE_DURATION = 2.5;
+const MAX_MERGE_CHARS    = 60;
 
 function cleanSegmentText(text: string): string {
   if (!text) return text;
@@ -49,7 +51,7 @@ function mergeSegmentsIntoSentences(segments: RawSegment[]): RawSegment[] {
 
   for (let i = 1; i < segments.length; i++) {
     const next = segments[i];
-    const combinedText = current.text + " " + next.text;
+    const combinedText     = current.text + " " + next.text;
     const combinedDuration = next.endTime - current.startTime;
 
     const wouldExceedDuration = combinedDuration > MAX_MERGE_DURATION;
@@ -86,111 +88,177 @@ export async function processVideo(
   sourceLanguage: string,
   targetLanguage: string,
   onProgress: (p: ProcessingProgress) => void,
-  isCancelled: () => boolean
+  isCancelled: () => boolean,
 ): Promise<ProcessingResult> {
+  // Thermal controller created OUTSIDE try so dispose() in finally always runs.
+  const thermal = createThermalController();
   try {
-    // ── Step 1: Extract audio ─────────────────────────────────────────────
-    let extractPercent = 5;
-    onProgress({ step: "extracting", current: 0, total: 0, percent: extractPercent, message: "오디오 추출 중..." });
+    // ── Step 1: Duration probe ────────────────────────────────────────────────
+    onProgress({
+      step: "extracting", current: 0, total: 0,
+      percent: 5, message: "오디오 추출 중...",
+    });
 
-    const extractTimer = setInterval(() => {
-      if (extractPercent < BAND_EXTRACT_END - 1) {
-        extractPercent += 1;
-        onProgress({ step: "extracting", current: 0, total: 0, percent: extractPercent, message: "오디오 추출 중..." });
-      }
-    }, 800);
-
-    let chunks: Awaited<ReturnType<typeof extractAndChunkAudio>>;
-    try {
-      chunks = await extractAndChunkAudio(videoUri, 30);
-    } finally {
-      clearInterval(extractTimer);
-    }
+    const totalDuration = await getVideoDuration(videoUri);
+    if (totalDuration <= 0)
+      throw new Error("오디오 트랙을 찾을 수 없습니다. mp4/mkv/mov 권장");
 
     if (isCancelled()) return { subtitles: [], translationSkipped: false };
-    if (chunks.length === 0) {
-      throw new Error("오디오 추출에 실패했습니다. 파일 형식을 확인하세요.");
-    }
 
-    onProgress({ step: "extracting", current: chunks.length, total: chunks.length, percent: BAND_EXTRACT_END, message: "오디오 추출 중..." });
+    // estimatedTotal fixed once from the initial tier — prevents the progress
+    // counter from jumping as the tier adapts mid-run.
+    const estimatedTotal = Math.ceil(
+      totalDuration / thermal.getTier().chunkDurationSecs,
+    );
 
-    // ── Step 2: Transcribe ────────────────────────────────────────────────
-    const rawSegments: Array<{ startTime: number; endTime: number; text: string; language: string }> = [];
+    onProgress({
+      step: "extracting", current: 0, total: estimatedTotal,
+      percent: BAND_EXTRACT_END, message: "오디오 추출 중...",
+    });
 
-    for (let i = 0; i < chunks.length; i++) {
+    // ── Step 2: Interleaved extract-then-transcribe loop ──────────────────────
+    // Skip-rate threshold: if this fraction of chunks fail extraction, warn.
+    const SKIP_RATE_WARN_THRESHOLD = 0.3;
+
+    const rawSegments: RawSegment[] = [];
+    let offset       = 0;
+    let chunkIndex   = 0;
+    let skippedChunks = 0;
+
+    while (offset < totalDuration) {
+      // ① cancel check — always before extraction
       if (isCancelled()) return { subtitles: [], translationSkipped: false };
 
-      const percent = Math.round(
-        BAND_EXTRACT_END + ((i / chunks.length) * (BAND_TRANSCRIBE_END - BAND_EXTRACT_END))
-      );
-      onProgress({
-        step: "transcribing",
-        current: i + 1,
-        total: chunks.length,
-        percent,
-        message: `음성 인식 중... (${i + 1}/${chunks.length})`,
-      });
+      // ② read tier at chunk boundary
+      const tier     = thermal.getTier();
+      const chunkDur = Math.min(tier.chunkDurationSecs, totalDuration - offset);
 
-      const segs = await transcribeChunkSegmented(chunks[i].filePath, chunks[i].startTime, sourceLanguage);
+      // ③ extract one chunk — skip on failure, never abort the whole run
+      let chunk: AudioChunk;
+      try {
+        chunk = await extractSingleChunkAt(videoUri, offset, chunkDur, chunkIndex);
+      } catch (e) {
+        console.warn(`[VideoProcessor] chunk ${chunkIndex} extraction failed, skipping:`, e);
+        offset += chunkDur;
+        chunkIndex++;
+        skippedChunks++;
+        onProgress({
+          step: "transcribing", current: chunkIndex, total: estimatedTotal,
+          percent: Math.round(
+            BAND_EXTRACT_END +
+            ((offset / totalDuration) * (BAND_TRANSCRIBE_END - BAND_EXTRACT_END)),
+          ),
+          message: `음성 인식 중... (${chunkIndex}/${estimatedTotal})`,
+        });
+        continue;
+      }
+
+      // ④ cancel check after extraction, before heavy inference
+      if (isCancelled()) return { subtitles: [], translationSkipped: false };
+
+      // ⑤ transcribe — measure wall time of inference only
+      const t0   = Date.now();
+      const segs = await transcribeChunkSegmented(
+        chunk.filePath, chunk.startTime, sourceLanguage,
+      );
+      thermal.reportTranscriptionTime(Date.now() - t0, chunkDur);
+
       rawSegments.push(...segs);
+      offset += chunkDur;
+      chunkIndex++;
+
+      // ⑥ delete chunk file immediately; clearChunkDir() in finally handles stragglers
+      FileSystem.deleteAsync(chunk.filePath, { idempotent: true }).catch(
+        (e) => console.warn("[VideoProcessor] chunk delete failed:", e),
+      );
+
+      // ⑦ progress update
+      onProgress({
+        step: "transcribing", current: chunkIndex, total: estimatedTotal,
+        percent: Math.round(
+          BAND_EXTRACT_END +
+          ((offset / totalDuration) * (BAND_TRANSCRIBE_END - BAND_EXTRACT_END)),
+        ),
+        message: `음성 인식 중... (${chunkIndex}/${estimatedTotal})`,
+      });
+    }
+
+    // Post-loop: evaluate skip rate
+    const skipRate = chunkIndex > 0 ? skippedChunks / chunkIndex : 0;
+    if (skipRate >= SKIP_RATE_WARN_THRESHOLD) {
+      console.warn(
+        `[VideoProcessor] high skip rate: ${skippedChunks}/${chunkIndex} chunks failed` +
+        ` (${Math.round(skipRate * 100)}%) — translation will be skipped`,
+      );
+    }
+
+    if (rawSegments.length === 0) {
+      onProgress({
+        step: "done", current: 0, total: 0,
+        percent: 100, message: "인식 결과 없음 — 파일을 확인하세요.",
+      });
+      return { subtitles: [], translationSkipped: true };
     }
 
     if (isCancelled()) return { subtitles: [], translationSkipped: false };
 
     const sentences = mergeSegmentsIntoSentences(rawSegments);
 
-    // ── Step 3: Translate ─────────────────────────────────────────────────
+    // ── Step 3: Translate ─────────────────────────────────────────────────────
     const gemmaPath = await getLocalModelPath();
     let translationSkipped = false;
 
     const translationInput = sentences.map((seg) => ({
-      start: seg.startTime,
-      end:   seg.endTime,
-      text:  seg.text,
+      start:      seg.startTime,
+      end:        seg.endTime,
+      text:       seg.text,
       translated: "",
     }));
 
     let translated = translationInput;
 
     if (!gemmaPath) {
-      console.warn('[TRANSLATE] Gemma model not downloaded — skipping translation');
+      console.warn("[TRANSLATE] Gemma model not downloaded — skipping translation");
       translationSkipped = true;
     } else {
       onProgress({ step: "unloading", current: 0, total: 0, percent: 91, message: "Whisper 언로드 중..." });
       await releaseWhisper();
 
       onProgress({ step: "unloading", current: 0, total: 0, percent: 93, message: "메모리 안정화 대기 중..." });
-      await sleep(2000);
+
+      // Tier-aware cooldown replaces the hardcoded sleep(2000)
+      const cooldownMs: Record<string, number> = {
+        nominal:  1000,
+        elevated: 2500,
+        critical: 4000,
+      };
+      await sleep(cooldownMs[thermal.getTier().name] ?? 2000);
 
       if (isCancelled()) return { subtitles: [], translationSkipped: false };
 
       onProgress({ step: "translating", current: 0, total: sentences.length, percent: 94, message: "Gemma 모델 로드 중..." });
       await loadGemma();
 
-      // 언어 코드(ko) → 언어명(Korean) 변환
       const langMeta = getLanguageByCode(targetLanguage);
       const langName = langMeta?.name ?? targetLanguage;
 
-      console.log('[TRANSLATE] calling translation for segments:', translationInput.length);
-      console.log('[TRANSLATE] target language name:', langName);
+      console.log("[TRANSLATE] calling translation for segments:", translationInput.length);
+      console.log("[TRANSLATE] target language name:", langName);
 
       try {
         translated = await translateSegments(
           translationInput,
           (completed, total) => {
             const percent = Math.round(
-              94 + ((completed / total) * (BAND_TRANSLATE_END - 94))
+              94 + ((completed / total) * (BAND_TRANSLATE_END - 94)),
             );
             onProgress({
-              step: "translating",
-              current: completed,
-              total,
-              percent,
+              step: "translating", current: completed, total, percent,
               message: `번역 중... (${completed}/${total})`,
             });
           },
           videoUri,
-          langName  // ← "Korean", "Japanese" 등 언어명으로 전달
+          langName,
         );
       } finally {
         await unloadGemma();
@@ -199,19 +267,19 @@ export async function processVideo(
 
     if (isCancelled()) return { subtitles: [], translationSkipped: false };
 
-    // ── Step 4: Assemble subtitles ────────────────────────────────────────
+    // ── Step 4: Assemble subtitles ────────────────────────────────────────────
     const subtitles: SubtitleSegment[] = sentences.map((seg, i) => ({
-      id: `sub_${i}_${Math.round(seg.startTime * 1000)}`,
-      startTime: seg.startTime,
-      endTime:   seg.endTime,
-      original:  seg.text,
+      id:         `sub_${i}_${Math.round(seg.startTime * 1000)}`,
+      startTime:  seg.startTime,
+      endTime:    seg.endTime,
+      original:   seg.text,
       translated: translated[i]?.translated ?? "",
     }));
 
     onProgress({
       step: "done",
       current: subtitles.length,
-      total: subtitles.length,
+      total:   subtitles.length,
       percent: 100,
       message: translationSkipped
         ? "번역 모델 없음 — 원문만 표시"
@@ -220,6 +288,7 @@ export async function processVideo(
 
     return { subtitles, translationSkipped };
   } finally {
+    thermal.dispose();
     await clearChunkDir();
   }
 }
