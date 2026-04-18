@@ -595,6 +595,11 @@ export default function HomeScreen() {
     file?: RecentFile;
   }>({ visible: false });
 
+  const [fileActionModal, setFileActionModal] = useState<{
+    visible: boolean;
+    file?: RecentFile;
+  }>({ visible: false });
+
   const [catNameModal, setCatNameModal] = useState<{
     visible: boolean;
     editId?: string;
@@ -1019,14 +1024,7 @@ export default function HomeScreen() {
               </Text>
             </TouchableOpacity>
             <TouchableOpacity
-              onPress={() =>
-                Alert.alert(item.name, undefined, [
-                  { text: "썸네일 변경", onPress: () => pickManualThumbnail(item.uri) },
-                  { text: "이름 변경", onPress: () => setRenameModal({ visible: true, file: item }) },
-                  { text: "폴더로 이동", onPress: () => setMoveModal({ visible: true, file: item }) },
-                  { text: "취소", style: "cancel" },
-                ])
-              }
+              onPress={() => setFileActionModal({ visible: true, file: item })}
               hitSlop={{ top: 8, bottom: 8, left: 4, right: 8 }}
             >
               <Text style={styles.actionIcon}>⋯</Text>
@@ -1319,6 +1317,67 @@ export default function HomeScreen() {
         }}
         onCancel={() => setRenameModal({ visible: false })}
       />
+
+      <Modal
+        visible={fileActionModal.visible}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setFileActionModal({ visible: false })}
+      >
+        <Pressable
+          style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" }}
+          onPress={() => setFileActionModal({ visible: false })}
+        >
+          <Pressable
+            style={{
+              backgroundColor: "#1a1a1a",
+              borderTopLeftRadius: 20,
+              borderTopRightRadius: 20,
+              paddingHorizontal: 20,
+              paddingTop: 16,
+              paddingBottom: 36,
+              gap: 4,
+            }}
+            onPress={() => {}}
+          >
+            <Text style={{ color: "#888", fontSize: 13, textAlign: "center", marginBottom: 8 }}
+              numberOfLines={1}>
+              {fileActionModal.file?.name}
+            </Text>
+
+            {[
+              { label: "📷  썸네일 변경", onPress: () => { setFileActionModal({ visible: false }); pickManualThumbnail(fileActionModal.file!.uri); } },
+              { label: "✏️  이름 변경",   onPress: () => { setFileActionModal({ visible: false }); setRenameModal({ visible: true, file: fileActionModal.file }); } },
+              { label: "📁  폴더로 이동", onPress: () => { setFileActionModal({ visible: false }); setMoveModal({ visible: true, file: fileActionModal.file }); } },
+            ].map((btn) => (
+              <TouchableOpacity
+                key={btn.label}
+                style={{
+                  paddingVertical: 16,
+                  borderBottomWidth: StyleSheet.hairlineWidth,
+                  borderBottomColor: "#2a2a2a",
+                }}
+                onPress={btn.onPress}
+              >
+                <Text style={{ color: "#fff", fontSize: 16 }}>{btn.label}</Text>
+              </TouchableOpacity>
+            ))}
+
+            <TouchableOpacity
+              style={{
+                paddingVertical: 16,
+                marginTop: 4,
+                backgroundColor: "#222",
+                borderRadius: 12,
+                alignItems: "center",
+              }}
+              onPress={() => setFileActionModal({ visible: false })}
+            >
+              <Text style={{ color: "#aaa", fontSize: 16, fontWeight: "600" }}>취소</Text>
+            </TouchableOpacity>
+          </Pressable>
+        </Pressable>
+      </Modal>
 
       <MoveCategoryModal
         visible={moveModal.visible}
