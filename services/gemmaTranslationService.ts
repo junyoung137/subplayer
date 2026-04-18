@@ -43,6 +43,14 @@ const SLEEP_THERMAL_MS = 1200;
 const THERMAL_EVERY_N = 5;
 const EMA_ALPHA_BG = 0.4;
 const EMA_REANCHOR_WEIGHT = 0.5;
+
+// ── Thermal management ────────────────────────────────────────────────────────
+const THERMAL_NPREDICT_SCALE = [1.0, 0.75, 0.55] as const; // level 0/1/2
+
+let _thermalLevel = 0;             // 0 = cool, 1 = warm, 2 = hot
+let _thermalConsecutiveHigh = 0;   // batches above threshold → level up
+let _thermalConsecutiveLow  = 0;   // batches below threshold → level down
+
 const SAVE_INTERVAL_MS = 1500;
 const CHECKPOINT_TTL_MS = 24 * 60 * 60 * 1000;
 const PROPER_NOUN_MIN_COUNT = 3;
@@ -307,6 +315,67 @@ async function sleep(ms: number): Promise<void> {
   }
   return new Promise<void>((r) => setTimeout(r, ms));
 }
+/** Returns the thread count appropriate for the current thermal level. */
+function getInferenceThreadCount(): number {
+  if (_thermalLevel >= 2) return 2;
+  if (_thermalLevel >= 1) return 3;
+  return 4;
+}
+
+/**
+ * Scales n_predict by the current thermal level.
+ * floor=8 prevents the value from collapsing so low that the model truncates real output.
+ */
+function applyThermalNPredict(base: number): number {
+  const scaled = Math.round(base * THERMAL_NPREDICT_SCALE[_thermalLevel]);
+  return Math.max(scaled, 8);
+}
+
+/**
+ * Returns the periodic thermal pause duration (ms).
+ * At level 0 there is NO periodic pause — only the normal inter-batch sleep applies.
+ * At level 1+, returns a longer sleep to let the SoC cool down.
+ */
+function getThermalSleepMs(): number {
+  if (_thermalLevel === 0) return 0;
+  if (_thermalLevel === 1) return 800;
+  return 1500;
+}
+
+/**
+ * Updates _thermalLevel using asymmetric hysteresis:
+ *   UP   uses rawBatchMs  (fast reaction to heat)
+ *   DOWN uses emaBatchMs  (slow recovery when cool)
+ *
+ * Thresholds: >2500 ms = HOT, <1200 ms = COOL (relative to each step).
+ * Requires 2 consecutive high batches to level up; 3 consecutive low to level down.
+ */
+function checkThermalPressure(rawBatchMs: number, emaBatchMs: number): void {
+  // Level-up uses raw duration (react quickly)
+  if (rawBatchMs > 2500) {
+    _thermalConsecutiveLow = 0;
+    _thermalConsecutiveHigh++;
+    if (_thermalConsecutiveHigh >= 2 && _thermalLevel < 2) {
+      _thermalLevel++;
+      _thermalConsecutiveHigh = 0;
+      if (__DEV__) console.log(`[THERMAL] Level UP → ${_thermalLevel} (raw=${rawBatchMs}ms)`);
+    }
+  } else if (emaBatchMs < 1200) {
+    // Level-down uses EMA duration (recover slowly)
+    _thermalConsecutiveHigh = 0;
+    _thermalConsecutiveLow++;
+    if (_thermalConsecutiveLow >= 3 && _thermalLevel > 0) {
+      _thermalLevel--;
+      _thermalConsecutiveLow = 0;
+      if (__DEV__) console.log(`[THERMAL] Level DOWN → ${_thermalLevel} (ema=${Math.round(emaBatchMs)}ms)`);
+    }
+  } else {
+    // Neither threshold crossed — reset streak counters
+    _thermalConsecutiveHigh = 0;
+    _thermalConsecutiveLow  = 0;
+  }
+}
+
 function checkpointKey(h: string) { return `gemma_checkpoint_v4_${h}`; }
 function properNounKey(h: string) { return `proper_nouns_${h}`; }
 function escapeRegex(s: string) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
@@ -469,7 +538,7 @@ export async function loadModel(onProgress?: (fraction: number) => void): Promis
         // use_mlock: false — do NOT pin model pages in RAM.
         // use_mlock: true caused Android OOM kills during model load: the OS could
         // not page out the ~1.5 GB allocation and the OOM killer terminated the process.
-        { model: modelPath, n_threads: 4, n_gpu_layers: 0, n_ctx: 4096, use_mlock: false },
+        { model: modelPath, n_threads: getInferenceThreadCount(), n_gpu_layers: 0, n_ctx: 4096, use_mlock: false },
         onProgress ? (p: number) => onProgress(p / 100) : undefined
       );
       console.log("[Gemma] Model loaded.");
@@ -486,6 +555,9 @@ export async function loadModel(onProgress?: (fraction: number) => void): Promis
 let _unloadGeneration = 0; // incremented before each release; checked after to prevent stale null-set
 
 export async function unloadModel(): Promise<void> {
+  _thermalLevel = 0;
+  _thermalConsecutiveHigh = 0;
+  _thermalConsecutiveLow  = 0;
   if (!llamaContext) return;
   const myGeneration  = ++_unloadGeneration;
   const ctxToRelease  = llamaContext;
@@ -1835,7 +1907,7 @@ async function validateTranslations(
           { role: 'system', content: systemPrompt },
           { role: 'user', content: `${userPrompt}\n\n${maskedSrc}` },
         ],
-        n_predict: isFragment ? 40 : 80,
+        n_predict: applyThermalNPredict(isFragment ? 40 : 80),
         temperature: 0.1,
         top_p: 0.9,
         stop: ['</s>', '<end_of_turn>', '<|end|>', '\n'],
@@ -2100,7 +2172,10 @@ export async function translateSegments(
   }
 
   if (startBatch === 0) {
-    emaBatchDurationMs = 0;
+    emaBatchDurationMs      = 0;
+    _thermalLevel           = 0;
+    _thermalConsecutiveHigh = 0;
+    _thermalConsecutiveLow  = 0;
   }
 
   // ── Step D: 배치 번역 ────────────────────────────────────────────────────────
@@ -2126,7 +2201,7 @@ export async function translateSegments(
           { role: "system", content: sysPrompt },
           { role: "user", content: batchMessage },
         ],
-        n_predict: batch.length * 80,
+        n_predict: applyThermalNPredict(batch.length * 80),
         temperature: 0.1,
         top_p: 0.9,
         top_k: 40,
@@ -2177,29 +2252,20 @@ export async function translateSegments(
       if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
 
       if (bi < totalBatches - 1) {
-        if (_isAppBackgrounded) {
-          if ((bi + 1) % THERMAL_EVERY_N === 0) {
-            await sleep(SLEEP_THERMAL_MS);
-            if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
-          } else {
-            const batchDuration = Date.now() - batchStartTime;
-            await sleep(updateEmaAndGetBgSleepMs(batchDuration, bi));
-            if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
-          }
-        } else {
-          if ((bi + 1) % THERMAL_EVERY_N === 0) {
-            await sleep(SLEEP_THERMAL_MS);
-          } else {
-            const batchEndTime = Date.now();
-            const batchDuration = batchEndTime - batchStartTime;
-            const adaptiveSleep =
-              bi === startBatch
-                ? 100
-                : Math.min(200, Math.max(100, Math.round(batchDuration * 0.15)));
-            await sleep(adaptiveSleep);
-          }
-          if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
-        }
+        const batchDuration = Date.now() - batchStartTime;
+        checkThermalPressure(batchDuration, emaBatchDurationMs);
+
+        const thermalSleep = getThermalSleepMs();
+        const bgEmaSleep   = _isAppBackgrounded
+          ? updateEmaAndGetBgSleepMs(batchDuration, bi)
+          : 0;
+        const fgAdaptiveSleep = !_isAppBackgrounded
+          ? (bi === startBatch ? 100 : Math.min(200, Math.max(100, Math.round(batchDuration * 0.15))))
+          : 0;
+
+        const sleepMs = Math.max(thermalSleep, bgEmaSleep, fgAdaptiveSleep);
+        if (sleepMs > 0) await sleep(sleepMs);
+        if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
       }
     }
     await saveCheckpoint(videoHash, {
@@ -2272,7 +2338,7 @@ export async function translateSegments(
           { role: "system", content: retryPrompt },
           { role: "user", content: retryMessage },
         ],
-        n_predict: retryGroups.length * 80,
+        n_predict: applyThermalNPredict(retryGroups.length * 80),
         temperature: 0.1,
         top_p: 0.9,
         top_k: 40,
