@@ -12,6 +12,8 @@ import {
   downloadGemmaModel,
   getModelMeta,
   deleteGemmaModel,
+  getLocalModelPath,
+  verifyModelIntegrity,
   type ModelMeta,
   type DownloadProgress,
 } from "../services/modelDownloadService";
@@ -35,10 +37,10 @@ export default function GemmaModelsScreen() {
   const [errorMsg, setErrorMsg] = useState<string>("");
   const cancelledRef = useRef(false);
 
-  // Load persisted metadata on mount
+  // Load persisted metadata on mount, verifying the file actually exists
   useEffect(() => {
     (async () => {
-      const saved = await getModelMeta();
+      const saved = await verifyModelIntegrity();
       if (saved) {
         setMeta(saved);
         setPhase("idle_downloaded");
@@ -88,10 +90,20 @@ export default function GemmaModelsScreen() {
           text: "삭제",
           style: "destructive",
           onPress: async () => {
-            await deleteGemmaModel();
-            setMeta(null);
-            setProgress(null);
-            setPhase("idle_not_downloaded");
+            try {
+              await deleteGemmaModel();
+              const remaining = await getLocalModelPath();
+              if (remaining) {
+                Alert.alert("삭제 실패", "모델 파일을 삭제하지 못했습니다. 저장 공간을 확인해 주세요.");
+                return;
+              }
+              setMeta(null);
+              setProgress(null);
+              setPhase("idle_not_downloaded");
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : "알 수 없는 오류가 발생했습니다.";
+              Alert.alert("삭제 실패", msg);
+            }
           },
         },
       ]

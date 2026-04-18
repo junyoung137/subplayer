@@ -179,8 +179,46 @@ export async function getModelMeta(): Promise<ModelMeta | null> {
   }
 }
 
+/**
+ * Checks BOTH AsyncStorage metadata AND actual file existence.
+ * If meta exists but the file is missing, clears the stale metadata and returns null.
+ */
+export async function verifyModelIntegrity(): Promise<ModelMeta | null> {
+  const meta = await getModelMeta();
+  if (!meta) return null;
+
+  const info = await FileSystem.getInfoAsync(DEST_PATH);
+  if (!info.exists) {
+    console.log("[ModelDownload] Stale metadata found but file missing — clearing metadata.");
+    await AsyncStorage.removeItem(META_STORAGE_KEY);
+    return null;
+  }
+
+  return meta;
+}
+
 export async function deleteGemmaModel(): Promise<void> {
-  await FileSystem.deleteAsync(DEST_PATH, { idempotent: true });
-  await AsyncStorage.removeItem(META_STORAGE_KEY);
+  try {
+    console.log("[ModelDownload] Deleting model file:", DEST_PATH);
+    await FileSystem.deleteAsync(DEST_PATH, { idempotent: true });
+    console.log("[ModelDownload] deleteAsync completed.");
+  } catch (e) {
+    console.error("[ModelDownload] deleteAsync failed:", e);
+    throw new Error(`모델 파일 삭제 실패: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  const verify = await FileSystem.getInfoAsync(DEST_PATH);
+  if (verify.exists) {
+    throw new Error("모델 파일 삭제 후에도 파일이 남아 있습니다.");
+  }
+
+  try {
+    await AsyncStorage.removeItem(META_STORAGE_KEY);
+    console.log("[ModelDownload] AsyncStorage metadata cleared.");
+  } catch (e) {
+    console.error("[ModelDownload] AsyncStorage.removeItem failed:", e);
+    throw new Error(`모델 메타데이터 삭제 실패: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
   console.log("[ModelDownload] Model deleted.");
 }

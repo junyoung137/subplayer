@@ -14,8 +14,9 @@ import { ModelDownloader } from "../components/ModelDownloader";
 import { useSettingsStore } from "../store/useSettingsStore";
 import {
   downloadGemmaModel,
-  getModelMeta,
   deleteGemmaModel,
+  getLocalModelPath,
+  verifyModelIntegrity,
   DEST_PATH,
   type DownloadProgress,
 } from "../services/modelDownloadService";
@@ -32,7 +33,7 @@ export default function ModelsScreen() {
   const gemmaResumableRef = useRef<FileSystem.DownloadResumable | null>(null);
 
   useEffect(() => {
-    getModelMeta().then((meta) =>
+    verifyModelIntegrity().then((meta) =>
       setGemmaPhase(meta !== null ? "idle_downloaded" : "idle_not_downloaded")
     );
   }, []);
@@ -81,8 +82,18 @@ export default function ModelsScreen() {
         text: "삭제",
         style: "destructive",
         onPress: async () => {
-          await deleteGemmaModel();
-          setGemmaPhase("idle_not_downloaded");
+          try {
+            await deleteGemmaModel();
+            const remaining = await getLocalModelPath();
+            if (remaining) {
+              Alert.alert("삭제 실패", "모델 파일을 삭제하지 못했습니다. 저장 공간을 확인해 주세요.");
+              return;
+            }
+            setGemmaPhase("idle_not_downloaded");
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : "알 수 없는 오류가 발생했습니다.";
+            Alert.alert("삭제 실패", msg);
+          }
         },
       },
     ]);
