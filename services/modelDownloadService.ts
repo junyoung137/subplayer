@@ -24,8 +24,8 @@ const MIRROR_REPOS: MirrorEntry[] = [
 const HF_BASE          = "https://huggingface.co";
 const HF_API_BASE      = "https://huggingface.co/api";
 const META_STORAGE_KEY = "gemma_model_meta";
-const DEST_DIR         = FileSystem.documentDirectory + "gemma-models/";
-const DEST_PATH        = DEST_DIR + "gemma-3n-e2b-q4.gguf";
+const DEST_DIR              = FileSystem.documentDirectory + "gemma-models/";
+export const DEST_PATH      = DEST_DIR + "gemma-3n-e2b-q4.gguf";
 
 export interface ResolvedUrl {
   url: string;
@@ -78,10 +78,24 @@ export async function resolveModelDownloadUrl(): Promise<ResolvedUrl> {
       const expectedSize = entry.lfs.size;
       const sha256       = entry.lfs.oid;
       const downloadUrl  = `${HF_BASE}/${mirror.repo}/resolve/main/${mirror.file}`;
-      const headResp     = await fetch(downloadUrl, { method: "HEAD" });
+      const headResp = await fetch(downloadUrl, { method: "HEAD", redirect: "manual" });
 
-      if (headResp.status === 200 || headResp.status === 302) {
+      if (headResp.status === 200) {
         return { url: downloadUrl, expectedSize, sha256 };
+      }
+
+      if (headResp.status === 302) {
+        const location = headResp.headers.get("location");
+        if (!location) {
+          errors.push(`[${mirror.repo}] 302 but no location header`);
+          continue;
+        }
+        const confirmResp = await fetch(location, { method: "HEAD", redirect: "manual" });
+        if (confirmResp.status !== 200) {
+          errors.push(`[${mirror.repo}] final URL HEAD ${confirmResp.status}`);
+          continue;
+        }
+        return { url: location, expectedSize, sha256 };
       }
 
       errors.push(`[${mirror.repo}] HEAD ${headResp.status}`);
@@ -94,7 +108,8 @@ export async function resolveModelDownloadUrl(): Promise<ResolvedUrl> {
 }
 
 export async function downloadGemmaModel(
-  onProgress?: (progress: DownloadProgress) => void
+  onProgress?: (progress: DownloadProgress) => void,
+  onResumable?: (resumable: FileSystem.DownloadResumable) => void,
 ): Promise<void> {
   const { url, expectedSize, sha256 } = await resolveModelDownloadUrl();
 
@@ -133,6 +148,7 @@ export async function downloadGemmaModel(
       });
     }
   );
+  onResumable?.(resumable);
 
   const result = await resumable.downloadAsync();
   if (!result?.uri) throw new Error("[ModelDownload] Download returned no URI.");

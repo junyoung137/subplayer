@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -8,34 +8,87 @@ import {
   Alert,
 } from "react-native";
 import { router } from "expo-router";
+import * as FileSystem from "expo-file-system/legacy";
 import { WHISPER_MODELS } from "../constants/whisperModels";
 import { ModelDownloader } from "../components/ModelDownloader";
 import { useSettingsStore } from "../store/useSettingsStore";
-import { getModelMeta, deleteGemmaModel } from "../services/modelDownloadService";
+import {
+  downloadGemmaModel,
+  getModelMeta,
+  deleteGemmaModel,
+  DEST_PATH,
+  type DownloadProgress,
+} from "../services/modelDownloadService";
+
+type GemmaPhase = "checking" | "idle_not_downloaded" | "idle_downloaded" | "downloading";
 
 export default function ModelsScreen() {
   const selectedModel = useSettingsStore((s) => s.whisperModel);
   const update        = useSettingsStore((s) => s.update);
 
-  const [gemmaDownloaded, setGemmaDownloaded] = useState<boolean | null>(null);
+  const [gemmaPhase,    setGemmaPhase]    = useState<GemmaPhase>("checking");
+  const [gemmaProgress, setGemmaProgress] = useState<DownloadProgress | null>(null);
+  const cancelledRef      = useRef(false);
+  const gemmaResumableRef = useRef<FileSystem.DownloadResumable | null>(null);
 
   useEffect(() => {
-    getModelMeta().then((meta) => setGemmaDownloaded(meta !== null));
+    getModelMeta().then((meta) =>
+      setGemmaPhase(meta !== null ? "idle_downloaded" : "idle_not_downloaded")
+    );
   }, []);
 
+  const handleGemmaDownload = async () => {
+    cancelledRef.current = false;
+    gemmaResumableRef.current = null;
+    setGemmaProgress(null);
+    setGemmaPhase("downloading");
+
+    try {
+      await downloadGemmaModel(
+        (p) => {
+          if (cancelledRef.current) return;
+          setGemmaProgress(p);
+        },
+        (resumable) => {
+          gemmaResumableRef.current = resumable;
+        },
+      );
+      if (cancelledRef.current) return;
+      gemmaResumableRef.current = null;
+      setGemmaPhase("idle_downloaded");
+    } catch {
+      if (cancelledRef.current) return;
+      gemmaResumableRef.current = null;
+      setGemmaPhase("idle_not_downloaded");
+    }
+  };
+
+  const handleGemmaCancel = async () => {
+    cancelledRef.current = true;
+    if (gemmaResumableRef.current) {
+      await gemmaResumableRef.current.pauseAsync();
+      gemmaResumableRef.current = null;
+    }
+    await FileSystem.deleteAsync(DEST_PATH, { idempotent: true });
+    setGemmaPhase("idle_not_downloaded");
+    setGemmaProgress(null);
+  };
+
   const handleGemmaDelete = () => {
-    Alert.alert("모델 삭제", "Gemma 모델을 삭제할까요?", [
+    Alert.alert("모델 삭제", "번역 모델을 삭제할까요?", [
       { text: "취소", style: "cancel" },
       {
         text: "삭제",
         style: "destructive",
         onPress: async () => {
           await deleteGemmaModel();
-          setGemmaDownloaded(false);
+          setGemmaPhase("idle_not_downloaded");
         },
       },
     ]);
   };
+
+  const pct = gemmaProgress ? Math.round(gemmaProgress.fraction * 100) : 0;
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
@@ -58,17 +111,32 @@ export default function ModelsScreen() {
       <Text style={styles.sectionLabel}>번역 모델</Text>
       <View style={styles.card}>
         <View style={styles.cardRow}>
-          <Text style={styles.cardName}>버전: v1.0.0</Text>
-          {gemmaDownloaded === null ? null : gemmaDownloaded ? (
+          <View>
+            <Text style={styles.cardName}>버전: v1.0</Text>
+            <Text style={styles.cardSub}>~2.8 GB</Text>
+          </View>
+
+          {gemmaPhase === "idle_not_downloaded" && (
+            <TouchableOpacity style={styles.btnDownload} onPress={handleGemmaDownload}>
+              <Text style={styles.btnDownloadText}>다운로드</Text>
+            </TouchableOpacity>
+          )}
+
+          {gemmaPhase === "downloading" && (
+            <View style={styles.progressWrapper}>
+              <View style={styles.progressTrack}>
+                <View style={[styles.progressFill, { width: `${pct}%` as any }]} />
+              </View>
+              <Text style={styles.progressText}>{pct}%</Text>
+              <TouchableOpacity onPress={handleGemmaCancel}>
+                <Text style={styles.cancelText}>취소</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {gemmaPhase === "idle_downloaded" && (
             <TouchableOpacity style={styles.btnDelete} onPress={handleGemmaDelete}>
               <Text style={styles.btnDeleteText}>삭제</Text>
-            </TouchableOpacity>
-          ) : (
-            <TouchableOpacity
-              style={styles.btnDownload}
-              onPress={() => router.push("/gemmaModels")}
-            >
-              <Text style={styles.btnDownloadText}>다운로드</Text>
             </TouchableOpacity>
           )}
         </View>
@@ -106,6 +174,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
   },
   cardName: { color: "#fff", fontSize: 15, fontWeight: "600" },
+  cardSub:  { color: "#666", fontSize: 12, marginTop: 2 },
 
   btnDownload: {
     backgroundColor: "#2563eb",
@@ -123,4 +192,16 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
   },
   btnDeleteText: { color: "#ef4444", fontWeight: "600", fontSize: 13 },
+
+  progressWrapper: { alignItems: "center", gap: 4 },
+  progressTrack: {
+    width: 80,
+    height: 4,
+    backgroundColor: "#333",
+    borderRadius: 2,
+    overflow: "hidden",
+  },
+  progressFill: { height: "100%", backgroundColor: "#2563eb" },
+  progressText: { color: "#aaa", fontSize: 11 },
+  cancelText:   { color: "#ef4444", fontSize: 12 },
 });
