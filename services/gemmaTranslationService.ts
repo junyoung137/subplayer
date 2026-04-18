@@ -41,6 +41,8 @@ const BATCH_SIZE = 5;
 const SLEEP_BETWEEN_MS = 150;
 const SLEEP_THERMAL_MS = 1200;
 const THERMAL_EVERY_N = 5;
+const EMA_ALPHA_BG = 0.4;
+const EMA_REANCHOR_WEIGHT = 0.5;
 const SAVE_INTERVAL_MS = 1500;
 const CHECKPOINT_TTL_MS = 24 * 60 * 60 * 1000;
 const PROPER_NOUN_MIN_COUNT = 3;
@@ -1995,6 +1997,44 @@ export async function translateSegments(
   // happens at execution time — by then, any FG job that was running has finished
   // (and could have changed llamaContext).  Checking before entering the queue would
   // pass even if FG is mid-inference and then unloads the model before BG runs.
+
+  // ── EMA inter-batch sleep estimation (BG mode) ─────────────────────────────
+  let emaBatchDurationMs = 0;
+
+  const updateEmaAndGetBgSleepMs = (batchDurationMs: number, batchIndex: number): number => {
+    if (emaBatchDurationMs === 0) {
+      // Path A: first batch — initialize and return conservative default
+      emaBatchDurationMs = batchDurationMs;
+      return 300;
+    } else if (batchIndex !== 0 && batchIndex % 20 === 0) {
+      // Path B: re-anchor — partial blend to correct drift without hard reset
+      emaBatchDurationMs =
+        EMA_REANCHOR_WEIGHT * batchDurationMs +
+        (1 - EMA_REANCHOR_WEIGHT) * emaBatchDurationMs;
+      // falls through to sleep ladder — does NOT return early
+    } else {
+      // Path C: normal batch — standard EMA update
+      emaBatchDurationMs =
+        EMA_ALPHA_BG * batchDurationMs + (1 - EMA_ALPHA_BG) * emaBatchDurationMs;
+    }
+    // Sleep ladder — reached by Path B and C only
+    // Floor at 300ms: high EMA may mean heavy workload, not a cool device
+    if (__DEV__ && _isAppBackgrounded) {
+      console.log(
+        `[EMA] batch=${batchIndex} duration=${batchDurationMs}ms ` +
+        `ema=${Math.round(emaBatchDurationMs)}ms sleep=${
+          emaBatchDurationMs < 800 ? 600 : emaBatchDurationMs < 1500 ? 400 : 300
+        }ms`
+      );
+    }
+    if (emaBatchDurationMs < 800)  return 600;
+    if (emaBatchDurationMs < 1500) return 400;
+    return 300;
+  };
+
+  const yieldToEventLoop = (): Promise<void> =>
+    new Promise<void>(r => setImmediate(r));
+
   return enqueueInference(async (isCancelled) => {
   if (!llamaContext) throw new Error("모델이 로드되지 않았습니다. loadModel()을 먼저 호출하세요.");
   // ── Step 0: 중복 제거 + ASR 정리 ────────────────────────────────────────────
@@ -2059,20 +2099,27 @@ export async function translateSegments(
     console.log(`[Gemma] Resuming from batch ${startBatch}/${totalBatches}`);
   }
 
+  if (startBatch === 0) {
+    emaBatchDurationMs = 0;
+  }
+
   // ── Step D: 배치 번역 ────────────────────────────────────────────────────────
   try {
     let lastSaveTime = 0;
     for (let bi = startBatch; bi < totalBatches; bi++) {
+      const batchStartTime = Date.now();
       if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
       const offset = bi * BATCH_SIZE;
       const batch = merged.slice(offset, offset + BATCH_SIZE);
       console.log(`[TRANSLATE] batch ${bi + 1}/${totalBatches} (${batch.length})`);
 
       if (batch.length === 0) continue;
-
-      const batchStartTime = Date.now();
       const sysPrompt = buildSystemPrompt(targetLanguage, langRules, genrePersona, nounHint, batch.length);
       const { message: batchMessage, tokenMaps } = buildBatchMessage(batch);
+
+      // [YIELD 1] — always, before completion
+      if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
+      await yieldToEventLoop();
 
       const r = await llamaContext.completion({
         messages: [
@@ -2086,9 +2133,21 @@ export async function translateSegments(
         repeat_penalty: 1.1,
         stop: ["</s>", "<end_of_turn>", "<|end|>"],
       } as any);
+
+      // [YIELD 2] — background only, after completion
+      if (_isAppBackgrounded) {
+        if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
+        await yieldToEventLoop();
+      }
+
+      // cancel check before parse — no yield here
       if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
 
       const translations = parseBatchResponse(r.text, batch, patterns, tokenMaps);
+
+      // [YIELD 3] — always, after parse
+      if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
+      await yieldToEventLoop();
 
       for (let i = 0; i < batch.length; i++) {
         mergedTranslations[offset + i] = translations[i];
@@ -2117,22 +2176,30 @@ export async function translateSegments(
       }
       if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
 
-      if (!_isAppBackgrounded && bi < totalBatches - 1) {
-        // Skip inter-batch sleep when backgrounded — thermal protection is only relevant
-        // when the screen is on. Android's kernel thermal governor manages CPU frequency
-        // when the display is off. Zero inter-batch delay maximises throughput in background.
-        if ((bi + 1) % THERMAL_EVERY_N === 0) {
-          await sleep(SLEEP_THERMAL_MS);
+      if (bi < totalBatches - 1) {
+        if (_isAppBackgrounded) {
+          if ((bi + 1) % THERMAL_EVERY_N === 0) {
+            await sleep(SLEEP_THERMAL_MS);
+            if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
+          } else {
+            const batchDuration = Date.now() - batchStartTime;
+            await sleep(updateEmaAndGetBgSleepMs(batchDuration, bi));
+            if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
+          }
         } else {
-          const batchEndTime = Date.now();
-          const batchDuration = batchEndTime - batchStartTime;
-          const adaptiveSleep =
-            bi === startBatch
-              ? 100
-              : Math.min(200, Math.max(100, Math.round(batchDuration * 0.15)));
-          await sleep(adaptiveSleep);
+          if ((bi + 1) % THERMAL_EVERY_N === 0) {
+            await sleep(SLEEP_THERMAL_MS);
+          } else {
+            const batchEndTime = Date.now();
+            const batchDuration = batchEndTime - batchStartTime;
+            const adaptiveSleep =
+              bi === startBatch
+                ? 100
+                : Math.min(200, Math.max(100, Math.round(batchDuration * 0.15)));
+            await sleep(adaptiveSleep);
+          }
+          if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
         }
-        if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
       }
     }
     await saveCheckpoint(videoHash, {

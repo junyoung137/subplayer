@@ -704,6 +704,47 @@ export default function YoutubePlayerScreen() {
     animFrameRef.current = requestAnimationFrame(frame);
   }, []);
 
+  // ── Segmented progress crawl ───────────────────────────────────────────
+  // Crawls animProgressRef from fromVal to toVal over duration ms.
+  // Throttled to one setState per 200ms to prevent update-depth loops.
+  // Guards: job identity → toVal ceiling → duration elapsed (in that order).
+  // onComplete fires only when duration elapses naturally (not on early exit).
+  const startCrawl = useCallback((
+    fromVal: number,
+    toVal: number,
+    duration: number,
+    jobId: number,
+    onComplete?: () => void,
+  ) => {
+    const crawlStart = performance.now();
+    let crawlLastRender = 0;
+    // Ensure the effective start never falls below fromVal even if the ref
+    // hasn't committed its first frame yet (RAF timing race on slow devices).
+    const effectiveStart = Math.max(fromVal, animProgressRef.current);
+
+    const crawlFrame = () => {
+      const now     = performance.now();
+      const elapsed = now - crawlStart;
+      const t       = Math.min(elapsed / duration, 1);
+
+      // Guards — in this exact order, no code before them
+      if (jobId !== jobIdRef.current)             return; // job superseded
+      if (animProgressRef.current > toVal)        return; // real progress took over
+      if (t >= 1)                                 { onComplete?.(); return; } // elapsed
+
+      const value = effectiveStart + (toVal - effectiveStart) * t;
+
+      if (value > animProgressRef.current && now - crawlLastRender >= 200) {
+        animProgressRef.current = value;
+        setSubtitleProgress(value);
+        crawlLastRender = now;
+      }
+
+      requestAnimationFrame(crawlFrame);
+    };
+    requestAnimationFrame(crawlFrame);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── 번역 파이프라인 ──────────────────────────────────────────────────────
   const translateFromResult = useCallback(async (
     result: SubtitleFetchResult,
@@ -792,43 +833,32 @@ export default function YoutubePlayerScreen() {
     // 10% visual anchor — model loaded, translation imminent.
     // Placed BEFORE hasGemma check: if model failed to load, this must NOT fire.
     if (!isResume) {
-      animateTo(0.1);
+      // Step 1: start smooth 0 → 12% animation.
+      // animateTo is async (RAF-based) and owns the visual progress update.
+      animateTo(0.12);
 
-      // Slowly crawl 10% → 18% over 15 s to signal activity during SBD.
-      // Self-terminates once real onProgress pushes animProgressRef past 18%,
-      // or when the job is cancelled / superseded.
-      const SBD_CRAWL_TARGET   = 0.18;
-      const SBD_CRAWL_DURATION = 15_000;
-      const crawlJobId    = myJobId;
-      const crawlStart    = performance.now();
-      const crawlStartVal = 0.1;
-      let   crawlLastRender = 0; // timestamp of last setSubtitleProgress call
+      const crawlStartJobId = myJobId;
 
-      const crawlFrame = () => {
-        const now     = performance.now();
-        const elapsed = now - crawlStart;
-        const t       = Math.min(elapsed / SBD_CRAWL_DURATION, 1);
+      requestAnimationFrame(() => {
+        // Guard: job may have been cancelled between animateTo() and this frame.
+        if (crawlStartJobId !== jobIdRef.current) return;
 
-        // ── Early-exit guards — in this order, no code before them ──────────
-        if (crawlJobId !== jobIdRef.current)              return; // job superseded
-        if (animProgressRef.current > SBD_CRAWL_TARGET)  return; // real progress took over
-        if (t >= 1)                                       return; // duration elapsed
-        // ────────────────────────────────────────────────────────────────────
-
-        const value = crawlStartVal + (SBD_CRAWL_TARGET - crawlStartVal) * t;
-
-        // Only update if value actually moved forward AND 200ms have passed.
-        // This prevents setState from being called on every single frame (~60fps),
-        // which causes the "Maximum update depth exceeded" loop.
-        if (value > animProgressRef.current && now - crawlLastRender >= 200) {
-          animProgressRef.current = value;
-          setSubtitleProgress(value);
-          crawlLastRender = now;
+        // Compute a single authoritative startFrom that both the ref and
+        // startCrawl's fromVal argument agree on.
+        // Math.max ensures we never start the crawl below 0.12 even if
+        // animateTo hasn't committed its first frame yet (RAF timing race).
+        const startFrom = Math.max(animProgressRef.current, 0.12);
+        if (animProgressRef.current < startFrom) {
+          animProgressRef.current = startFrom;
+          // Do NOT call setSubtitleProgress here — animateTo owns the render.
         }
 
-        requestAnimationFrame(crawlFrame);
-      };
-      requestAnimationFrame(crawlFrame);
+        // Phase 2: startFrom → 15% over 8 s (SBD batches)
+        // Phase 3: 15%      → 20% over 5 s (mergeFragments / group confirmation)
+        startCrawl(startFrom, 0.15, 8_000, myJobId, () => {
+          startCrawl(0.15, 0.20, 5_000, myJobId);
+        });
+      });
     }
 
     if (!hasGemma) {
@@ -1592,7 +1622,7 @@ export default function YoutubePlayerScreen() {
             </Text>
             <Text style={progressCard.sub} numberOfLines={1}>
               {isStale
-                ? '⚠️ 응답 없음 — 재시도 중...'
+                ? '처리 중...'
                 : displayPhase === 'fetching'
                   ? (loadingSubLabel || '자막 요청 중...')
                   : (displayPhase === 'translating' || displayPhase === 'resuming') &&

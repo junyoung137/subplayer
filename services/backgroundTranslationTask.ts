@@ -291,11 +291,57 @@ export async function backgroundTranslationTask(taskData: BgTranslationTask): Pr
     await saveStatus({ ...statusBase, status: 'translating', progress: 0.05,
       translatedCount: checkpoint?.translatedCount ?? 0, totalCount });
 
-    // Renew wake lock every 5 minutes (was 25 min — too infrequent; OS can reclaim
-    // the wake lock before it fires, letting the CPU sleep mid-translation).
-    keepAliveInterval = setInterval(() => {
-      NativeModules.TranslationService?.renewWakeLock?.();
-    }, 5 * 60 * 1000);
+    keepAliveInterval = setInterval((() => {
+      // isRenewing scoped to IIFE — not module level.
+      // Prevents retry chains from overlapping across interval ticks.
+      let isRenewing = false;
+
+      return () => {
+        if (isRenewing) {
+          console.warn('[BG_TASK] WakeLock renew skipped — previous attempt in progress');
+          return;
+        }
+        isRenewing = true;
+
+        // 2 min interval — some OEMs (Xiaomi MIUI, Samsung One UI) silently
+        // revoke wake locks in <3 minutes. Previous interval was too infrequent.
+        const attemptRenew = (retriesLeft: number, delayMs: number): void => {
+          const renewed = NativeModules.TranslationService?.renewWakeLock?.();
+
+          // Only retry on explicit false — undefined/void means fire-and-forget native
+          // call that doesn't return a confirmation, which is not a real failure.
+          if (renewed === false && retriesLeft > 0) {
+            console.warn(
+              `[BG_TASK] WakeLock renew returned false — retrying in ${delayMs}ms ` +
+              `(${retriesLeft} retries left)`
+            );
+            setTimeout(() => attemptRenew(retriesLeft - 1, delayMs * 2), delayMs);
+            return; // chain continues — isRenewing stays true
+          }
+
+          // Terminal path: explicit false after retries exhausted, ambiguous, or success.
+          if (renewed === false) {
+            // Explicit failure confirmed after all retries — real WakeLock problem.
+            console.error(
+              '[BG_TASK] WakeLock renewWakeLock() returned false after all retries — ' +
+              'OS may interrupt translation on battery-optimized devices'
+            );
+          } else if (renewed === undefined || renewed === null) {
+            // Ambiguous: native method returned void/undefined (fire-and-forget).
+            // Treat as success — no retry, no error log in production.
+            if (__DEV__) {
+              console.log('[BG_TASK] WakeLock renewWakeLock() returned void (fire-and-forget — assumed success)');
+            }
+          } else if (__DEV__) {
+            console.log('[BG_TASK] WakeLock renewed successfully');
+          }
+
+          isRenewing = false; // exactly once, at true end of chain
+        };
+
+        attemptRenew(2, 500);
+      };
+    })(), 2 * 60 * 1000);
 
     // Memory pressure guard: when Android signals low memory, set the abort flag so
     // the progress callback throws after saving the current checkpoint. This gives us
