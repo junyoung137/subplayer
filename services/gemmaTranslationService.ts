@@ -722,7 +722,7 @@ async function runSBDBatch(segments: TranslationSegment[]): Promise<number[]> {
         { role: "system", content: SBD_SYSTEM_PROMPT },
         { role: "user", content: inputLines },
       ],
-      n_predict: segments.length * 8,
+      n_predict: segments.length * 6,
       temperature: 0.05,
       top_p: 0.9,
       stop: ["</s>", "<end_of_turn>", "<|end|>"],
@@ -765,6 +765,13 @@ async function detectSentenceBoundaries(
     const batch = segments.slice(globalOffset, batchEnd);
 
     const localBoundaries = await runSBDBatch(batch);
+
+    // Inter-SBD-batch sleep — prevents completion() burst before translation.
+    // Applied only between batches, not after the last one.
+    if (globalOffset + SBD_BATCH_SIZE < segments.length) {
+      await sleep(_thermalLevel >= 1 ? 300 : 120);
+    }
+
     const globalBoundaries = localBoundaries.map((b) => b);
 
     const batchSentences = groupSegmentsByBoundaries(batch, globalBoundaries);
@@ -1769,7 +1776,7 @@ async function validateTranslations(
           { role: 'system', content: stage1SystemPrompt },
           { role: 'user', content: batchMsg },
         ],
-        n_predict: batch.length * 60,
+        n_predict: batch.length * 48,
         temperature: 0.05,
         top_p: 0.9,
         stop: ['</s>', '<end_of_turn>', '<|end|>'],
@@ -2258,7 +2265,7 @@ export async function translateSegments(
           ? updateEmaAndGetBgSleepMs(batchDuration, bi)
           : 0;
         const fgAdaptiveSleep = !_isAppBackgrounded
-          ? (bi === startBatch ? 100 : Math.min(200, Math.max(100, Math.round(batchDuration * 0.15))))
+          ? (bi === startBatch ? 200 : Math.min(400, Math.max(200, Math.round(batchDuration * 0.18))))
           : 0;
 
         const sleepMs = Math.max(thermalSleep, bgEmaSleep, fgAdaptiveSleep);
@@ -2357,9 +2364,17 @@ export async function translateSegments(
     }
 
     if (attempt < 1) {
-      await sleep(SLEEP_BETWEEN_MS);
+      await sleep(_thermalLevel >= 1 ? 500 : 200);
       if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
     }
+  }
+
+  // ── Cooling pause before validation: only when device is genuinely hot ────────
+  if (_thermalLevel >= 1 && totalBatches >= 5 && emaBatchDurationMs > 1200) {
+    const coolingMs = _thermalLevel >= 2 ? 2500 : 1200;
+    console.log(`[THERMAL] Pre-validation cooling: ${coolingMs}ms (level=${_thermalLevel}, batches=${totalBatches}, ema=${Math.round(emaBatchDurationMs)}ms)`);
+    await sleep(coolingMs);
+    if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
   }
 
   // ── Step G: 검증 ─────────────────────────────────────────────────────────────
