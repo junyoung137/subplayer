@@ -19,6 +19,7 @@ import * as DocumentPicker from "expo-document-picker";
 import * as ImagePicker from "expo-image-picker";
 import * as FileSystem from "expo-file-system/legacy";
 import { router } from "expo-router";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { usePlayerStore } from "../store/usePlayerStore";
 import { useSettingsStore } from "../store/useSettingsStore";
 import { LANGUAGES } from "../constants/languages";
@@ -549,6 +550,7 @@ function SortModal({ visible, current, onSelect, onCancel }: SortModalProps) {
 // ── HomeScreen ────────────────────────────────────────────────────────────────
 
 export default function HomeScreen() {
+  const insets = useSafeAreaInsets();
   const [recentFiles,      setRecentFiles]      = useState<RecentFile[]>([]);
   const [categories,       setCategories]       = useState<Category[]>([]);
   const [selectedCat,      setSelectedCat]      = useState<string>(DEFAULT_CATEGORY);
@@ -1234,7 +1236,7 @@ export default function HomeScreen() {
       )}
 
       {/* Bottom nav */}
-      <View style={styles.navButtons}>
+      <View style={[styles.navButtons, { paddingBottom: 16 + insets.bottom }]}>
         <TouchableOpacity style={styles.navBtn} onPress={() => router.push("/models")}>
           <Text style={styles.navBtnText}>🤖 모델 관리</Text>
         </TouchableOpacity>

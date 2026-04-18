@@ -1246,8 +1246,6 @@ export default function YoutubePlayerScreen() {
       })
       .catch(() => {});
 
-    setPlaying(true);
-
     if (isBgRunningRef.current) {
       // BG is running — try to grab a completed result immediately before the next poll.
       // Handles the race: BG finishes at t=0, user returns at t=100ms, next poll at t=500ms.
@@ -1706,8 +1704,14 @@ export default function YoutubePlayerScreen() {
           onFullscreenToggle={handleFullscreenToggle}
           isFullscreen={isLandscape}
           onStateChange={(state) => {
-            if (state === "playing" && subtitlePhase === "idle" && !isBgRunningRef.current) {
-              setPhase("fetching");
+            if (state === "playing") {
+              setPlaying(true);
+              if (subtitlePhase === "idle" && !isBgRunningRef.current) {
+                setPhase("fetching");
+              }
+            }
+            if (state === "paused" || state === "ended") {
+              setPlaying(false);
             }
           }}
           onError={(code) => {
