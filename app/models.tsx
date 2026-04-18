@@ -6,6 +6,7 @@ import {
   StyleSheet,
   ScrollView,
   Alert,
+  Switch,
 } from "react-native";
 import { router } from "expo-router";
 import * as FileSystem from "expo-file-system/legacy";
@@ -24,8 +25,9 @@ import {
 type GemmaPhase = "checking" | "idle_not_downloaded" | "idle_downloaded" | "downloading";
 
 export default function ModelsScreen() {
-  const selectedModel = useSettingsStore((s) => s.whisperModel);
-  const update        = useSettingsStore((s) => s.update);
+  const selectedModel       = useSettingsStore((s) => s.whisperModel);
+  const update              = useSettingsStore((s) => s.update);
+  const thermalProtection   = useSettingsStore((s) => s.thermalProtection);
 
   const [gemmaPhase,    setGemmaPhase]    = useState<GemmaPhase>("checking");
   const [gemmaProgress, setGemmaProgress] = useState<DownloadProgress | null>(null);
@@ -122,34 +124,47 @@ export default function ModelsScreen() {
       <Text style={styles.sectionLabel}>번역 모델</Text>
       <View style={styles.card}>
         <View style={styles.cardRow}>
-          <View>
-            <Text style={styles.cardName}>버전: v1.0</Text>
-            <Text style={styles.cardSub}>~2.8 GB</Text>
+          {/* Top row: version/size info + action button */}
+          <View style={styles.cardTopRow}>
+            <View>
+              <Text style={styles.cardName}>버전: v1.0</Text>
+              <Text style={styles.cardSub}>~2.8 GB</Text>
+            </View>
+
+            {gemmaPhase === "idle_not_downloaded" && (
+              <TouchableOpacity style={styles.btnDownload} onPress={handleGemmaDownload}>
+                <Text style={styles.btnDownloadText}>다운로드</Text>
+              </TouchableOpacity>
+            )}
+
+            {gemmaPhase === "downloading" && (
+              <View style={styles.progressWrapper}>
+                <View style={styles.progressTrack}>
+                  <View style={[styles.progressFill, { width: `${pct}%` as any }]} />
+                </View>
+                <Text style={styles.progressText}>{pct}%</Text>
+                <TouchableOpacity onPress={handleGemmaCancel}>
+                  <Text style={styles.cancelText}>취소</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+
+            {gemmaPhase === "idle_downloaded" && (
+              <TouchableOpacity style={styles.btnDelete} onPress={handleGemmaDelete}>
+                <Text style={styles.btnDeleteText}>삭제</Text>
+              </TouchableOpacity>
+            )}
           </View>
 
-          {gemmaPhase === "idle_not_downloaded" && (
-            <TouchableOpacity style={styles.btnDownload} onPress={handleGemmaDownload}>
-              <Text style={styles.btnDownloadText}>다운로드</Text>
-            </TouchableOpacity>
-          )}
-
-          {gemmaPhase === "downloading" && (
-            <View style={styles.progressWrapper}>
-              <View style={styles.progressTrack}>
-                <View style={[styles.progressFill, { width: `${pct}%` as any }]} />
-              </View>
-              <Text style={styles.progressText}>{pct}%</Text>
-              <TouchableOpacity onPress={handleGemmaCancel}>
-                <Text style={styles.cancelText}>취소</Text>
-              </TouchableOpacity>
-            </View>
-          )}
-
-          {gemmaPhase === "idle_downloaded" && (
-            <TouchableOpacity style={styles.btnDelete} onPress={handleGemmaDelete}>
-              <Text style={styles.btnDeleteText}>삭제</Text>
-            </TouchableOpacity>
-          )}
+          {/* Bottom row: thermal protection toggle */}
+          <View style={styles.cardBottomRow}>
+            <Text style={styles.rowLabel}>발열 보호 모드</Text>
+            <Switch
+              value={thermalProtection}
+              onValueChange={(v) => update({ thermalProtection: v })}
+              trackColor={{ true: "#2563eb" }}
+            />
+          </View>
         </View>
       </View>
 
@@ -178,14 +193,24 @@ const styles = StyleSheet.create({
 
   // Gemma row — matches ModelDownloader's container dimensions
   cardRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
+    flexDirection: "column",
+    gap: 10,
     paddingVertical: 14,
     paddingHorizontal: 16,
   },
+  cardTopRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  cardBottomRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
   cardName: { color: "#fff", fontSize: 15, fontWeight: "600" },
   cardSub:  { color: "#666", fontSize: 12, marginTop: 2 },
+  rowLabel: { color: "#ccc", fontSize: 14 },
 
   btnDownload: {
     backgroundColor: "#2563eb",

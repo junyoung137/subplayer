@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React from "react";
 import {
   View,
   Text,
@@ -10,20 +10,10 @@ import {
 import Slider from "@react-native-community/slider";
 import { router } from "expo-router";
 import { useSettingsStore } from "../store/useSettingsStore";
-import { getModelMeta } from "../services/modelDownloadService";
-import type { ModelMeta } from "../services/modelDownloadService";
 
 export default function SettingsScreen() {
   const settings = useSettingsStore();
   const { update } = settings;
-
-  const [gemmaMeta, setGemmaMeta] = useState<ModelMeta | null | undefined>(undefined);
-
-  useEffect(() => {
-    getModelMeta().then(setGemmaMeta);
-  }, []);
-
-  const whisperModels = ["tiny", "small", "medium", "large-v3"] as const;
 
   const subtitleStyles = [
     { key: "outline",  label: "외곽선형",   desc: "갈매기 스타일"   },
@@ -33,58 +23,6 @@ export default function SettingsScreen() {
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-
-      {/* ── Gemma model status ──────────────────────────────────────────────── */}
-      <Section title="번역 모델 (Gemma 3n E2B)">
-        <View style={styles.row}>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.rowLabel}>Gemma 3n E2B</Text>
-            {gemmaMeta === undefined ? (
-              <Text style={styles.hint}>확인 중…</Text>
-            ) : gemmaMeta ? (
-              <Text style={[styles.hint, styles.hintOk]}>
-                다운로드됨 ✓  ({(gemmaMeta.size / 1e9).toFixed(1)} GB)
-              </Text>
-            ) : (
-              <Text style={[styles.hint, styles.hintWarn]}>미다운로드 ⚠️</Text>
-            )}
-          </View>
-          <TouchableOpacity
-            style={styles.manageBtn}
-            onPress={() => router.push("./gemmaModels")}
-          >
-            <Text style={styles.manageBtnText}>모델 관리</Text>
-          </TouchableOpacity>
-        </View>
-
-        <View style={styles.row}>
-          <Text style={styles.rowLabel}>발열 보호 모드</Text>
-          <Switch
-            value={settings.thermalProtection}
-            onValueChange={(v) => update({ thermalProtection: v })}
-            trackColor={{ true: "#2563eb" }}
-          />
-        </View>
-
-        <Text style={styles.infoText}>번역은 완전히 오프라인으로 처리됩니다.</Text>
-      </Section>
-
-      {/* ── Whisper model ───────────────────────────────────────────────────── */}
-      <Section title="Whisper 음성 인식 모델">
-        <View style={styles.chipRow}>
-          {whisperModels.map((m) => (
-            <TouchableOpacity
-              key={m}
-              style={[styles.chip, settings.whisperModel === m && styles.chipActive]}
-              onPress={() => update({ whisperModel: m })}
-            >
-              <Text style={[styles.chipText, settings.whisperModel === m && styles.chipTextActive]}>
-                {m}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-      </Section>
 
       {/* ── Audio chunk duration ─────────────────────────────────────────────── */}
       <Section title="오디오 청크 길이">

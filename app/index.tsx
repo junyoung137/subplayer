@@ -110,6 +110,32 @@ async function getFileSize(uri: string): Promise<number | undefined> {
   } catch { return undefined; }
 }
 
+async function deleteFileFromDisk(uri: string): Promise<void> {
+  try {
+    // Only delete files stored in our app's own directories
+    // (documentDirectory or cacheDirectory). Never delete external URIs
+    // like content:// or original user-picked files outside our scope.
+    const ownedPrefixes = [
+      FileSystem.documentDirectory ?? "",
+      FileSystem.cacheDirectory ?? "",
+    ];
+    const isOwned = ownedPrefixes.some(
+      (prefix) => prefix && uri.startsWith(prefix)
+    );
+    if (!isOwned) {
+      console.log("[FILE] Skipping delete of external URI:", uri);
+      return;
+    }
+    const info = await FileSystem.getInfoAsync(uri);
+    if (info.exists) {
+      await FileSystem.deleteAsync(uri, { idempotent: true });
+      console.log("[FILE] Deleted from disk:", uri);
+    }
+  } catch (e) {
+    console.warn("[FILE] Could not delete file from disk:", uri, e);
+  }
+}
+
 function formatSize(bytes?: number): string {
   if (!bytes) return "";
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
@@ -564,6 +590,11 @@ export default function HomeScreen() {
   const [selectedUris,     setSelectedUris]     = useState<Set<string>>(new Set());
   const [batchMoveVisible, setBatchMoveVisible] = useState(false);
 
+  const [renameModal, setRenameModal] = useState<{
+    visible: boolean;
+    file?: RecentFile;
+  }>({ visible: false });
+
   const [catNameModal, setCatNameModal] = useState<{
     visible: boolean;
     editId?: string;
@@ -663,6 +694,13 @@ export default function HomeScreen() {
   const renameCategory = (id: string, name: string) => {
     setCategories((prev) => prev.map((c) => c.id === id ? { ...c, name } : c));
     setCatNameModal({ visible: false });
+  };
+
+  const renameFile = (uri: string, newName: string) => {
+    setRecentFiles((prev) =>
+      prev.map((f) => f.uri === uri ? { ...f, name: newName } : f)
+    );
+    setRenameModal({ visible: false });
   };
 
   const deleteCategory = (id: string) => {
@@ -840,7 +878,12 @@ export default function HomeScreen() {
   const deleteOne = useCallback((uri: string) => {
     Alert.alert("파일 삭제", "이 파일을 목록에서 삭제하시겠습니까?", [
       { text: "취소", style: "cancel" },
-      { text: "확인", style: "destructive", onPress: () => setRecentFiles((prev) => prev.filter((f) => f.uri !== uri)) },
+      {
+        text: "확인", style: "destructive", onPress: async () => {
+          await deleteFileFromDisk(uri);
+          setRecentFiles((prev) => prev.filter((f) => f.uri !== uri));
+        },
+      },
     ]);
   }, []);
 
@@ -851,8 +894,9 @@ export default function HomeScreen() {
       { text: "취소", style: "cancel" },
       {
         text: "확인", style: "destructive",
-        onPress: () => {
+        onPress: async () => {
           const uris = new Set(targets.map((f) => f.uri));
+          await Promise.all(targets.map((f) => deleteFileFromDisk(f.uri)));
           setRecentFiles((prev) => prev.filter((f) => !uris.has(f.uri)));
         },
       },
@@ -864,7 +908,8 @@ export default function HomeScreen() {
       { text: "취소", style: "cancel" },
       {
         text: "삭제", style: "destructive",
-        onPress: () => {
+        onPress: async () => {
+          await Promise.all([...selectedUris].map((uri) => deleteFileFromDisk(uri)));
           setRecentFiles((prev) => prev.filter((f) => !selectedUris.has(f.uri)));
           setSelectedUris(new Set());
           setMultiSelect(false);
@@ -976,10 +1021,9 @@ export default function HomeScreen() {
             <TouchableOpacity
               onPress={() =>
                 Alert.alert(item.name, undefined, [
-                  { text: "재생", onPress: () => openRecent(item) },
-                  { text: "폴더로 이동", onPress: () => setMoveModal({ visible: true, file: item }) },
                   { text: "썸네일 변경", onPress: () => pickManualThumbnail(item.uri) },
-                  { text: "삭제", style: "destructive", onPress: () => deleteOne(item.uri) },
+                  { text: "이름 변경", onPress: () => setRenameModal({ visible: true, file: item }) },
+                  { text: "폴더로 이동", onPress: () => setMoveModal({ visible: true, file: item }) },
                   { text: "취소", style: "cancel" },
                 ])
               }
@@ -1265,6 +1309,15 @@ export default function HomeScreen() {
           else createCategory(name, catNameModal.parentId);
         }}
         onCancel={() => setCatNameModal({ visible: false })}
+      />
+
+      <CategoryNameModal
+        visible={renameModal.visible}
+        initial={renameModal.file?.name ?? ""}
+        onConfirm={(name) => {
+          if (renameModal.file) renameFile(renameModal.file.uri, name);
+        }}
+        onCancel={() => setRenameModal({ visible: false })}
       />
 
       <MoveCategoryModal
