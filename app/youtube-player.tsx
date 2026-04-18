@@ -1690,7 +1690,17 @@ export default function YoutubePlayerScreen() {
 
       {/* ── 플레이어 ──────────────────────────────────────────────────────── */}
       <View style={isLandscape
-        ? [StyleSheet.absoluteFillObject, { zIndex: 1 }]
+        ? {
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            zIndex: 1,
+            backgroundColor: '#000',
+            justifyContent: 'center',
+            alignItems: 'center',
+          }
         : [styles.playerWrap, { height: playerHeight }]}>
         <YouTubePlayer
           ref={ytPlayerRef}

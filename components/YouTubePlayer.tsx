@@ -382,6 +382,7 @@ export const YouTubePlayer = React.forwardRef<
       <YoutubePlayer
         ref={playerRef}
         height={height}
+        width={isFullscreen ? height * (16 / 9) : undefined}
         videoId={videoId}
         play={isPlaying}
         playbackRate={currentRate}
@@ -485,7 +486,7 @@ export const YouTubePlayer = React.forwardRef<
 
 // ── 스타일 ────────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
-  container: { width: "100%", backgroundColor: "#000", overflow: "hidden" },
+  container: { backgroundColor: "#000", overflow: "hidden" },
   loadingOverlay: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: "#000",
