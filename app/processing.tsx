@@ -9,6 +9,7 @@ import {
   ScrollView,
   Alert,
   Animated,
+  Easing,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { router } from "expo-router";
@@ -168,6 +169,230 @@ const rowStyles = StyleSheet.create({
   },
   subLabel: { color: "#666", fontSize: 11, flex: 1 },
   timeText:  { color: "#444", fontSize: 11, textAlign: "right" },
+});
+
+// ── SmoothProgressBar ─────────────────────────────────────────────────────────
+
+type SmoothMode = 'heartbeat' | 'tween' | 'stuck' | 'done' | 'error';
+
+interface SmoothProgressBarProps {
+  percent: number;
+  step:    string;
+  isDone:  boolean;
+}
+
+function SmoothProgressBar({ percent, step, isDone }: SmoothProgressBarProps) {
+  const smoothAnim      = useRef(new Animated.Value(0)).current;
+  const smoothRef       = useRef(0);
+  const [smoothDisplay, setSmoothDisplay] = useState(0);
+  const [isStuck, setIsStuck]             = useState(false);
+  const isStuckRef      = useRef(false);
+  const animRunningRef  = useRef(false);
+  const bridgeActiveRef = useRef(false); // true during 150ms heartbeat→tween bridge
+  const heartbeatRef    = useRef<ReturnType<typeof setInterval> | null>(null);
+  const stuckTimerRef   = useRef<ReturnType<typeof setTimeout>  | null>(null);
+  const animRef         = useRef<Animated.CompositeAnimation    | null>(null);
+  const stepRef         = useRef(step);
+  const prevModeRef     = useRef<SmoothMode>('tween');
+
+  // addListener: single writer of smoothRef.current
+  useEffect(() => {
+    const id = smoothAnim.addListener(({ value }) => { smoothRef.current = value; });
+    return () => smoothAnim.removeListener(id);
+  }, [smoothAnim]);
+
+  // Sync animated value → display text at ~5 fps to avoid 60fps re-renders
+  useEffect(() => {
+    const syncId = setInterval(() => {
+      const v = Math.round(smoothRef.current);
+      setSmoothDisplay(prev => prev === v ? prev : v);
+    }, 200);
+    return () => clearInterval(syncId);
+  }, []);
+
+  // Main scheduler
+  useEffect(() => {
+    stepRef.current = step;
+
+    const setSmooth = (v: number) => {
+      smoothAnim.setValue(v);
+      // smoothRef.current is updated by the addListener callback — do NOT write here
+    };
+    const clearHB = () => {
+      if (heartbeatRef.current !== null) { clearInterval(heartbeatRef.current); heartbeatRef.current = null; }
+    };
+    const startHB = (cap: number) => {
+      if (heartbeatRef.current !== null) return;
+      heartbeatRef.current = setInterval(() => {
+        const cur = smoothRef.current;
+        if (cur < cap) setSmooth(Math.min(cur + 0.4, cap));
+      }, 500);
+    };
+    const runTween = (target: number, dur: number, onDone?: () => void) => {
+      animRef.current?.stop();
+      animRef.current = null;
+      animRunningRef.current = true; // LOCK
+      const a = Animated.timing(smoothAnim, {
+        toValue:         target,
+        duration:        dur,
+        easing:          Easing.out(Easing.cubic),
+        useNativeDriver: false,
+      });
+      animRef.current = a;
+      a.start(({ finished }) => {
+        animRunningRef.current = false; // UNLOCK
+        // smoothRef.current is already synced by listener — no manual write needed
+        if (finished) onDone?.();
+      });
+    };
+
+    const executeMode = (mode: SmoothMode, pct: number, pm: SmoothMode) => {
+      // Fix 1: gate ALL modes except done/error when animation is running
+      if (animRunningRef.current && mode !== 'done' && mode !== 'error') return;
+
+      switch (mode) {
+        case 'done': {
+          bridgeActiveRef.current = false;
+          clearHB();
+          animRef.current?.stop(); animRef.current = null;
+          animRunningRef.current = false;
+          if (stuckTimerRef.current) { clearTimeout(stuckTimerRef.current); stuckTimerRef.current = null; }
+          isStuckRef.current = false;
+          setIsStuck(false);
+          setSmooth(100);
+          break;
+        }
+        case 'error': {
+          bridgeActiveRef.current = false;
+          clearHB();
+          animRef.current?.stop(); animRef.current = null;
+          animRunningRef.current = false;
+          if (stuckTimerRef.current) { clearTimeout(stuckTimerRef.current); stuckTimerRef.current = null; }
+          isStuckRef.current = false;
+          setIsStuck(false);
+          break;
+        }
+        case 'heartbeat': {
+          animRef.current?.stop(); animRef.current = null;
+          animRunningRef.current = false;
+          startHB(17);
+          break;
+        }
+        case 'stuck': {
+          const cap = pct === 0 ? 17 : Math.min(pct + 20, 95);
+          if (heartbeatRef.current === null) startHB(cap);
+          break;
+        }
+        case 'tween': {
+          if (bridgeActiveRef.current) return; // Fix 3: bridge lock — yield entirely if bridge in progress
+          clearHB();
+          const comingFromHeartbeat = pm === 'heartbeat' || pm === 'stuck';
+          if (smoothRef.current > pct + 20) {
+            // Overshoot guard: snap to within 20 pp then tween
+            runTween(pct, 200);
+            break;
+          }
+          const duration = stepRef.current === 'translating' ? 1200 : 800;
+          if (comingFromHeartbeat) {
+            bridgeActiveRef.current = true; // LOCK bridge
+            runTween(smoothRef.current, 150, () => {
+              bridgeActiveRef.current = false; // UNLOCK bridge
+              runTween(pct, duration);
+            });
+          } else {
+            runTween(pct, duration);
+          }
+          break;
+        }
+      }
+    };
+
+    const deriveModeFromState = (): SmoothMode => {
+      if (isDone || percent >= 100 || step === 'done') return 'done';
+      if (step === 'error') return 'error';
+      if (isStuckRef.current) return 'stuck';
+      if (step === 'translating' && percent === 0) return 'heartbeat';
+      return 'tween';
+    };
+
+    // Stuck recovery: real percent advanced while stuck
+    if (isStuckRef.current && percent > 0) {
+      isStuckRef.current = false;
+      setIsStuck(false);
+    }
+
+    // Execute current mode
+    const mode = deriveModeFromState();
+    executeMode(mode, percent, prevModeRef.current);
+    prevModeRef.current = mode;
+
+    // Stuck detection: reset timer on every update — fires only if nothing changes for 4000 ms
+    if (step === 'translating' && !isStuckRef.current && mode !== 'done' && mode !== 'error') {
+      if (stuckTimerRef.current) { clearTimeout(stuckTimerRef.current); stuckTimerRef.current = null; }
+      stuckTimerRef.current = setTimeout(() => {
+        stuckTimerRef.current = null;
+        isStuckRef.current    = true;
+        setIsStuck(true);
+        const cap = percent === 0 ? 17 : Math.min(percent + 20, 95);
+        if (heartbeatRef.current === null) startHB(cap);
+      }, 4000);
+    } else if (step !== 'translating') {
+      if (stuckTimerRef.current) { clearTimeout(stuckTimerRef.current); stuckTimerRef.current = null; }
+    }
+
+    return () => {
+      bridgeActiveRef.current = false;
+      clearHB();
+      animRef.current?.stop(); animRef.current = null;
+      animRunningRef.current = false;
+      if (stuckTimerRef.current) { clearTimeout(stuckTimerRef.current); stuckTimerRef.current = null; }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [percent, step, isDone]);
+
+  // ── Derived display values ───────────────────────────────────────────────────
+  const isEstimate = (step === 'translating' && percent === 0) || isStuck;
+  const pctText    = isDone
+    ? "100%"
+    : isEstimate
+      ? `~${smoothDisplay}%`
+      : `${smoothDisplay}%`;
+  const statusMsg  = isStuck
+    ? "번역 모델 준비 중… 잠시만 기다려 주세요"
+    : step === 'translating' && smoothDisplay < 5
+      ? "번역 준비 중…"
+      : null;
+
+  return (
+    <View style={styles.overallWrap}>
+      <View style={styles.overallRow}>
+        <Text style={styles.overallLabel}>전체 진행률</Text>
+        <Text style={styles.overallPercent}>{pctText}</Text>
+      </View>
+      <View style={styles.overallTrack}>
+        <Animated.View
+          style={[
+            styles.overallFill,
+            {
+              width: smoothAnim.interpolate({
+                inputRange:  [0, 100],
+                outputRange: ["0%", "100%"],
+                extrapolate: "clamp",
+              }),
+            },
+            isDone && styles.overallFillDone,
+          ]}
+        />
+      </View>
+      {statusMsg !== null && (
+        <Text style={smoothBarStyles.statusMsg}>{statusMsg}</Text>
+      )}
+    </View>
+  );
+}
+
+const smoothBarStyles = StyleSheet.create({
+  statusMsg: { color: "#666", fontSize: 11, marginTop: 2 },
 });
 
 // ── Screen ────────────────────────────────────────────────────────────────────
@@ -522,23 +747,7 @@ export default function ProcessingScreen() {
         {!isError && (
           <>
             {/* ── Overall progress bar ───────────────────────────────────── */}
-            <View style={styles.overallWrap}>
-              <View style={styles.overallRow}>
-                <Text style={styles.overallLabel}>전체 진행률</Text>
-                <Text style={styles.overallPercent}>
-                  {isDone ? 100 : displayPercent}%
-                </Text>
-              </View>
-              <View style={styles.overallTrack}>
-                <View
-                  style={[
-                    styles.overallFill,
-                    { width: `${isDone ? 100 : displayPercent}%` as any },
-                    isDone && styles.overallFillDone,
-                  ]}
-                />
-              </View>
-            </View>
+            <SmoothProgressBar percent={displayPercent} step={effStep} isDone={isDone} />
 
             {/* ── Stage list ─────────────────────────────────────────────── */}
             <View style={styles.stageCard}>

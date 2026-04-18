@@ -267,6 +267,11 @@ export default function YoutubePlayerScreen() {
   const animFrameRef    = useRef<number | null>(null);
   const animTargetRef   = useRef(0);
 
+  // BG smooth progress interpolation
+  const displayedPctRef = useRef(0);
+  const rafIdRef        = useRef<number | null>(null);
+  const heartbeatRef    = useRef<ReturnType<typeof setInterval> | null>(null);
+
   // FG remaining-time estimation refs
   const batchStartTimeRef   = useRef<number>(0);
   const lastCompletedRef    = useRef<number>(0);
@@ -322,6 +327,7 @@ export default function YoutubePlayerScreen() {
   const [translatedCount,  setTranslatedCount]   = useState(0);
   const [remainingSecs,    setRemainingSecs]      = useState<number | null>(null);
   const [bgRemainingSecs,  setBgRemainingSecs]    = useState<number | null>(null);
+  const [displayedPct,     setDisplayedPct]       = useState(0);
   // [FIX BUG2] Guards the save button — true only when a translation or BG result
   // has fully completed in the current screen session.  Prevents premature save
   // button appearance on cache-restore before BG state is confirmed.
@@ -553,6 +559,74 @@ export default function YoutubePlayerScreen() {
     }
   }, [bgStatus, isBgRunning]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── BG progress: react to real progress updates ───────────────────────────
+  useEffect(() => {
+    const target = bgStatus?.progress ?? 0;
+    if (target <= displayedPctRef.current) return;
+    bgAnimateTo(target, 800);
+  }, [bgStatus?.progress, bgAnimateTo]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── BG progress: heartbeat nudge between batch callbacks ─────────────────
+  useEffect(() => {
+    if (heartbeatRef.current) clearInterval(heartbeatRef.current);
+
+    const status = bgStatus?.status;
+    if (!status || status === 'done' || status === 'error' || status === 'idle') return;
+
+    heartbeatRef.current = setInterval(() => {
+      const realProgress = bgStatusRef.current?.progress ?? 0;
+      const cap = Math.max(0, realProgress - 0.02);
+      if (displayedPctRef.current < cap) {
+        const next = Math.min(displayedPctRef.current + 0.012, cap);
+        displayedPctRef.current = next;
+        setDisplayedPct(next);
+      }
+    }, 600);
+
+    return () => {
+      if (heartbeatRef.current) {
+        clearInterval(heartbeatRef.current);
+        heartbeatRef.current = null;
+      }
+    };
+  }, [bgStatus?.status]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── BG progress: done / error / idle transitions ──────────────────────────
+  useEffect(() => {
+    if (bgStatus?.status === 'done') {
+      if (heartbeatRef.current) {
+        clearInterval(heartbeatRef.current);
+        heartbeatRef.current = null;
+      }
+      if (rafIdRef.current !== null) {
+        cancelAnimationFrame(rafIdRef.current);
+        rafIdRef.current = null;
+      }
+      bgAnimateTo(1, 350, { ignoreCap: true });
+    }
+
+    if (bgStatus?.status === 'error' || bgStatus?.status === 'idle') {
+      if (heartbeatRef.current) {
+        clearInterval(heartbeatRef.current);
+        heartbeatRef.current = null;
+      }
+      if (rafIdRef.current !== null) {
+        cancelAnimationFrame(rafIdRef.current);
+        rafIdRef.current = null;
+      }
+      displayedPctRef.current = 0;
+      setDisplayedPct(0);
+    }
+  }, [bgStatus?.status, bgAnimateTo]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── BG progress: unmount cleanup ─────────────────────────────────────────
+  useEffect(() => {
+    return () => {
+      if (rafIdRef.current !== null) cancelAnimationFrame(rafIdRef.current);
+      if (heartbeatRef.current) clearInterval(heartbeatRef.current);
+    };
+  }, []);
+
   // ── BUG 4: bgResultApplied reset on videoId change ─────────────────────────
   // Must run BEFORE handlePlayerReady fires and BEFORE the restore effect below.
   // React runs effects in definition order for the same dep, so place this first.
@@ -743,6 +817,62 @@ export default function YoutubePlayerScreen() {
       requestAnimationFrame(crawlFrame);
     };
     requestAnimationFrame(crawlFrame);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── BG smooth progress bar ────────────────────────────────────────────────
+  const bgAnimateTo = useCallback((
+    targetFraction: number,
+    durationMs: number,
+    options?: { ignoreCap?: boolean },
+  ) => {
+    if (rafIdRef.current !== null) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+    }
+
+    const real          = bgStatusRef.current?.progress ?? 0;
+    const clampedTarget = options?.ignoreCap
+      ? targetFraction
+      : Math.min(targetFraction, real + 0.03);
+
+    const start = displayedPctRef.current;
+    const diff  = clampedTarget - start;
+    if (Math.abs(diff) < 0.001) return;
+
+    const startTime = performance.now();
+
+    const frame = (now: number) => {
+      if (Math.abs(clampedTarget - displayedPctRef.current) < 0.001) {
+        displayedPctRef.current = clampedTarget;
+        setDisplayedPct(clampedTarget);
+        rafIdRef.current = null;
+        return;
+      }
+
+      const elapsed = now - startTime;
+      const t       = Math.min(elapsed / durationMs, 1);
+      const eased   = 1 - Math.pow(1 - t, 3); // ease-out cubic
+
+      const currentReal = bgStatusRef.current?.progress ?? 0;
+      const maxAllowed  = options?.ignoreCap
+        ? clampedTarget
+        : Math.min(clampedTarget, currentReal + 0.03);
+
+      const next = Math.min(start + diff * eased, maxAllowed);
+
+      if (next > displayedPctRef.current) {
+        displayedPctRef.current = next;
+        setDisplayedPct(next);
+      }
+
+      if (t < 1) {
+        rafIdRef.current = requestAnimationFrame(frame);
+      } else {
+        rafIdRef.current = null;
+      }
+    };
+
+    rafIdRef.current = requestAnimationFrame(frame);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── 번역 파이프라인 ──────────────────────────────────────────────────────
@@ -1678,7 +1808,7 @@ export default function YoutubePlayerScreen() {
       {!isLandscape && isBgRunning && (
         <Animated.View style={[progressCard.card, { opacity: bannerOpacity }]}>
           <Text style={progressCard.pct}>
-            {Math.round((bgStatus?.progress ?? 0) * 100)}%
+            {Math.round(displayedPct * 100)}%
           </Text>
           <View style={{ flex: 1 }}>
             <Text style={progressCard.title}>백그라운드 번역 진행 중</Text>
@@ -1755,7 +1885,7 @@ export default function YoutubePlayerScreen() {
                   style={[
                     styles.progressBarFillFull,
                     {
-                      width: `${Math.min(barProgress * 100, 100)}%` as any,
+                      width: `${Math.min((isBgRunning ? displayedPct : barProgress) * 100, 100)}%` as any,
                       backgroundColor: getBarColor(),
                     },
                   ]}
