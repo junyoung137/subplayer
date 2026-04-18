@@ -1040,11 +1040,6 @@ export default function HomeScreen() {
     <View style={styles.container}>
       <View style={{ flex: 1, justifyContent: "space-between" }}>
 
-      {/* Hero */}
-      <View style={styles.hero}>
-        <Text style={styles.appName}>RealtimeSub</Text>
-        <Text style={styles.tagline}>실시간 AI 자막 · 완전 무료</Text>
-      </View>
 
       {/* File open button — 이제 UrlInputModal을 통해 열림 */}
       <TouchableOpacity 
@@ -1439,7 +1434,7 @@ export default function HomeScreen() {
 // ── Styles ────────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#0a0a0a", padding: 20 },
+  container: { flex: 1, backgroundColor: "#0a0a0a", padding: 20, paddingTop: 8 },
 
   hero: { alignItems: "center", paddingVertical: 8 },
   appName: { color: "#fff", fontSize: 32, fontWeight: "bold" },
@@ -1449,6 +1444,7 @@ const styles = StyleSheet.create({
     backgroundColor: "#1e1e1e",
     borderRadius: 16,
     padding: 16,
+    marginTop: 8,
     alignItems: "center",
     borderWidth: 1,
     borderColor: "#333",
