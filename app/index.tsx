@@ -306,8 +306,8 @@ function FileThumbnail({
 
 const thumbStyles = StyleSheet.create({
   wrap: {
-    width: 80,
-    height: 52,
+    width: 64,
+    height: 42,
     borderRadius: 8,
     backgroundColor: "#1a1a1a",
     alignItems: "center",
@@ -1038,6 +1038,7 @@ export default function HomeScreen() {
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <View style={styles.container}>
+      <View style={{ flex: 1, justifyContent: "space-between" }}>
 
       {/* Hero */}
       <View style={styles.hero}>
@@ -1265,6 +1266,8 @@ export default function HomeScreen() {
               keyExtractor={(item) => item.uri}
               renderItem={renderFileItem}
               showsVerticalScrollIndicator={false}
+              style={{ flex: 1 }}
+              nestedScrollEnabled={true}
             />
           )}
         </View>
@@ -1278,7 +1281,7 @@ export default function HomeScreen() {
       )}
 
       {/* Bottom nav */}
-      <View style={[styles.navButtons, { paddingBottom: 16 + insets.bottom }]}>
+      <View style={[styles.navButtons, { paddingBottom: insets.bottom }]}>
         <TouchableOpacity style={styles.navBtn} onPress={() => router.push("/models")}>
           <Text style={styles.navBtnText}>🤖 모델 관리</Text>
         </TouchableOpacity>
@@ -1286,6 +1289,8 @@ export default function HomeScreen() {
           <Text style={styles.navBtnText}>⚙️ 설정</Text>
         </TouchableOpacity>
       </View>
+
+      </View>{/* end flex space-between wrapper */}
 
       {/* ── Modals ────────────────────────────────────────────────────────── */}
       <LangSetupModal visible={langModalVisible} onConfirm={goToProcessing} onCancel={handleCancelModal} />
@@ -1436,14 +1441,14 @@ export default function HomeScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#0a0a0a", padding: 20 },
 
-  hero: { alignItems: "center", paddingVertical: 20 },
+  hero: { alignItems: "center", paddingVertical: 8 },
   appName: { color: "#fff", fontSize: 32, fontWeight: "bold" },
   tagline: { color: "#888", fontSize: 14, marginTop: 4 },
 
   pickButton: {
     backgroundColor: "#1e1e1e",
     borderRadius: 16,
-    padding: 24,
+    padding: 16,
     alignItems: "center",
     borderWidth: 1,
     borderColor: "#333",
@@ -1454,14 +1459,14 @@ const styles = StyleSheet.create({
   pickSub: { color: "#666", fontSize: 12, marginTop: 4 },
 
   // ── Recently played ─────────────────────────────────────────────────────────
-  recentPlaySection: { marginTop: 16 },
-  recentPlayTitle: { color: "#666", fontSize: 12, fontWeight: "600", letterSpacing: 0.5, marginBottom: 8 },
+  recentPlaySection: { marginTop: 4 },
+  recentPlayTitle: { color: "#666", fontSize: 11, fontWeight: "600", letterSpacing: 0.5, marginBottom: 4 },
   recentPlayRow: { flexDirection: "row", gap: 10 },
-  recentPlayCard: { width: 80, gap: 5 },
+  recentPlayCard: { width: 64, gap: 3 },
   recentPlayName: { color: "#888", fontSize: 10, lineHeight: 13 },
 
   // ── Search ──────────────────────────────────────────────────────────────────
-  searchRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 14 },
+  searchRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 8 },
   searchBar: {
     flex: 1,
     flexDirection: "row",
@@ -1503,7 +1508,7 @@ const styles = StyleSheet.create({
   sortBtnText: { fontSize: 18 },
 
   // ── Category tabs ───────────────────────────────────────────────────────────
-  catBarWrap: { marginTop: 14 },
+  catBarWrap: { marginTop: 8 },
   catBar: { flexDirection: "row", gap: 8, paddingBottom: 4 },
   catTab: {
     paddingHorizontal: 14,
@@ -1575,12 +1580,12 @@ const styles = StyleSheet.create({
   multiBtnText: { color: "#fff", fontSize: 12, fontWeight: "600" },
 
   // ── File list ───────────────────────────────────────────────────────────────
-  recentSection: { marginTop: 14, flex: 1 },
+  recentSection: { marginTop: 4, flex: 2 },
   sectionHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    marginBottom: 10,
+    marginBottom: 6,
   },
   sectionTitle: { color: "#aaa", fontSize: 13, fontWeight: "600", letterSpacing: 0.5 },
   fileCount: { color: "#555", fontWeight: "400" },
@@ -1635,7 +1640,7 @@ const styles = StyleSheet.create({
   emptyText: { color: "#444", fontSize: 14 },
   emptyHint: { color: "#333", fontSize: 12 },
 
-  navButtons: { flexDirection: "row", gap: 12, marginTop: "auto", paddingTop: 16 },
+  navButtons: { flexDirection: "row", gap: 12, paddingTop: 8 },
   navBtn: {
     flex: 1,
     backgroundColor: "#1a1a1a",
