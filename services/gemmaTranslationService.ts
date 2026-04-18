@@ -538,7 +538,7 @@ export async function loadModel(onProgress?: (fraction: number) => void): Promis
         // use_mlock: false — do NOT pin model pages in RAM.
         // use_mlock: true caused Android OOM kills during model load: the OS could
         // not page out the ~1.5 GB allocation and the OOM killer terminated the process.
-        { model: modelPath, n_threads: getInferenceThreadCount(), n_gpu_layers: 0, n_ctx: 4096, use_mlock: false },
+        { model: modelPath, n_threads: getInferenceThreadCount(), n_gpu_layers: 0, n_ctx: 2000, use_mlock: false }, // increased from 1000 — provides additional headroom for longer prompts without reverting to 4096 waste
         onProgress ? (p: number) => onProgress(p / 100) : undefined
       );
       console.log("[Gemma] Model loaded.");
@@ -2204,8 +2204,6 @@ export async function translateSegments(
         n_predict: applyThermalNPredict(batch.length * 80),
         temperature: 0.1,
         top_p: 0.9,
-        top_k: 40,
-        repeat_penalty: 1.1,
         stop: ["</s>", "<end_of_turn>", "<|end|>"],
       } as any);
 
@@ -2341,8 +2339,6 @@ export async function translateSegments(
         n_predict: applyThermalNPredict(retryGroups.length * 80),
         temperature: 0.1,
         top_p: 0.9,
-        top_k: 40,
-        repeat_penalty: 1.1,
         stop: ["</s>", "<end_of_turn>", "<|end|>"],
       } as any);
       if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
