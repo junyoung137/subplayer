@@ -813,7 +813,7 @@ export default function HomeScreen() {
   }, []);
 
   // ── 새 핸들러: 로컬 파일 선택 후 처리 ─────────────────────────────────────
-  const handleLocalFilePicked = async (stableUri: string, name: string) => {
+  const handleLocalFilePicked = async (stableUri: string, name: string, genre: string) => {
     const fileSize = await getFileSize(stableUri);
     const thumbUri = (await fetchThumbnail(stableUri, undefined)) ?? undefined;
     const autoCategory =
@@ -835,6 +835,7 @@ export default function HomeScreen() {
       const filtered = prev.filter((f) => f.uri !== stableUri);
       return [entry, ...filtered].slice(0, 50);
     });
+    setPendingGenre(genre);
     setVideo(stableUri, name);
     pendingFileRef.current = { uri: stableUri, name };
     setLangModalVisible(true); // 기존 언어 선택 모달 그대로 사용

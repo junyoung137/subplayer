@@ -50,7 +50,7 @@ interface UrlInputModalProps {
   visible: boolean;
   onClose: () => void;
   /** 로컬 파일 선택 완료 시 — 기존 플로우와 동일하게 langModal 표시 */
-  onLocalFilePicked: (uri: string, name: string) => void;
+  onLocalFilePicked: (uri: string, name: string, genre: string) => void;
   /** YouTube/URL 선택 완료 시 — player로 바로 이동 */
   onUrlPicked: (videoId: string, title: string, isYoutube: boolean, genre?: string) => void;
 }
@@ -101,7 +101,7 @@ export function UrlInputModal({
         return;
       }
       onClose();
-      onLocalFilePicked(stableUri, file.name);
+      onLocalFilePicked(stableUri, file.name, selectedGenre);
     } catch (e) {
       Alert.alert(t("url.error"), t("url.fileOpenError") + String(e));
     } finally {
@@ -185,6 +185,38 @@ export function UrlInputModal({
           {/* ── 로컬 탭 ──────────────────────────────────────────────────── */}
           {activeTab === "local" && (
             <View style={styles.tabContent}>
+
+              {/* Genre selector — same as URL tab */}
+              <View style={styles.genreSection}>
+                <Text style={styles.genreLabel}>{t("genre.sectionTitle")}</Text>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.genreRow}
+                >
+                  {GENRE_OPTIONS.map((g) => (
+                    <TouchableOpacity
+                      key={g.key}
+                      style={[
+                        styles.genrePill,
+                        selectedGenre === g.key && styles.genrePillActive,
+                      ]}
+                      onPress={() => setSelectedGenre(g.key)}
+                    >
+                      <Text
+                        style={[
+                          styles.genrePillText,
+                          selectedGenre === g.key && styles.genrePillTextActive,
+                        ]}
+                      >
+                        {g.label}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              </View>
+
+              {/* Existing file pick button — unchanged */}
               <TouchableOpacity
                 style={styles.bigPickBtn}
                 onPress={pickLocalFile}
@@ -201,6 +233,7 @@ export function UrlInputModal({
                   </>
                 )}
               </TouchableOpacity>
+
             </View>
           )}
 
