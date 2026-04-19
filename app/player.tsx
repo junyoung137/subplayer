@@ -15,6 +15,7 @@ import {
   Alert,
 } from "react-native";
 import { router } from "expo-router";
+import { useTranslation } from "react-i18next";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as FileSystem from "expo-file-system/legacy";
 import { usePlayerStore } from "../store/usePlayerStore";
@@ -65,6 +66,7 @@ export default function PlayerScreen() {
   const targetLanguage = useSettingsStore((s) => s.targetLanguage);
   const update         = useSettingsStore((s) => s.update);
 
+  const { t } = useTranslation();
   const { isRetranslating, retranslate, cancelRetranslation } = useRetranslate();
 
   const [langModalVisible,     setLangModalVisible]     = useState(false);
@@ -84,7 +86,7 @@ export default function PlayerScreen() {
     update({ subtitleMode: modes[(modes.indexOf(subtitleMode as any) + 1) % modes.length] });
   };
 
-  const modeLabel = { both: "원문+번역", original: "원문만", translation: "번역만" }[subtitleMode];
+  const modeLabel = { both: t("player.both"), original: t("player.original"), translation: t("player.translation") }[subtitleMode];
 
   useEffect(() => {
     StatusBar.setHidden(isLandscape || isFullscreen, "slide");
@@ -127,7 +129,7 @@ export default function PlayerScreen() {
         setTimeout(() => setCaptureSuccess(false), 1800);
       }
     } catch (e) {
-      Alert.alert("캡처 실패", "현재 프레임을 캡처할 수 없습니다.\n" + String(e));
+      Alert.alert(t("player.captureFailed"), "현재 프레임을 캡처할 수 없습니다.\n" + String(e));
     } finally {
       setIsCapturing(false);
     }
@@ -185,7 +187,7 @@ export default function PlayerScreen() {
       <TouchableOpacity onPress={() => router.back()} style={styles.headerBtn}>
         <Text style={styles.headerBtnText}>←</Text>
       </TouchableOpacity>
-      <Text style={styles.lsTitle} numberOfLines={1}>{videoName ?? "동영상"}</Text>
+      <Text style={styles.lsTitle} numberOfLines={1}>{videoName ?? t("player.video")}</Text>
       <TouchableOpacity onPress={() => router.push("/settings")} style={styles.headerBtn}>
         <Text style={styles.headerBtnText}>⚙</Text>
       </TouchableOpacity>
@@ -223,7 +225,7 @@ export default function PlayerScreen() {
     >
       <Pressable style={styles.modalBackdrop} onPress={() => setLangModalVisible(false)}>
         <Pressable style={styles.modalSheet} onPress={() => {}}>
-          <Text style={styles.modalTitle}>번역 언어 선택</Text>
+          <Text style={styles.modalTitle}>{t("player.selectLang")}</Text>
           <ScrollView>
             {LANGUAGES.map((lang) => (
               <TouchableOpacity
@@ -272,7 +274,7 @@ export default function PlayerScreen() {
         {/* Capture success toast */}
         {captureSuccess && (
           <View style={styles.captureToast} pointerEvents="none">
-            <Text style={styles.captureToastText}>📷 썸네일로 저장됨</Text>
+            <Text style={styles.captureToastText}>{t("player.thumbnailSaved")}</Text>
           </View>
         )}
         {langModal}
@@ -296,7 +298,7 @@ export default function PlayerScreen() {
           <Text style={styles.headerBtnText}>←</Text>
         </TouchableOpacity>
         <Text style={styles.title} numberOfLines={1}>
-          {videoName ?? "동영상"}
+          {videoName ?? t("player.video")}
         </Text>
         <TouchableOpacity onPress={() => router.push("/settings")} style={styles.headerBtn}>
           <Text style={styles.headerBtnText}>⚙</Text>
@@ -370,7 +372,7 @@ export default function PlayerScreen() {
       {/* Capture success toast */}
       {captureSuccess && (
         <View style={styles.captureToast} pointerEvents="none">
-          <Text style={styles.captureToastText}>📷 썸네일로 저장됨</Text>
+          <Text style={styles.captureToastText}>{t("player.thumbnailSaved")}</Text>
         </View>
       )}
 

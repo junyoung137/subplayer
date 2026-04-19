@@ -29,11 +29,12 @@ export default function SettingsScreen() {
   ] as const;
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+    <ScrollView style={styles.container} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
 
       {/* ── Interface language ──────────────────────────────────────────────── */}
-      <Section title={t("settings.languageSection")}>
-        <View style={[styles.row, { flex: 1, alignItems: "center" }]}>
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>{t("settings.languageSection")}</Text>
+        <View style={styles.row}>
           <Text style={styles.rowLabel}>{t("settings.displayLanguage")}</Text>
           <TouchableOpacity
             style={styles.dropdown}
@@ -45,7 +46,7 @@ export default function SettingsScreen() {
             <Text style={styles.dropdownArrow}>▾</Text>
           </TouchableOpacity>
         </View>
-      </Section>
+      </View>
 
       {/* ── Audio chunk duration ─────────────────────────────────────────────── */}
       <Section title={t("settings.audioChunkDuration")}>
@@ -67,7 +68,7 @@ export default function SettingsScreen() {
       {/* ── Subtitle appearance ──────────────────────────────────────────────── */}
       <Section title={t("settings.subtitleStyleSection")}>
 
-        {/* 자막 스타일 종류 선택 */}
+        {/* Sub 스타일 종류 선택 */}
         <Text style={styles.subLabel}>{t("settings.subtitleDesign")}</Text>
         <View style={styles.styleCardRow}>
           {subtitleStyles.map((s) => {
@@ -82,16 +83,16 @@ export default function SettingsScreen() {
                 {/* 미리보기 */}
                 <View style={styles.stylePreview}>
                   {s.key === "outline" && (
-                    <Text style={styles.previewOutline}>자막</Text>
+                    <Text style={styles.previewOutline}>Sub</Text>
                   )}
                   {s.key === "pill" && (
                     <View style={styles.previewPillBox}>
-                      <Text style={styles.previewPillText}>자막</Text>
+                      <Text style={styles.previewPillText}>Sub</Text>
                     </View>
                   )}
                   {s.key === "bar" && (
                     <View style={styles.previewBarBox}>
-                      <Text style={styles.previewBarText}>자막</Text>
+                      <Text style={styles.previewBarText}>Sub</Text>
                     </View>
                   )}
                 </View>
@@ -130,29 +131,20 @@ export default function SettingsScreen() {
           />
         </Row>
 
-        <Row label={t("settings.showOriginal")}>
-          <Switch
-            value={settings.showOriginal}
-            onValueChange={(v) => update({ showOriginal: v })}
-            trackColor={{ true: "#2563eb" }}
-          />
-        </Row>
-
-        <Row label={t("settings.subtitleMode")}>
-          <View style={styles.chipRow}>
-            {(["both", "translation", "original"] as const).map((mode) => (
-              <TouchableOpacity
-                key={mode}
-                style={[styles.chip, settings.subtitleMode === mode && styles.chipActive]}
-                onPress={() => update({ subtitleMode: mode })}
-              >
-                <Text style={[styles.chipText, settings.subtitleMode === mode && styles.chipTextActive]}>
-                  {mode === "both" ? t("settings.both") : mode === "translation" ? t("settings.translationOnly") : t("settings.originalOnly")}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        </Row>
+        <View style={{ gap: 6 }}>
+          <Text style={styles.subLabel}>{t("settings.subtitleMode")}</Text>
+          {(["both", "translation", "original"] as const).map((mode) => (
+            <TouchableOpacity
+              key={mode}
+              style={[styles.modeBtn, settings.subtitleMode === mode && styles.modeBtnActive]}
+              onPress={() => update({ subtitleMode: mode })}
+            >
+              <Text style={[styles.modeBtnText, settings.subtitleMode === mode && styles.modeBtnTextActive]}>
+                {mode === "both" ? t("settings.both") : mode === "translation" ? t("settings.translationOnly") : t("settings.originalOnly")}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
       </Section>
 
       {/* ── Timing offset ────────────────────────────────────────────────────── */}
@@ -247,10 +239,8 @@ const styles = StyleSheet.create({
     backgroundColor: "#141414",
     borderRadius: 12,
     padding: 16,
-    gap: 8,
+    gap: 4,
     marginBottom: 12,
-    justifyContent: "center",
-    minHeight: 80,
   },
   sectionTitle: {
     color: "#888",
@@ -432,6 +422,11 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   supportBtnText: { color: "#60a5fa", fontSize: 15, fontWeight: "600" },
+
+  modeBtn:         { backgroundColor: "#222", borderRadius: 10, paddingVertical: 8, paddingHorizontal: 16, alignItems: "center" },
+  modeBtnActive:   { backgroundColor: "#2563eb" },
+  modeBtnText:     { color: "#aaa", fontSize: 14 },
+  modeBtnTextActive: { color: "#fff", fontWeight: "600" },
 
   hint:     { color: "#555", fontSize: 11, marginTop: 2 },
   hintOk:   { color: "#22c55e" },

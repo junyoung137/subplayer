@@ -51,6 +51,7 @@ import {
 } from "react-native";
 import * as ScreenOrientation from "expo-screen-orientation";
 import { router } from "expo-router";
+import { useTranslation } from "react-i18next";
 import { useNavigation } from "@react-navigation/native";
 import { usePlayerStore } from "../store/usePlayerStore";
 import { useSettingsStore } from "../store/useSettingsStore";
@@ -226,6 +227,7 @@ export default function YoutubePlayerScreen() {
   const update         = useSettingsStore((s) => s.update);
 
   // ── 훅 ───────────────────────────────────────────────────────────────────
+  const { t } = useTranslation();
   const { loaded: modelLoaded } = useWhisperModel();
   const {
     status: whisperStatus,
@@ -1430,9 +1432,9 @@ export default function YoutubePlayerScreen() {
     update({ subtitleMode: next });
   };
   const modeLabel: Record<string, string> = {
-    both:        "원문+번역",
-    original:    "원문만",
-    translation: "번역만",
+    both:        t("player.both"),
+    original:    t("player.original"),
+    translation: t("player.translation"),
   };
 
   // ── 시크 ─────────────────────────────────────────────────────────────────
@@ -1762,7 +1764,7 @@ export default function YoutubePlayerScreen() {
           </Text>
           <View style={{ flex: 1 }}>
             <Text style={progressCard.title}>
-              {displayPhase === 'fetching' ? '자막 불러오는 중' : '번역 진행 중'}
+              {displayPhase === 'fetching' ? t("player.loadingSubtitles") : t("player.translatingProgress")}
             </Text>
             <Text style={progressCard.sub} numberOfLines={1}>
               {isStale
@@ -1783,7 +1785,7 @@ export default function YoutubePlayerScreen() {
             )}
           </View>
           <TouchableOpacity onPress={handleCancelFetch} style={progressCard.cancelBtn}>
-            <Text style={progressCard.cancelBtnText}>중지</Text>
+            <Text style={progressCard.cancelBtnText}>{t("player.stop")}</Text>
           </TouchableOpacity>
         </View>
       )}
@@ -1813,7 +1815,7 @@ export default function YoutubePlayerScreen() {
             {getSubtitleStatusLabel(displayPhase, subtitleProgress)}
           </Text>
           <TouchableOpacity onPress={handleRetrySubtitles} style={pillStyles.retryBtn}>
-            <Text style={pillStyles.retryBtnText}>재시도</Text>
+            <Text style={pillStyles.retryBtnText}>{t("common.retry")}</Text>
           </TouchableOpacity>
         </View>
       )}
@@ -1825,7 +1827,7 @@ export default function YoutubePlayerScreen() {
             {Math.round(displayedPct * 100)}%
           </Text>
           <View style={{ flex: 1 }}>
-            <Text style={progressCard.title}>백그라운드 번역 진행 중</Text>
+            <Text style={progressCard.title}>{t("player.bgTranslating")}</Text>
             <Text style={progressCard.sub} numberOfLines={1}>
               {(() => {
                 const p = bgStatus?.progress ?? 0;
@@ -1849,7 +1851,7 @@ export default function YoutubePlayerScreen() {
             )}
           </View>
           <TouchableOpacity onPress={cancelTranslation} style={progressCard.cancelBtn}>
-            <Text style={progressCard.cancelBtnText}>취소</Text>
+            <Text style={progressCard.cancelBtnText}>{t("common.cancel")}</Text>
           </TouchableOpacity>
         </Animated.View>
       )}
@@ -1858,7 +1860,7 @@ export default function YoutubePlayerScreen() {
         <View style={[progressCard.card, { backgroundColor: '#0a1f0a', borderTopColor: '#22c55e' }]}>
           <Text style={{ fontSize: 16 }}>✅</Text>
           <Text style={[progressCard.title, { color: '#22c55e', marginLeft: 8 }]}>
-            백그라운드 번역 완료!
+            {t("player.bgDone")}
           </Text>
         </View>
       )}
@@ -1869,7 +1871,7 @@ export default function YoutubePlayerScreen() {
             ❌ {bgStatus.error ?? '번역 실패'}
           </Text>
           <TouchableOpacity onPress={handleSendToBackground} style={progressCard.cancelBtn}>
-            <Text style={progressCard.cancelBtnText}>재시도</Text>
+            <Text style={progressCard.cancelBtnText}>{t("common.retry")}</Text>
           </TouchableOpacity>
         </View>
       )}
@@ -1993,7 +1995,7 @@ export default function YoutubePlayerScreen() {
             activeOpacity={0.75}
           >
             <Text style={styles.chipBtnText} numberOfLines={1}>
-              {isBgRunning ? '⏳ 번역 중' : '📲 백그라운드'}
+              {isBgRunning ? t("player.bgInProgress") : t("player.background")}
             </Text>
           </TouchableOpacity>
         )}
@@ -2008,7 +2010,7 @@ export default function YoutubePlayerScreen() {
             ]}
             onPress={() => setSaveModalVisible(true)}
           >
-            <Text style={styles.chipBtnText}>💾 저장</Text>
+            <Text style={styles.chipBtnText}>{t("player.save")}</Text>
           </TouchableOpacity>
         )}
       </View>}
@@ -2022,7 +2024,7 @@ export default function YoutubePlayerScreen() {
       >
         <Pressable style={styles.modalBackdrop} onPress={() => setLangModalVisible(false)}>
           <Pressable style={styles.modalSheet} onPress={() => {}}>
-            <Text style={styles.modalTitle}>번역 언어 선택</Text>
+            <Text style={styles.modalTitle}>{t("player.selectLang")}</Text>
             <ScrollView>
               {LANGUAGES.map((lang) => (
                 <TouchableOpacity
