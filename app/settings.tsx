@@ -33,7 +33,7 @@ export default function SettingsScreen() {
 
       {/* ── Interface language ──────────────────────────────────────────────── */}
       <Section title={t("settings.languageSection")}>
-        <View style={styles.row}>
+        <View style={[styles.row, { flex: 1, alignItems: "center" }]}>
           <Text style={styles.rowLabel}>{t("settings.displayLanguage")}</Text>
           <TouchableOpacity
             style={styles.dropdown}
@@ -169,6 +169,15 @@ export default function SettingsScreen() {
         <Text style={styles.hint}>{t("settings.timingOffsetHint")}</Text>
       </Section>
 
+      {/* ── Support ─────────────────────────────────────────────────────────── */}
+      <TouchableOpacity
+        style={styles.supportBtn}
+        onPress={() => router.push("/support")}
+        activeOpacity={0.8}
+      >
+        <Text style={styles.supportBtnText}>{t("support.settingsBtn")}</Text>
+      </TouchableOpacity>
+
       <Modal
         visible={langDropdownVisible}
         transparent
@@ -232,14 +241,16 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#0a0a0a" },
-  content:   { padding: 16, gap: 8 },
+  content:   { padding: 16, gap: 8, paddingBottom: 40 },
 
   section: {
     backgroundColor: "#141414",
     borderRadius: 12,
     padding: 16,
-    gap: 12,
+    gap: 8,
     marginBottom: 12,
+    justifyContent: "center",
+    minHeight: 80,
   },
   sectionTitle: {
     color: "#888",
@@ -259,6 +270,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
     gap: 12,
+    minHeight: 36,
   },
   rowLabel: { color: "#ccc", fontSize: 14, minWidth: 100, flexShrink: 1 },
 
@@ -366,14 +378,14 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     backgroundColor: "#222",
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
     gap: 8,
     borderWidth: 1,
     borderColor: "#333",
   },
-  dropdownText: { color: "#fff", fontSize: 14, fontWeight: "600" },
+  dropdownText: { color: "#fff", fontSize: 13, fontWeight: "600" },
   dropdownArrow: { color: "#666", fontSize: 12 },
 
   modalBackdrop: {
@@ -409,6 +421,17 @@ const styles = StyleSheet.create({
   modalOptionText: { color: "#fff", fontSize: 15, flex: 1 },
   modalOptionSub: { color: "#555", fontSize: 12 },
   modalCheck: { color: "#2563eb", fontSize: 14, fontWeight: "700" },
+
+  supportBtn: {
+    backgroundColor: "#141414",
+    borderRadius: 12,
+    paddingVertical: 16,
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "#2a2a2a",
+    marginBottom: 12,
+  },
+  supportBtnText: { color: "#60a5fa", fontSize: 15, fontWeight: "600" },
 
   hint:     { color: "#555", fontSize: 11, marginTop: 2 },
   hintOk:   { color: "#22c55e" },

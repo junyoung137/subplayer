@@ -53,6 +53,7 @@ export default function RootLayout() {
         <Stack.Screen name="models"       options={{ title: "모델 관리" }} />
         <Stack.Screen name="gemmaModels"  options={{ title: "Gemma 모델 관리" }} />
         <Stack.Screen name="youtube-player" options={{ headerShown: false }} />
+        <Stack.Screen name="support"        options={{ title: "피드백", headerShown: false }} />
       </Stack>
     </>
   );
