@@ -2,6 +2,7 @@ import "../i18n";
 import { useEffect } from "react";
 import { AppRegistry } from "react-native";
 import { Stack } from "expo-router";
+import { useTranslation } from "react-i18next";
 import { StatusBar } from "expo-status-bar";
 import { useSettingsStore } from "../store/useSettingsStore";
 import { useAppLanguage } from "../i18n/useAppLanguage";
@@ -12,6 +13,7 @@ import { initDB, purgeExpiredCache } from "../services/subtitleDB";
 import { setProxyBaseUrl, PROXY_BASE_URL_DEFAULT } from "../services/youtubeTimedText";
 
 export default function RootLayout() {
+  const { t } = useTranslation();
   const hydrate = useSettingsStore((s) => s.hydrate);
   useAppLanguage();
 
@@ -49,8 +51,8 @@ export default function RootLayout() {
         <Stack.Screen name="index"        options={{ title: "RealtimeSub" }} />
         <Stack.Screen name="processing"   options={{ title: "처리 중",   headerShown: false }} />
         <Stack.Screen name="player"       options={{ title: "플레이어", headerShown: false }} />
-        <Stack.Screen name="settings"     options={{ title: "설정" }} />
-        <Stack.Screen name="models"       options={{ title: "모델 관리" }} />
+        <Stack.Screen name="settings"     options={{ title: t("layout.settings") }} />
+        <Stack.Screen name="models"       options={{ title: t("layout.models") }} />
         <Stack.Screen name="gemmaModels"  options={{ title: "Gemma 모델 관리" }} />
         <Stack.Screen name="youtube-player" options={{ headerShown: false }} />
         <Stack.Screen name="support"        options={{ title: "피드백", headerShown: false }} />

@@ -89,16 +89,6 @@ import {
 
 const SPEEDS = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
 
-const GENRE_OPTIONS = [
-  { key: "general",      label: "일반" },
-  { key: "tech lecture", label: "기술 강의" },
-  { key: "comedy",       label: "코미디" },
-  { key: "news",         label: "뉴스" },
-  { key: "documentary",  label: "다큐멘터리" },
-  { key: "gaming",       label: "게임" },
-  { key: "education",    label: "교육" },
-] as const;
-
 // ── 헬퍼 ─────────────────────────────────────────────────────────────────────
 
 function speedLabel(rate: number): string {
@@ -210,17 +200,24 @@ export default function YoutubePlayerScreen() {
   const { width: screenWidth, height: screenHeight } = useWindowDimensions();
 
   // ── Store ─────────────────────────────────────────────────────────────────
-  const youtubeVideoId = usePlayerStore((s) => s.youtubeVideoId);
-  const videoName      = usePlayerStore((s) => s.videoName);
-  const isPlaying      = usePlayerStore((s) => s.isPlaying);
-  const setPlaying     = usePlayerStore((s) => s.setPlaying);
-  const currentTime    = usePlayerStore((s) => s.currentTime);
-  const duration       = usePlayerStore((s) => s.duration);
-  const subtitles      = usePlayerStore((s) => s.subtitles);
-  const setSubtitles   = usePlayerStore((s) => s.setSubtitles);
-  const clearSubtitles = usePlayerStore((s) => s.clearSubtitles);
-  const setCurrentTime = usePlayerStore((s) => s.setCurrentTime);
-  const bumpSeek       = usePlayerStore((s) => s.bumpSeek);
+  const youtubeVideoId  = usePlayerStore((s) => s.youtubeVideoId);
+  const videoName       = usePlayerStore((s) => s.videoName);
+  const isPlaying       = usePlayerStore((s) => s.isPlaying);
+  const setPlaying      = usePlayerStore((s) => s.setPlaying);
+  const currentTime     = usePlayerStore((s) => s.currentTime);
+  const duration        = usePlayerStore((s) => s.duration);
+  const subtitles       = usePlayerStore((s) => s.subtitles);
+  const setSubtitles    = usePlayerStore((s) => s.setSubtitles);
+  const clearSubtitles  = usePlayerStore((s) => s.clearSubtitles);
+  const setCurrentTime  = usePlayerStore((s) => s.setCurrentTime);
+  const bumpSeek        = usePlayerStore((s) => s.bumpSeek);
+  const setPendingGenre = usePlayerStore((s) => s.setPendingGenre);
+
+  // Read pendingGenre synchronously once — not a hook, safe here.
+  // By the time this component mounts, HomeScreen has already called
+  // setPendingGenre() before router.push(), so the store value is current.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const _initialGenre = usePlayerStore.getState().pendingGenre ?? "general";
 
   const subtitleMode   = useSettingsStore((s) => s.subtitleMode);
   const targetLanguage = useSettingsStore((s) => s.targetLanguage);
@@ -228,6 +225,15 @@ export default function YoutubePlayerScreen() {
 
   // ── 훅 ───────────────────────────────────────────────────────────────────
   const { t } = useTranslation();
+  const GENRE_OPTIONS = [
+    { key: "general",      label: t("genre.general") },
+    { key: "tech lecture", label: t("genre.techLecture") },
+    { key: "comedy",       label: t("genre.comedy") },
+    { key: "news",         label: t("genre.news") },
+    { key: "documentary",  label: t("genre.documentary") },
+    { key: "gaming",       label: t("genre.gaming") },
+    { key: "education",    label: t("genre.education") },
+  ];
   const { loaded: modelLoaded } = useWhisperModel();
   const {
     status: whisperStatus,
@@ -303,13 +309,19 @@ export default function YoutubePlayerScreen() {
   // Unified progress high-water mark — ensures the bar never jumps backward.
   const highWaterProgressRef = useRef(0);
 
+  // ── Genre-restore race guards ─────────────────────────────────────────────
+  const currentVideoIdRef  = useRef<string | null>(null);
+  const playerReadyOnceRef = useRef(false);
+  const genreReadyRef      = useRef(true);           // synchronous — always ready
+  const genreValueRef      = useRef(_initialGenre);  // seeded from store on mount
+
   // ── Local state ───────────────────────────────────────────────────────────
   const [langModalVisible,     setLangModalVisible]     = useState(false);
   const [subtitlePanelVisible, setSubtitlePanelVisible] = useState(false);
   const [genreModalVisible,    setGenreModalVisible]    = useState(false);
   const [saveModalVisible,     setSaveModalVisible]     = useState(false);
   const [speedIdx,             setSpeedIdx]             = useState(2);
-  const [selectedGenre,        setSelectedGenre]        = useState("general");
+  const [selectedGenre,        setSelectedGenre]        = useState(_initialGenre);
   const isLandscape = screenWidth > screenHeight;
   const navigation  = useNavigation();
 
@@ -685,6 +697,19 @@ export default function YoutubePlayerScreen() {
     };
   }, []);
 
+  // ── Genre restore from player store (set by HomeScreen before navigation) ───
+  // Fully synchronous — pendingGenre is already in the store before this
+  // component mounts or before youtubeVideoId changes, so no async wait needed.
+  useEffect(() => {
+    const g = usePlayerStore.getState().pendingGenre ?? "general";
+    currentVideoIdRef.current  = youtubeVideoId;
+    playerReadyOnceRef.current = false;
+    genreValueRef.current      = g;
+    genreReadyRef.current      = true;
+    setSelectedGenre(g);
+    setPendingGenre(null);
+  }, [youtubeVideoId]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── BUG 4: bgResultApplied reset on videoId change ─────────────────────────
   // Must run BEFORE handlePlayerReady fires and BEFORE the restore effect below.
   // React runs effects in definition order for the same dep, so place this first.
@@ -904,7 +929,7 @@ export default function YoutubePlayerScreen() {
     }
 
     const useLang  = langOverride  ?? targetLanguage;
-    const useGenre = genreOverride ?? selectedGenre;
+    const useGenre = genreOverride ?? genreValueRef.current;
     const isResume = (existingTranslations?.size ?? 0) > 0;
 
     console.log(
@@ -1159,7 +1184,7 @@ export default function YoutubePlayerScreen() {
       console.error("[YT_SCREEN] 번역 오류:", e);
       setPhase("error");
     }
-  }, [targetLanguage, selectedGenre, youtubeVideoId, setSubtitles, scheduleSetSubtitles, setLoadingLabel, setPhase]);
+  }, [targetLanguage, youtubeVideoId, setSubtitles, scheduleSetSubtitles, setLoadingLabel, setPhase]);
 
   // ── onSubtitleData 콜백 ──────────────────────────────────────────────────
   const handleSubtitleData = useCallback((_result: SubtitleFetchResult) => {}, []);
@@ -1232,6 +1257,38 @@ export default function YoutubePlayerScreen() {
   const handlePlayerReady = useCallback(async () => {
     if (!youtubeVideoId) return;
 
+    // ── Step 1: capture videoId before any await ──────────────────────────
+    const videoIdAtStart = youtubeVideoId;
+
+    // ── Step 2: dedup guard — only the first call per video should proceed ─
+    if (playerReadyOnceRef.current) return;
+    playerReadyOnceRef.current = true;
+
+    // ── Step 3: wait for genre to be restored from AsyncStorage ───────────
+    if (!genreReadyRef.current) {
+      await new Promise<void>((resolve) => {
+        const CHECK_INTERVAL_MS = 20;
+        const HARD_TIMEOUT_MS   = 500;
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          clearInterval(check);
+          clearTimeout(timeout);
+          resolve();
+        };
+        const check   = setInterval(() => { if (genreReadyRef.current) finish(); },
+                                    CHECK_INTERVAL_MS);
+        const timeout = setTimeout(finish, HARD_TIMEOUT_MS);
+      });
+    }
+
+    // ── Step 4: stale check after genre await ─────────────────────────────
+    if (currentVideoIdRef.current !== videoIdAtStart) return;
+
+    // ── Step 5: alias the resolved genre value ────────────────────────────
+    const genre = genreValueRef.current;
+
     // Probe gemma checkpoint so user sees a resume hint within
     // milliseconds of returning to the screen — before any network
     // request or model load begins.
@@ -1269,9 +1326,9 @@ export default function YoutubePlayerScreen() {
         setTotalSegments(restored.length);
         setTranslatedCount(restored.length);
         setTranslationEverCompleted(true); // [FIX BUG2] BG result applied on ready
-        saveSubtitles(youtubeVideoId, earlyResult.language, selectedGenre, restored).catch(() => {});
+        saveSubtitles(youtubeVideoId, earlyResult.language, genre, restored).catch(() => {});
         await clearBgResult(youtubeVideoId);
-        console.log(`[CACHE] Immediate BG result applied: ${restored.length} segs`);
+        if (currentVideoIdRef.current !== videoIdAtStart) return;
         return;
       }
       // BG still in progress — trigger subtitle fetch so handleSubtitlesLoaded
@@ -1281,7 +1338,9 @@ export default function YoutubePlayerScreen() {
       return;
     }
 
-    const cached = await loadSubtitles(youtubeVideoId, targetLanguage, selectedGenre);
+    const cached = await loadSubtitles(youtubeVideoId, targetLanguage, genre);
+
+    if (currentVideoIdRef.current !== videoIdAtStart) return;
 
     // Re-check ref after the async gap — BG may have started while we awaited
     if (isBgRunningRef.current) {
@@ -1380,7 +1439,7 @@ export default function YoutubePlayerScreen() {
     }
     setPhase("fetching");
     ytPlayerRef.current?.fetchSubtitles();
-  }, [youtubeVideoId, targetLanguage, selectedGenre, setPlaying, setSubtitles, setLoadingLabel, setPhase]);
+  }, [youtubeVideoId, targetLanguage, setPlaying, setSubtitles, setLoadingLabel, setPhase]);
 
   // ── 뒤로가기 ─────────────────────────────────────────────────────────────
   const handleBack = useCallback(async () => {
@@ -1487,6 +1546,7 @@ export default function YoutubePlayerScreen() {
 
   // ── 장르 변경 ─────────────────────────────────────────────────────────────
   const handleGenreChange = useCallback((genre: string) => {
+    genreValueRef.current = genre;
     setSelectedGenre(genre);
     setGenreModalVisible(false);
     bgResultApplied.current = false;
@@ -1513,11 +1573,11 @@ export default function YoutubePlayerScreen() {
 
     if (lastFetchResult.current && lastFetchResult.current.segments.length > 0) {
       clearSubtitles();
-      translateFromResult(lastFetchResult.current!, langCode, selectedGenre, null);
+      translateFromResult(lastFetchResult.current!, langCode, genreValueRef.current, null);
     } else {
       handleRetrySubtitles();
     }
-  }, [youtubeVideoId, update, clearSubtitles, translateFromResult, selectedGenre, handleRetrySubtitles]);
+  }, [youtubeVideoId, update, clearSubtitles, translateFromResult, handleRetrySubtitles]);
 
   // ── 백그라운드 번역 시작 ─────────────────────────────────────────────────
   const startBgTranslation = useCallback(async () => {
@@ -1959,15 +2019,6 @@ export default function YoutubePlayerScreen() {
         </TouchableOpacity>
 
         <TouchableOpacity
-          style={[styles.chipBtn, styles.chipBtnFlex]}
-          onPress={() => setGenreModalVisible(true)}
-        >
-          <Text style={styles.chipBtnText} numberOfLines={1}>
-            🎬 {GENRE_OPTIONS.find((g) => g.key === selectedGenre)?.label ?? "일반"}
-          </Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
           style={[
             styles.chipBtn,
             styles.chipBtnFlex,
@@ -2051,8 +2102,8 @@ export default function YoutubePlayerScreen() {
       >
         <Pressable style={styles.modalBackdrop} onPress={() => setGenreModalVisible(false)}>
           <Pressable style={[styles.modalSheet, { maxHeight: 340 }]} onPress={() => {}}>
-            <Text style={styles.modalTitle}>🎬 영상 장르 선택</Text>
-            <Text style={styles.modalSubtitle}>장르를 지정하면 번역 품질이 향상됩니다</Text>
+            <Text style={styles.modalTitle}>{t("genre.modalTitle")}</Text>
+            <Text style={styles.modalSubtitle}>{t("genre.sectionHint")}</Text>
             <ScrollView>
               {GENRE_OPTIONS.map((g) => (
                 <TouchableOpacity

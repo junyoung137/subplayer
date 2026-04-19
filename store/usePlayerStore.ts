@@ -58,6 +58,9 @@ interface PlayerStore {
    */
   patchSubtitles: (patches: Array<{ id: string; translated: string }>) => void;
 
+  pendingGenre: string | null;
+  setPendingGenre: (genre: string | null) => void;
+
   setYoutubeVideo: (videoId: string, name: string) => void;
   setUrlVideo: (url: string, name: string) => void;
   updateUrlProcessing: (patch: Partial<UrlProcessingState>) => void;
@@ -98,6 +101,9 @@ export const usePlayerStore = create<PlayerStore>((set) => ({
   youtubeVideoId: null,
   rawUrl: null,
   urlProcessing: INITIAL_URL_PROCESSING,
+  pendingGenre: null,
+
+  setPendingGenre: (genre) => set({ pendingGenre: genre }),
 
   setVideo: (uri, name) =>
     set({
@@ -175,6 +181,7 @@ export const usePlayerStore = create<PlayerStore>((set) => ({
       youtubeVideoId: null,
       rawUrl: null,
       urlProcessing: INITIAL_URL_PROCESSING,
+      pendingGenre: null,
     }),
 
   setYoutubeVideo: (videoId, name) =>

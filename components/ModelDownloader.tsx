@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { View, Text, TouchableOpacity, StyleSheet, Alert } from "react-native";
 import * as FileSystem from "expo-file-system/legacy";
+import { useTranslation } from "react-i18next";
 import { WhisperModel } from "../constants/whisperModels";
 
 const MODEL_DIR = FileSystem.documentDirectory + "whisper-models/";
@@ -15,6 +16,7 @@ interface Props {
 type Status = "idle" | "downloading" | "downloaded" | "error";
 
 export function ModelDownloader({ model, isSelected, onDownloaded, onSelect }: Props) {
+  const { t } = useTranslation();
   const [status, setStatus] = useState<Status>("idle");
   const [progress, setProgress] = useState(0);
   const [downloadResumable, setDownloadResumable] =
@@ -82,10 +84,10 @@ export function ModelDownloader({ model, isSelected, onDownloaded, onSelect }: P
   };
 
   const deleteModel = async () => {
-    Alert.alert("모델 삭제", `${model.name}을 삭제할까요?`, [
-      { text: "취소", style: "cancel" },
+    Alert.alert(t("models.deleteModelTitle"), t("models.deleteModelConfirm", { name: model.name }), [
+      { text: t("common.cancel"), style: "cancel" },
       {
-        text: "삭제",
+        text: t("common.delete"),
         style: "destructive",
         onPress: async () => {
           await FileSystem.deleteAsync(modelPath, { idempotent: true });
@@ -111,7 +113,7 @@ export function ModelDownloader({ model, isSelected, onDownloaded, onSelect }: P
 
       {status === "idle" && (
         <TouchableOpacity style={styles.btnDownload} onPress={startDownload}>
-          <Text style={styles.btnText}>다운로드</Text>
+          <Text style={styles.btnText}>{t("models.downloadBtn")}</Text>
         </TouchableOpacity>
       )}
 
@@ -122,7 +124,7 @@ export function ModelDownloader({ model, isSelected, onDownloaded, onSelect }: P
           </View>
           <Text style={styles.progressText}>{Math.round(progress * 100)}%</Text>
           <TouchableOpacity onPress={cancelDownload}>
-            <Text style={styles.cancelText}>취소</Text>
+            <Text style={styles.cancelText}>{t("models.cancelBtn")}</Text>
           </TouchableOpacity>
         </View>
       )}
@@ -131,22 +133,22 @@ export function ModelDownloader({ model, isSelected, onDownloaded, onSelect }: P
         <View style={styles.downloadedActions}>
           {isSelected ? (
             <View style={styles.selectedBadge}>
-              <Text style={styles.selectedBadgeText}>✓ 사용 중</Text>
+              <Text style={styles.selectedBadgeText}>{t("models.inUse")}</Text>
             </View>
           ) : (
             <TouchableOpacity style={styles.btnSelect} onPress={onSelect}>
-              <Text style={styles.btnSelectText}>선택</Text>
+              <Text style={styles.btnSelectText}>{t("models.selectBtn")}</Text>
             </TouchableOpacity>
           )}
           <TouchableOpacity style={styles.btnDelete} onPress={deleteModel}>
-            <Text style={styles.btnDeleteText}>삭제</Text>
+            <Text style={styles.btnDeleteText}>{t("common.delete")}</Text>
           </TouchableOpacity>
         </View>
       )}
 
       {status === "error" && (
         <TouchableOpacity style={styles.btnDownload} onPress={startDownload}>
-          <Text style={styles.btnText}>재시도</Text>
+          <Text style={styles.btnText}>{t("models.retryBtn")}</Text>
         </TouchableOpacity>
       )}
     </View>

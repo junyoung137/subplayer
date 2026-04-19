@@ -616,6 +616,7 @@ export default function HomeScreen() {
 
   const setVideo = usePlayerStore((s) => s.setVideo);
   const setYoutubeVideo = usePlayerStore((s) => s.setYoutubeVideo); // ← 추가
+  const setPendingGenre = usePlayerStore((s) => s.setPendingGenre);
   const pendingFileRef = useRef<{ uri: string; name: string } | null>(null);
 
   const [resumeDialog, setResumeDialog] = useState<{
@@ -840,8 +841,9 @@ export default function HomeScreen() {
   };
 
   // ── 새 핸들러: URL (YouTube) 선택 후 처리 ─────────────────────────────────
-  const handleUrlPicked = (videoId: string, title: string, isYoutube: boolean) => {
+  const handleUrlPicked = (videoId: string, title: string, isYoutube: boolean, genre?: string) => {
     if (isYoutube) {
+      setPendingGenre(genre ?? 'general');
       setYoutubeVideo(videoId, title);
       router.push("/youtube-player");
     }
@@ -1277,8 +1279,8 @@ export default function HomeScreen() {
 
       {recentFiles.length === 0 && (
         <View style={styles.emptyBox}>
-          <Text style={styles.emptyText}>아직 파일이 없습니다</Text>
-          <Text style={styles.emptyHint}>위 버튼으로 동영상을 불러오세요</Text>
+          <Text style={styles.emptyText}>{t("home.noFilesYet")}</Text>
+          <Text style={styles.emptyHint}>{t("home.noFilesHint")}</Text>
         </View>
       )}
 

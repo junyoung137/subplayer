@@ -21,6 +21,7 @@ import {
   Pressable,
   Alert,
   ActivityIndicator,
+  ScrollView,
 } from "react-native";
 import { useTranslation } from "react-i18next";
 import * as DocumentPicker from "expo-document-picker";
@@ -51,17 +52,11 @@ interface UrlInputModalProps {
   /** 로컬 파일 선택 완료 시 — 기존 플로우와 동일하게 langModal 표시 */
   onLocalFilePicked: (uri: string, name: string) => void;
   /** YouTube/URL 선택 완료 시 — player로 바로 이동 */
-  onUrlPicked: (videoId: string, title: string, isYoutube: boolean) => void;
+  onUrlPicked: (videoId: string, title: string, isYoutube: boolean, genre?: string) => void;
 }
 
 // ── 탭 타입 ───────────────────────────────────────────────────────────────────
 type Tab = "local" | "url";
-
-// ── 예시 영상 ──────────────────────────────────────────────────────────────────
-const EXAMPLES = [
-  { label: "Me at the zoo (YouTube 첫 영상)", id: "jNQXAC9IVRw" },
-  { label: "PSY - Gangnam Style",             id: "9bZkp7q19f0" },
-];
 
 // ── 컴포넌트 ──────────────────────────────────────────────────────────────────
 export function UrlInputModal({
@@ -71,10 +66,20 @@ export function UrlInputModal({
   onUrlPicked,
 }: UrlInputModalProps) {
   const { t } = useTranslation();
-  const [activeTab, setActiveTab] = useState<Tab>("local");
-  const [urlInput,  setUrlInput]  = useState("");
-  const [isLoading, setIsLoading] = useState(false);
-  const [urlError,  setUrlError]  = useState<string | null>(null);
+  const GENRE_OPTIONS = [
+    { key: "general",      label: t("genre.general") },
+    { key: "tech lecture", label: t("genre.techLecture") },
+    { key: "comedy",       label: t("genre.comedy") },
+    { key: "news",         label: t("genre.news") },
+    { key: "documentary",  label: t("genre.documentary") },
+    { key: "gaming",       label: t("genre.gaming") },
+    { key: "education",    label: t("genre.education") },
+  ];
+  const [activeTab,     setActiveTab]     = useState<Tab>("local");
+  const [urlInput,      setUrlInput]      = useState("");
+  const [isLoading,     setIsLoading]     = useState(false);
+  const [urlError,      setUrlError]      = useState<string | null>(null);
+  const [selectedGenre, setSelectedGenre] = useState("general");
 
   // 실시간 videoId 파싱 미리보기
   const parsedId = parseYoutubeId(urlInput.trim());
@@ -116,8 +121,9 @@ export function UrlInputModal({
     // YouTube 판별
     const ytId = parseYoutubeId(trimmed);
     if (ytId) {
+      const genreSnapshot = selectedGenre; // capture BEFORE onClose resets state
       onClose();
-      onUrlPicked(ytId, `YouTube: ${ytId}`, true);
+      onUrlPicked(ytId, `YouTube: ${ytId}`, true, genreSnapshot);
       setUrlInput("");
       return;
     }
@@ -129,13 +135,14 @@ export function UrlInputModal({
     }
 
     setUrlError(t("url.invalidUrl"));
-  }, [urlInput, onClose, onUrlPicked]);
+  }, [urlInput, selectedGenre, onClose, onUrlPicked, t]);
 
   // ── 모달 닫기 ────────────────────────────────────────────────────────────
   const handleClose = () => {
     setUrlInput("");
     setUrlError(null);
     setActiveTab("local");
+    setSelectedGenre("general");
     onClose();
   };
 
@@ -201,6 +208,38 @@ export function UrlInputModal({
           {activeTab === "url" && (
             <View style={styles.tabContent}>
 
+              {/* 장르 선택 */}
+              <View style={styles.genreSection}>
+                <Text style={styles.genreLabel}>{t("genre.sectionTitle")}</Text>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.genreRow}
+                >
+                  {GENRE_OPTIONS.map((g) => (
+                    <TouchableOpacity
+                      key={g.key}
+                      style={[
+                        styles.genrePill,
+                        selectedGenre === g.key && styles.genrePillActive,
+                      ]}
+                      onPress={() => {
+                        setSelectedGenre(g.key);
+                      }}
+                    >
+                      <Text
+                        style={[
+                          styles.genrePillText,
+                          selectedGenre === g.key && styles.genrePillTextActive,
+                        ]}
+                      >
+                        {g.label}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              </View>
+
               {/* 입력창 */}
               <View style={styles.inputWrap}>
                 <Text style={styles.inputLabel}>{t("url.youtubeUrlLabel")}</Text>
@@ -253,37 +292,6 @@ export function UrlInputModal({
               >
                 <Text style={styles.confirmBtnText}>{t("url.play")}</Text>
               </TouchableOpacity>
-
-              {/* 구분선 */}
-              <View style={styles.divider}>
-                <View style={styles.dividerLine} />
-                <Text style={styles.dividerText}>{t("url.examples")}</Text>
-                <View style={styles.dividerLine} />
-              </View>
-
-              {/* 예시 링크 */}
-              {EXAMPLES.map((ex) => (
-                <TouchableOpacity
-                  key={ex.id}
-                  style={styles.exampleRow}
-                  onPress={() => {
-                    setUrlInput(`https://youtube.com/watch?v=${ex.id}`);
-                    setUrlError(null);
-                  }}
-                >
-                  <Text style={styles.exampleIcon}>▶</Text>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.exampleLabel}>{ex.label}</Text>
-                    <Text style={styles.exampleId}>ID: {ex.id}</Text>
-                  </View>
-                  <Text style={styles.exampleArrow}>→</Text>
-                </TouchableOpacity>
-              ))}
-
-              {/* 안내 박스 */}
-              <View style={styles.infoBox}>
-                <Text style={styles.infoText}>{t("url.infoText")}</Text>
-              </View>
 
             </View>
           )}
@@ -409,40 +417,22 @@ const styles = StyleSheet.create({
   confirmBtnDisabled: { opacity: 0.35 },
   confirmBtnText: { color: "#fff", fontSize: 15, fontWeight: "700" },
 
-  // ── 구분선 ──────────────────────────────────────────────────────────────────
-  divider: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    marginVertical: 4,
-  },
-  dividerLine: { flex: 1, height: 1, backgroundColor: "#222" },
-  dividerText: { color: "#444", fontSize: 12, fontWeight: "600" },
-
-  // ── 예시 ────────────────────────────────────────────────────────────────────
-  exampleRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "#1a1a1a",
-    borderRadius: 10,
+  // ── 장르 선택 ───────────────────────────────────────────────────────────────
+  genreSection: { gap: 8 },
+  genreLabel:   { color: "#666", fontSize: 12, fontWeight: "600" },
+  genreRow:     { flexDirection: "row", gap: 8, paddingVertical: 2 },
+  genrePill: {
     paddingHorizontal: 14,
-    paddingVertical: 10,
-    gap: 10,
+    paddingVertical: 8,
+    borderRadius: 20,
+    backgroundColor: "#1a1a1a",
     borderWidth: 1,
-    borderColor: "#222",
+    borderColor: "#2a2a2a",
   },
-  exampleIcon:  { color: "#ff0000", fontSize: 12 },
-  exampleLabel: { color: "#ccc", fontSize: 12, fontWeight: "500" },
-  exampleId:    { color: "#555", fontSize: 11, marginTop: 1 },
-  exampleArrow: { color: "#444", fontSize: 14 },
-
-  // ── 안내 박스 ───────────────────────────────────────────────────────────────
-  infoBox: {
-    backgroundColor: "#0d1520",
-    borderRadius: 10,
-    padding: 12,
-    borderWidth: 1,
-    borderColor: "#1e3a5f",
+  genrePillActive: {
+    backgroundColor: "#2563eb",
+    borderColor: "#2563eb",
   },
-  infoText: { color: "#60a5fa", fontSize: 12, lineHeight: 18 },
+  genrePillText:       { color: "#666", fontSize: 13, fontWeight: "600" },
+  genrePillTextActive: { color: "#fff" },
 });
