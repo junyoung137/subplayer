@@ -4,23 +4,30 @@
     "slug": "RealtimeSub",
     "version": "1.0.0",
     "orientation": "default",
+
     "icon": "./assets/icon.png",
+
     "userInterfaceStyle": "dark",
     "newArchEnabled": true,
+
     "splash": {
-      "image": "./assets/splash-icon.png",
+      "image": "./assets/adaptive-icon.png",
       "resizeMode": "contain",
       "backgroundColor": "#000000"
     },
+
     "scheme": "realtimesub",
+
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.realtimesub.app"
+      "bundleIdentifier": "com.realtimesub.app",
+      "icon": "./assets/icon.png"
     },
+
     "android": {
       "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#000000"
+        "foregroundImage": "./assets/adaptive_foreground.png",
+        "backgroundColor": "#ffffff"
       },
       "package": "com.realtimesub.app",
       "minSdkVersion": 23,
@@ -35,10 +42,12 @@
         "POST_NOTIFICATIONS"
       ]
     },
+
     "web": {
       "bundler": "metro",
       "favicon": "./assets/favicon.png"
     },
+
     "plugins": [
       "expo-router",
       [
@@ -58,6 +67,7 @@
       "llama.rn",
       "expo-localization"
     ],
+
     "experiments": {
       "typedRoutes": true
     }
