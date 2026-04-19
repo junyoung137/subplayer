@@ -2007,28 +2007,12 @@ export default function YoutubePlayerScreen() {
             {modeLabel[subtitleMode] ?? "원문+번역"}
           </Text>
         </TouchableOpacity>
-      </View>}
 
-      {/* ── 컨트롤 바 2행 ─────────────────────────────────────────────────── */}
-      {!isLandscape && <View style={styles.controlBar2}>
         <TouchableOpacity
           style={styles.chipBtn}
           onPress={() => setSubtitlePanelVisible(true)}
         >
           <Text style={styles.chipBtnText}>Aa</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={[
-            styles.chipBtn,
-            styles.chipBtnFlex,
-            isRetranslating && styles.chipBtnDisabled,
-          ]}
-          onPress={() => !isRetranslating && setLangModalVisible(true)}
-        >
-          <Text style={styles.chipBtnText} numberOfLines={1}>
-            🌐 {getLanguageByCode(targetLanguage)?.nativeName ?? targetLanguage}
-          </Text>
         </TouchableOpacity>
 
         {Platform.OS === 'android' && (

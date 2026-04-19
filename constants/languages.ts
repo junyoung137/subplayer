@@ -5,8 +5,8 @@ export interface Language {
 }
 
 export const LANGUAGES: Language[] = [
-  { code: "ko", name: "Korean", nativeName: "한국어" },
   { code: "en", name: "English", nativeName: "English" },
+  { code: "ko", name: "Korean", nativeName: "한국어" },
   { code: "ja", name: "Japanese", nativeName: "日本語" },
   { code: "zh", name: "Chinese", nativeName: "中文" },
   { code: "fr", name: "French", nativeName: "Français" },

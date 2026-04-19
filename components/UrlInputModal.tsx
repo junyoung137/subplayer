@@ -24,6 +24,7 @@ import {
   ScrollView,
 } from "react-native";
 import { useTranslation } from "react-i18next";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
 // ✅ 핵심 수정: YouTubePlayer에서 직접 import하지 않고 utils에서 import
@@ -66,6 +67,7 @@ export function UrlInputModal({
   onUrlPicked,
 }: UrlInputModalProps) {
   const { t } = useTranslation();
+  const insets = useSafeAreaInsets();
   const GENRE_OPTIONS = [
     { key: "general",      label: t("genre.general") },
     { key: "tech lecture", label: t("genre.techLecture") },
@@ -154,7 +156,7 @@ export function UrlInputModal({
       onRequestClose={handleClose}
     >
       <Pressable style={styles.backdrop} onPress={handleClose}>
-        <Pressable style={styles.sheet} onPress={() => {}}>
+        <Pressable style={[styles.sheet, { paddingBottom: Math.max(insets.bottom + 16, 40) }]} onPress={() => {}}>
 
           {/* 드래그 핸들 */}
           <View style={styles.handle} />
@@ -347,7 +349,6 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     paddingHorizontal: 20,
-    paddingBottom: 40,
     paddingTop: 12,
     gap: 14,
   },

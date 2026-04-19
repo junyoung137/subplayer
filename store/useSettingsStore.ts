@@ -35,15 +35,15 @@ const DEFAULTS: Settings = {
   sourceLanguage: "auto",
   targetLanguage: "ko",
   chunkDuration: 2,
-  subtitleFontSize: 18,
+  subtitleFontSize: 14,
   subtitleColor: "#FFFFFF",
   subtitleOpacity: 0.9,
   showOriginal: true,
-  subtitleMode: "both",
+  subtitleMode: "translation",
   timingOffset: 0,
   subtitlePositionPct: 0.85,
   thermalProtection: true,
-  subtitleStyle: "outline",  // 기본값: 갈매기형
+  subtitleStyle: "pill",  // 기본값: 갈매기형
   interfaceLanguage: "ko",
 };
 

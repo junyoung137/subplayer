@@ -212,7 +212,6 @@ export default function PlayerScreen() {
       {subtitleStyleBtn}
       {/* 📷 현재 프레임 캡처 */}
       {captureBtn}
-      {langBtn()}
     </View>
   );
 
@@ -357,8 +356,6 @@ export default function PlayerScreen() {
         {/* 📷 현재 프레임 캡처 */}
         {captureBtn}
 
-        {/* Language */}
-        {langBtn()}
       </View>
 
       {/* Re-translation banner */}
