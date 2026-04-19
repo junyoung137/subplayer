@@ -15,6 +15,7 @@ import {
   ActivityIndicator,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { useTranslation } from "react-i18next";
 import * as DocumentPicker from "expo-document-picker";
 import * as ImagePicker from "expo-image-picker";
 import * as FileSystem from "expo-file-system/legacy";
@@ -358,6 +359,7 @@ const thumbStyles = StyleSheet.create({
 
 // Subtitle status badge
 function SubBadge({ status, percent }: { status?: SubtitleStatus; percent?: number }) {
+  const { t } = useTranslation();
   if (!status || status === "none") return null;
   if (status === "processing") {
     return (
@@ -368,7 +370,7 @@ function SubBadge({ status, percent }: { status?: SubtitleStatus; percent?: numb
   }
   return (
     <View style={[badgeStyles.badge, badgeStyles.done]}>
-      <Text style={badgeStyles.text}>✓ 자막 완료</Text>
+      <Text style={badgeStyles.text}>{t("home.subtitleDone")}</Text>
     </View>
   );
 }
@@ -393,14 +395,15 @@ interface LangSetupModalProps {
   onCancel: () => void;
 }
 function LangSetupModal({ visible, onConfirm, onCancel }: LangSetupModalProps) {
+  const { t } = useTranslation();
   const targetLanguage = useSettingsStore((s) => s.targetLanguage);
   const update         = useSettingsStore((s) => s.update);
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onCancel}>
       <Pressable style={modalStyles.backdrop} onPress={onCancel}>
         <Pressable style={modalStyles.sheet} onPress={() => {}}>
-          <Text style={modalStyles.title}>🌐 번역 언어 선택</Text>
-          <Text style={modalStyles.subtitle}>어떤 언어로 번역할까요?</Text>
+          <Text style={modalStyles.title}>{t("home.langSetupTitle")}</Text>
+          <Text style={modalStyles.subtitle}>{t("home.langSetupSubtitle")}</Text>
           <ScrollView style={modalStyles.langList} nestedScrollEnabled>
             {LANGUAGES.map((lang) => {
               const isSelected = targetLanguage === lang.code;
@@ -417,13 +420,13 @@ function LangSetupModal({ visible, onConfirm, onCancel }: LangSetupModalProps) {
               );
             })}
           </ScrollView>
-          <Text style={modalStyles.hint}>💡 원본 언어는 자동 감지됩니다</Text>
+          <Text style={modalStyles.hint}>{t("home.langSetupHint")}</Text>
           <View style={modalStyles.btnRow}>
             <TouchableOpacity style={modalStyles.cancelBtn} onPress={onCancel}>
-              <Text style={modalStyles.cancelBtnText}>취소</Text>
+              <Text style={modalStyles.cancelBtnText}>{t("common.cancel")}</Text>
             </TouchableOpacity>
             <TouchableOpacity style={modalStyles.confirmBtn} onPress={onConfirm}>
-              <Text style={modalStyles.confirmBtnText}>처리 시작 →</Text>
+              <Text style={modalStyles.confirmBtnText}>{t("home.startProcessing")}</Text>
             </TouchableOpacity>
           </View>
         </Pressable>
@@ -441,6 +444,7 @@ interface CategoryNameModalProps {
   onCancel: () => void;
 }
 function CategoryNameModal({ visible, initial = "", parentName, onConfirm, onCancel }: CategoryNameModalProps) {
+  const { t } = useTranslation();
   const [name, setName] = useState(initial);
   useEffect(() => { if (visible) setName(initial); }, [visible, initial]);
   return (
@@ -448,13 +452,13 @@ function CategoryNameModal({ visible, initial = "", parentName, onConfirm, onCan
       <Pressable style={catModalStyles.backdrop} onPress={onCancel}>
         <Pressable style={catModalStyles.card} onPress={() => {}}>
           <Text style={catModalStyles.title}>
-            {initial ? "폴더 이름 변경" : parentName ? `'${parentName}' 안에 하위 폴더 만들기` : "새 폴더 만들기"}
+            {initial ? t("home.folderNameChange") : parentName ? t("home.createSubfolderIn", { parentName }) : t("home.newFolder")}
           </Text>
           <TextInput
             style={catModalStyles.input}
             value={name}
             onChangeText={setName}
-            placeholder="폴더 이름"
+            placeholder={t("home.folderNamePlaceholder")}
             placeholderTextColor="#555"
             autoFocus
             maxLength={20}
@@ -462,14 +466,14 @@ function CategoryNameModal({ visible, initial = "", parentName, onConfirm, onCan
           />
           <View style={catModalStyles.btnRow}>
             <TouchableOpacity style={catModalStyles.cancelBtn} onPress={onCancel}>
-              <Text style={catModalStyles.cancelText}>취소</Text>
+              <Text style={catModalStyles.cancelText}>{t("common.cancel")}</Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={[catModalStyles.confirmBtn, !name.trim() && catModalStyles.confirmDisabled]}
               onPress={() => { if (name.trim()) onConfirm(name.trim()); }}
               disabled={!name.trim()}
             >
-              <Text style={catModalStyles.confirmText}>확인</Text>
+              <Text style={catModalStyles.confirmText}>{t("common.confirm")}</Text>
             </TouchableOpacity>
           </View>
         </Pressable>
@@ -487,19 +491,20 @@ interface MoveCategoryModalProps {
   onCancel: () => void;
 }
 function MoveCategoryModal({ visible, categories, currentCategory, onSelect, onCancel }: MoveCategoryModalProps) {
+  const { t } = useTranslation();
   const roots = categories.filter((c) => !c.parentId);
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onCancel}>
       <Pressable style={modalStyles.backdrop} onPress={onCancel}>
         <Pressable style={modalStyles.sheet} onPress={() => {}}>
-          <Text style={modalStyles.title}>폴더로 이동</Text>
+          <Text style={modalStyles.title}>{t("home.moveToFolderTitle")}</Text>
           <ScrollView style={{ maxHeight: 360 }} nestedScrollEnabled>
             <TouchableOpacity
               style={[moveStyles.option, !currentCategory && moveStyles.optionActive]}
               onPress={() => onSelect(undefined)}
             >
               <Text style={moveStyles.optionIcon}>📂</Text>
-              <Text style={moveStyles.optionName}>미분류</Text>
+              <Text style={moveStyles.optionName}>{t("home.uncat")}</Text>
               {!currentCategory && <Text style={moveStyles.check}>✓</Text>}
             </TouchableOpacity>
             {roots.map((cat) => {
@@ -530,7 +535,7 @@ function MoveCategoryModal({ visible, categories, currentCategory, onSelect, onC
             })}
           </ScrollView>
           <TouchableOpacity style={moveStyles.cancelBtn} onPress={onCancel}>
-            <Text style={moveStyles.cancelText}>취소</Text>
+            <Text style={moveStyles.cancelText}>{t("common.cancel")}</Text>
           </TouchableOpacity>
         </Pressable>
       </Pressable>
@@ -546,16 +551,17 @@ interface SortModalProps {
   onCancel: () => void;
 }
 function SortModal({ visible, current, onSelect, onCancel }: SortModalProps) {
+  const { t } = useTranslation();
   const options: { key: SortOrder; label: string; icon: string }[] = [
-    { key: "recent", label: "최신순", icon: "🕐" },
-    { key: "name",   label: "이름순", icon: "🔤" },
-    { key: "size",   label: "용량순", icon: "📦" },
+    { key: "recent", label: t("home.sortRecent"), icon: "🕐" },
+    { key: "name",   label: t("home.sortName"),   icon: "🔤" },
+    { key: "size",   label: t("home.sortSize"),   icon: "📦" },
   ];
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onCancel}>
       <Pressable style={catModalStyles.backdrop} onPress={onCancel}>
         <Pressable style={[catModalStyles.card, { gap: 4 }]} onPress={() => {}}>
-          <Text style={catModalStyles.title}>정렬 방식</Text>
+          <Text style={catModalStyles.title}>{t("home.sortModal")}</Text>
           {options.map((o) => (
             <TouchableOpacity
               key={o.key}
@@ -576,6 +582,7 @@ function SortModal({ visible, current, onSelect, onCancel }: SortModalProps) {
 // ── HomeScreen ────────────────────────────────────────────────────────────────
 
 export default function HomeScreen() {
+  const { t } = useTranslation();
   const insets = useSafeAreaInsets();
   const [recentFiles,      setRecentFiles]      = useState<RecentFile[]>([]);
   const [categories,       setCategories]       = useState<Category[]>([]);
@@ -640,7 +647,7 @@ export default function HomeScreen() {
         setResumeDialog({
           visible: true,
           videoId:    task.videoId,
-          videoTitle: task.videoTitle ?? 'YouTube 영상',
+          videoTitle: task.videoTitle ?? t("home.youtubeVideoDefault"),
           language:   task.language   ?? 'Korean',
           genre:      task.genre      ?? 'general',
         });
@@ -712,10 +719,10 @@ export default function HomeScreen() {
     // also delete all sub-categories
     const toDelete = new Set<string>([id]);
     categories.filter((c) => c.parentId === id).forEach((c) => toDelete.add(c.id));
-    Alert.alert("폴더 삭제", "하위 폴더도 함께 삭제됩니다. 파일은 미분류로 이동합니다.", [
-      { text: "취소", style: "cancel" },
+    Alert.alert(t("home.folderDelete"), t("home.folderDeleteMsg"), [
+      { text: t("common.cancel"), style: "cancel" },
       {
-        text: "삭제",
+        text: t("common.delete"),
         style: "destructive",
         onPress: () => {
           setCategories((prev) => prev.filter((c) => !toDelete.has(c.id)));
@@ -753,12 +760,12 @@ export default function HomeScreen() {
   // ── Manual thumbnail picker ────────────────────────────────────────────────
   const pickManualThumbnail = useCallback(async (fileUri: string) => {
     Alert.alert(
-      "썸네일 변경",
-      "갤러리에서 이미지를 선택하세요.\n(재생 중 캡처는 플레이어 화면에서 가능합니다)",
+      t("home.changeThumbnail"),
+      t("home.changeThumbnailMsg"),
       [
-        { text: "취소", style: "cancel" },
+        { text: t("common.cancel"), style: "cancel" },
         {
-          text: "갤러리에서 선택",
+          text: t("home.galleryPick"),
           onPress: async () => {
             try {
               const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -865,9 +872,9 @@ export default function HomeScreen() {
   const openRecent = async (file: RecentFile) => {
     const stableUri = await ensureFileUri(file.uri, file.name);
     if (!stableUri) {
-      Alert.alert("파일을 다시 선택하세요", "접근 권한이 만료되었습니다.", [
-        { text: "목록에서 삭제", style: "destructive", onPress: () => setRecentFiles((prev) => prev.filter((f) => f.uri !== file.uri)) },
-        { text: "확인", style: "cancel" },
+      Alert.alert(t("home.fileAccessExpired"), t("home.permissionExpired"), [
+        { text: t("home.deleteFromList"), style: "destructive", onPress: () => setRecentFiles((prev) => prev.filter((f) => f.uri !== file.uri)) },
+        { text: t("common.confirm"), style: "cancel" },
       ]);
       return;
     }
@@ -881,10 +888,10 @@ export default function HomeScreen() {
   };
 
   const deleteOne = useCallback((uri: string) => {
-    Alert.alert("파일 삭제", "이 파일을 목록에서 삭제하시겠습니까?", [
-      { text: "취소", style: "cancel" },
+    Alert.alert(t("home.deleteFile"), t("home.deleteFileMsg"), [
+      { text: t("common.cancel"), style: "cancel" },
       {
-        text: "확인", style: "destructive", onPress: async () => {
+        text: t("common.confirm"), style: "destructive", onPress: async () => {
           await deleteFileFromDisk(uri);
           setRecentFiles((prev) => prev.filter((f) => f.uri !== uri));
         },
@@ -895,10 +902,10 @@ export default function HomeScreen() {
   const deleteAll = useCallback(() => {
     const targets = selectedCat === DEFAULT_CATEGORY ? recentFiles : filteredFiles;
     if (!targets.length) return;
-    Alert.alert("전체 삭제", "현재 폴더의 파일을 모두 삭제하시겠습니까?", [
-      { text: "취소", style: "cancel" },
+    Alert.alert(t("home.deleteAllTitle"), t("home.deleteAllMsg"), [
+      { text: t("common.cancel"), style: "cancel" },
       {
-        text: "확인", style: "destructive",
+        text: t("common.confirm"), style: "destructive",
         onPress: async () => {
           const uris = new Set(targets.map((f) => f.uri));
           await Promise.all(targets.map((f) => deleteFileFromDisk(f.uri)));
@@ -909,10 +916,10 @@ export default function HomeScreen() {
   }, [recentFiles, filteredFiles, selectedCat]);
 
   const deleteSelected = () => {
-    Alert.alert(`${selectedUris.size}개 삭제`, "선택한 파일을 삭제하시겠습니까?", [
-      { text: "취소", style: "cancel" },
+    Alert.alert(t("home.deleteSelected", { count: selectedUris.size }), t("home.deleteSelectedMsg"), [
+      { text: t("common.cancel"), style: "cancel" },
       {
-        text: "삭제", style: "destructive",
+        text: t("common.delete"), style: "destructive",
         onPress: async () => {
           await Promise.all([...selectedUris].map((uri) => deleteFileFromDisk(uri)));
           setRecentFiles((prev) => prev.filter((f) => !selectedUris.has(f.uri)));
@@ -1047,14 +1054,14 @@ export default function HomeScreen() {
         onPress={() => setFilePickerVisible(true)}
       >
         <Text style={styles.pickIcon}>📂</Text>
-        <Text style={styles.pickText}>동영상 파일 열기</Text>
-        <Text style={styles.pickSub}>MP4, MKV, AVI, MOV 또는 YouTube URL</Text>
+        <Text style={styles.pickText}>{t("home.pickText")}</Text>
+        <Text style={styles.pickSub}>{t("home.pickSub")}</Text>
       </TouchableOpacity>
 
       {/* ── Recently played horizontal scroll ──────────────────────────────── */}
       {recentlyPlayed.length > 0 && (
         <View style={styles.recentPlaySection}>
-          <Text style={styles.recentPlayTitle}>최근 재생</Text>
+          <Text style={styles.recentPlayTitle}>{t("home.recentPlay")}</Text>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.recentPlayRow}>
             {recentlyPlayed.map((file) => (
               <TouchableOpacity
@@ -1080,7 +1087,7 @@ export default function HomeScreen() {
               style={styles.searchInput}
               value={searchQuery}
               onChangeText={setSearchQuery}
-              placeholder="파일 검색..."
+              placeholder={t("home.searchPlaceholder")}
               placeholderTextColor="#444"
               autoFocus
               selectionColor="#2563eb"
@@ -1092,7 +1099,7 @@ export default function HomeScreen() {
         ) : (
           <TouchableOpacity style={styles.searchBarInactive} onPress={() => setSearchActive(true)}>
             <Text style={styles.searchIcon}>🔍</Text>
-            <Text style={styles.searchPlaceholder}>파일 검색...</Text>
+            <Text style={styles.searchPlaceholder}>{t("home.searchPlaceholder")}</Text>
           </TouchableOpacity>
         )}
         <TouchableOpacity style={styles.sortBtn} onPress={() => setSortModalVisible(true)}>
@@ -1110,7 +1117,7 @@ export default function HomeScreen() {
             style={[styles.catTab, selectedCat === DEFAULT_CATEGORY && styles.catTabActive]}
             onPress={() => setSelectedCat(DEFAULT_CATEGORY)}
           >
-            <Text style={[styles.catTabText, selectedCat === DEFAULT_CATEGORY && styles.catTabTextActive]}>전체</Text>
+            <Text style={[styles.catTabText, selectedCat === DEFAULT_CATEGORY && styles.catTabTextActive]}>{t("home.allFolders")}</Text>
           </TouchableOpacity>
 
           {/* 즐겨찾기 */}
@@ -1118,7 +1125,7 @@ export default function HomeScreen() {
             style={[styles.catTab, selectedCat === "__fav__" && styles.catTabActive]}
             onPress={() => setSelectedCat("__fav__")}
           >
-            <Text style={[styles.catTabText, selectedCat === "__fav__" && styles.catTabTextActive]}>★ 즐겨찾기</Text>
+            <Text style={[styles.catTabText, selectedCat === "__fav__" && styles.catTabTextActive]}>{t("home.favorites")}</Text>
           </TouchableOpacity>
 
           {/* 미분류 */}
@@ -1126,7 +1133,7 @@ export default function HomeScreen() {
             style={[styles.catTab, selectedCat === "__uncat__" && styles.catTabActive]}
             onPress={() => setSelectedCat("__uncat__")}
           >
-            <Text style={[styles.catTabText, selectedCat === "__uncat__" && styles.catTabTextActive]}>미분류</Text>
+            <Text style={[styles.catTabText, selectedCat === "__uncat__" && styles.catTabTextActive]}>{t("home.uncat")}</Text>
           </TouchableOpacity>
 
           {/* Root categories */}
@@ -1137,10 +1144,10 @@ export default function HomeScreen() {
               onPress={() => setSelectedCat(cat.id)}
               onLongPress={() =>
                 Alert.alert(cat.name, undefined, [
-                  { text: "하위 폴더 만들기", onPress: () => setCatNameModal({ visible: true, parentId: cat.id }) },
-                  { text: "이름 변경", onPress: () => setCatNameModal({ visible: true, editId: cat.id }) },
-                  { text: "폴더 삭제", style: "destructive", onPress: () => deleteCategory(cat.id) },
-                  { text: "취소", style: "cancel" },
+                  { text: t("home.createSubfolder"), onPress: () => setCatNameModal({ visible: true, parentId: cat.id }) },
+                  { text: t("home.rename"),           onPress: () => setCatNameModal({ visible: true, editId: cat.id }) },
+                  { text: t("home.folderDelete"),     style: "destructive", onPress: () => deleteCategory(cat.id) },
+                  { text: t("common.cancel"),         style: "cancel" },
                 ])
               }
               delayLongPress={400}
@@ -1153,7 +1160,7 @@ export default function HomeScreen() {
 
           {/* New folder button */}
           <TouchableOpacity style={styles.catTabNew} onPress={() => setCatNameModal({ visible: true })}>
-            <Text style={styles.catTabNewText}>＋ 새 폴더</Text>
+          <Text style={styles.catTabNewText}>＋</Text>
           </TouchableOpacity>
         </ScrollView>
       </View>
@@ -1183,9 +1190,9 @@ export default function HomeScreen() {
                   onPress={() => setSelectedCat(sub.id)}
                   onLongPress={() =>
                     Alert.alert(sub.name, undefined, [
-                      { text: "이름 변경", onPress: () => setCatNameModal({ visible: true, editId: sub.id }) },
-                      { text: "폴더 삭제", style: "destructive", onPress: () => deleteCategory(sub.id) },
-                      { text: "취소", style: "cancel" },
+                      { text: t("home.rename"),       onPress: () => setCatNameModal({ visible: true, editId: sub.id }) },
+                      { text: t("home.folderDelete"), style: "destructive", onPress: () => deleteCategory(sub.id) },
+                      { text: t("common.cancel"),     style: "cancel" },
                     ])
                   }
                   delayLongPress={400}
@@ -1210,15 +1217,15 @@ export default function HomeScreen() {
       {/* ── Multi-select action bar ─────────────────────────────────────────── */}
       {multiSelect && (
         <View style={styles.multiBar}>
-          <Text style={styles.multiCount}>{selectedUris.size}개 선택됨</Text>
+          <Text style={styles.multiCount}>{t("home.selected", { count: selectedUris.size })}</Text>
           <TouchableOpacity style={styles.multiBtn} onPress={() => setBatchMoveVisible(true)} disabled={selectedUris.size === 0}>
-            <Text style={styles.multiBtnText}>📁 이동</Text>
+            <Text style={styles.multiBtnText}>{t("home.moveBtn")}</Text>
           </TouchableOpacity>
           <TouchableOpacity style={[styles.multiBtn, styles.multiBtnDanger]} onPress={deleteSelected} disabled={selectedUris.size === 0}>
-            <Text style={styles.multiBtnText}>🗑️ 삭제</Text>
+            <Text style={styles.multiBtnText}>{t("home.deleteBtn")}</Text>
           </TouchableOpacity>
           <TouchableOpacity style={styles.multiBtn} onPress={() => { setMultiSelect(false); setSelectedUris(new Set()); }}>
-            <Text style={styles.multiBtnText}>취소</Text>
+            <Text style={styles.multiBtnText}>{t("common.cancel")}</Text>
           </TouchableOpacity>
         </View>
       )}
@@ -1230,19 +1237,19 @@ export default function HomeScreen() {
             <Text style={styles.sectionTitle}>
               {parentCatObj ? `📁 ${parentCatObj.name} › ` : ""}
               {currentCatObj ? `📁 ${currentCatObj.name}` :
-               selectedCat === "__uncat__" ? "미분류" :
-               selectedCat === "__fav__"   ? "★ 즐겨찾기" : "최근 파일"}
-              <Text style={styles.fileCount}> {filteredFiles.length}개</Text>
+               selectedCat === "__uncat__" ? t("home.uncat") :
+               selectedCat === "__fav__"   ? t("home.favorites") : t("home.fileList")}
+              <Text style={styles.fileCount}> {t("home.fileCount", { count: filteredFiles.length })}</Text>
             </Text>
             <View style={{ flexDirection: "row", gap: 12, alignItems: "center" }}>
               {!multiSelect && (
                 <TouchableOpacity onPress={() => setMultiSelect(true)}>
-                  <Text style={styles.multiSelectText}>선택</Text>
+                  <Text style={styles.multiSelectText}>{t("home.multiSelectBtn")}</Text>
                 </TouchableOpacity>
               )}
               {filteredFiles.length > 0 && (
                 <TouchableOpacity onPress={deleteAll} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                  <Text style={styles.clearAllText}>전체 삭제</Text>
+                  <Text style={styles.clearAllText}>{t("home.deleteAll")}</Text>
                 </TouchableOpacity>
               )}
             </View>
@@ -1251,9 +1258,9 @@ export default function HomeScreen() {
           {filteredFiles.length === 0 ? (
             <View style={styles.emptyBox}>
               <Text style={styles.emptyText}>
-                {searchQuery ? "검색 결과가 없습니다" : "이 폴더에 파일이 없습니다"}
+                {searchQuery ? t("home.noSearchResult") : t("home.noFilesInFolder")}
               </Text>
-              <Text style={styles.emptyHint}>파일을 길게 눌러 다중 선택하거나 폴더로 이동하세요</Text>
+              <Text style={styles.emptyHint}>{t("home.multiSelectHint")}</Text>
             </View>
           ) : (
             <FlatList
@@ -1278,10 +1285,10 @@ export default function HomeScreen() {
       {/* Bottom nav */}
       <View style={[styles.navButtons, { paddingBottom: insets.bottom }]}>
         <TouchableOpacity style={styles.navBtn} onPress={() => router.push("/models")}>
-          <Text style={styles.navBtnText}>🤖 모델 관리</Text>
+          <Text style={styles.navBtnText}>{t("home.modelManage")}</Text>
         </TouchableOpacity>
         <TouchableOpacity style={styles.navBtn} onPress={() => router.push("/settings")}>
-          <Text style={styles.navBtnText}>⚙️ 설정</Text>
+          <Text style={styles.navBtnText}>{t("home.settingsBtn")}</Text>
         </TouchableOpacity>
       </View>
 
@@ -1346,9 +1353,9 @@ export default function HomeScreen() {
             </Text>
 
             {[
-              { label: "📷  썸네일 변경", onPress: () => { setFileActionModal({ visible: false }); pickManualThumbnail(fileActionModal.file!.uri); } },
-              { label: "✏️  이름 변경",   onPress: () => { setFileActionModal({ visible: false }); setRenameModal({ visible: true, file: fileActionModal.file }); } },
-              { label: "📁  폴더로 이동", onPress: () => { setFileActionModal({ visible: false }); setMoveModal({ visible: true, file: fileActionModal.file }); } },
+              { label: `📷  ${t("home.changeThumbnail")}`, onPress: () => { setFileActionModal({ visible: false }); pickManualThumbnail(fileActionModal.file!.uri); } },
+              { label: `✏️  ${t("home.rename")}`,          onPress: () => { setFileActionModal({ visible: false }); setRenameModal({ visible: true, file: fileActionModal.file }); } },
+              { label: `📁  ${t("home.moveFolder")}`,      onPress: () => { setFileActionModal({ visible: false }); setMoveModal({ visible: true, file: fileActionModal.file }); } },
             ].map((btn) => (
               <TouchableOpacity
                 key={btn.label}
@@ -1373,7 +1380,7 @@ export default function HomeScreen() {
               }}
               onPress={() => setFileActionModal({ visible: false })}
             >
-              <Text style={{ color: "#aaa", fontSize: 16, fontWeight: "600" }}>취소</Text>
+              <Text style={{ color: "#aaa", fontSize: 16, fontWeight: "600" }}>{t("common.cancel")}</Text>
             </TouchableOpacity>
           </Pressable>
         </Pressable>
@@ -1412,16 +1419,16 @@ export default function HomeScreen() {
       >
         <Pressable style={catModalStyles.backdrop} onPress={handleResumeCancel}>
           <Pressable style={[catModalStyles.card, { gap: 16 }]} onPress={() => {}}>
-            <Text style={catModalStyles.title}>번역 재개</Text>
+            <Text style={catModalStyles.title}>{t("home.resumeTitle")}</Text>
             <Text style={{ color: '#aaa', fontSize: 14, textAlign: 'center', lineHeight: 22 }}>
-              "{resumeDialog?.videoTitle}" 번역이{'\n'}중단됐습니다. 이어서 진행할까요?
+              {t("home.resumeMsg", { title: resumeDialog?.videoTitle })}
             </Text>
             <View style={catModalStyles.btnRow}>
               <TouchableOpacity style={catModalStyles.cancelBtn} onPress={handleResumeCancel}>
-                <Text style={catModalStyles.cancelText}>취소</Text>
+                <Text style={catModalStyles.cancelText}>{t("common.cancel")}</Text>
               </TouchableOpacity>
               <TouchableOpacity style={catModalStyles.confirmBtn} onPress={handleResume}>
-                <Text style={catModalStyles.confirmText}>재개</Text>
+                <Text style={catModalStyles.confirmText}>{t("home.resume")}</Text>
               </TouchableOpacity>
             </View>
           </Pressable>

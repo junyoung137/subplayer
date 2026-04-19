@@ -9,6 +9,7 @@ import {
   Switch,
 } from "react-native";
 import { router } from "expo-router";
+import { useTranslation } from "react-i18next";
 import * as FileSystem from "expo-file-system/legacy";
 import { WHISPER_MODELS } from "../constants/whisperModels";
 import { ModelDownloader } from "../components/ModelDownloader";
@@ -28,6 +29,7 @@ export default function ModelsScreen() {
   const selectedModel       = useSettingsStore((s) => s.whisperModel);
   const update              = useSettingsStore((s) => s.update);
   const thermalProtection   = useSettingsStore((s) => s.thermalProtection);
+  const { t } = useTranslation();
 
   const [gemmaPhase,    setGemmaPhase]    = useState<GemmaPhase>("checking");
   const [gemmaProgress, setGemmaProgress] = useState<DownloadProgress | null>(null);
@@ -78,23 +80,23 @@ export default function ModelsScreen() {
   };
 
   const handleGemmaDelete = () => {
-    Alert.alert("모델 삭제", "번역 모델을 삭제할까요?", [
-      { text: "취소", style: "cancel" },
+    Alert.alert(t("models.deleteModel"), t("models.deleteModelMsg"), [
+      { text: t("common.cancel"), style: "cancel" },
       {
-        text: "삭제",
+        text: t("common.delete"),
         style: "destructive",
         onPress: async () => {
           try {
             await deleteGemmaModel();
             const remaining = await getLocalModelPath();
             if (remaining) {
-              Alert.alert("삭제 실패", "모델 파일을 삭제하지 못했습니다. 저장 공간을 확인해 주세요.");
+              Alert.alert(t("models.deleteFailed"), t("models.deleteFailedMsg"));
               return;
             }
             setGemmaPhase("idle_not_downloaded");
           } catch (e) {
-            const msg = e instanceof Error ? e.message : "알 수 없는 오류가 발생했습니다.";
-            Alert.alert("삭제 실패", msg);
+            const msg = e instanceof Error ? e.message : t("common.unknownError");
+            Alert.alert(t("models.deleteFailed"), msg);
           }
         },
       },
@@ -107,7 +109,7 @@ export default function ModelsScreen() {
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
 
       {/* ── 음성 인식 ─────────────────────────────────────────────── */}
-      <Text style={styles.sectionLabel}>음성 인식</Text>
+      <Text style={styles.sectionLabel}>{t("models.speechRecognition")}</Text>
       <View style={styles.card}>
         {WHISPER_MODELS.map((model) => (
           <ModelDownloader
@@ -121,19 +123,19 @@ export default function ModelsScreen() {
       </View>
 
       {/* ── Translation Model ──────────────────────────────────── */}
-      <Text style={styles.sectionLabel}>번역 모델</Text>
+      <Text style={styles.sectionLabel}>{t("models.translationModel")}</Text>
       <View style={styles.card}>
         <View style={styles.cardRow}>
           {/* Top row: version/size info + action button */}
           <View style={styles.cardTopRow}>
             <View>
-              <Text style={styles.cardName}>버전: v1.0</Text>
-              <Text style={styles.cardSub}>~2.8 GB</Text>
+              <Text style={styles.cardName}>{t("models.version")}</Text>
+              <Text style={styles.cardSub}>{t("models.size")}</Text>
             </View>
 
             {gemmaPhase === "idle_not_downloaded" && (
               <TouchableOpacity style={styles.btnDownload} onPress={handleGemmaDownload}>
-                <Text style={styles.btnDownloadText}>다운로드</Text>
+                <Text style={styles.btnDownloadText}>{t("models.download")}</Text>
               </TouchableOpacity>
             )}
 
@@ -144,21 +146,21 @@ export default function ModelsScreen() {
                 </View>
                 <Text style={styles.progressText}>{pct}%</Text>
                 <TouchableOpacity onPress={handleGemmaCancel}>
-                  <Text style={styles.cancelText}>취소</Text>
+                  <Text style={styles.cancelText}>{t("common.cancel")}</Text>
                 </TouchableOpacity>
               </View>
             )}
 
             {gemmaPhase === "idle_downloaded" && (
               <TouchableOpacity style={styles.btnDelete} onPress={handleGemmaDelete}>
-                <Text style={styles.btnDeleteText}>삭제</Text>
+                <Text style={styles.btnDeleteText}>{t("common.delete")}</Text>
               </TouchableOpacity>
             )}
           </View>
 
           {/* Bottom row: thermal protection toggle */}
           <View style={styles.cardBottomRow}>
-            <Text style={styles.rowLabel}>발열 보호 모드</Text>
+            <Text style={styles.rowLabel}>{t("models.thermalProtection")}</Text>
             <Switch
               value={thermalProtection}
               onValueChange={(v) => update({ thermalProtection: v })}

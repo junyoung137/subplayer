@@ -13,6 +13,7 @@ import {
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { router } from "expo-router";
+import { useTranslation } from "react-i18next";
 import { usePlayerStore } from "../store/usePlayerStore";
 import { useSettingsStore } from "../store/useSettingsStore";
 import { useWhisperModel } from "../hooks/useWhisperModel";
@@ -182,6 +183,7 @@ interface SmoothProgressBarProps {
 }
 
 function SmoothProgressBar({ percent, step, isDone }: SmoothProgressBarProps) {
+  const { t } = useTranslation();
   const smoothAnim      = useRef(new Animated.Value(0)).current;
   const smoothRef       = useRef(0);
   const [smoothDisplay, setSmoothDisplay] = useState(0);
@@ -358,15 +360,15 @@ function SmoothProgressBar({ percent, step, isDone }: SmoothProgressBarProps) {
       ? `~${smoothDisplay}%`
       : `${smoothDisplay}%`;
   const statusMsg  = isStuck
-    ? "번역 모델 준비 중… 잠시만 기다려 주세요"
+    ? t("processing.translationModelReady")
     : step === 'translating' && smoothDisplay < 5
-      ? "번역 준비 중…"
+      ? t("processing.translationPreparing")
       : null;
 
   return (
     <View style={styles.overallWrap}>
       <View style={styles.overallRow}>
-        <Text style={styles.overallLabel}>전체 진행률</Text>
+        <Text style={styles.overallLabel}>{t("processing.totalProgress")}</Text>
         <Text style={styles.overallPercent}>{pctText}</Text>
       </View>
       <View style={styles.overallTrack}>
@@ -398,6 +400,7 @@ const smoothBarStyles = StyleSheet.create({
 // ── Screen ────────────────────────────────────────────────────────────────────
 
 export default function ProcessingScreen() {
+  const { t } = useTranslation();
   const videoUri           = usePlayerStore((s) => s.videoUri);
   const videoName          = usePlayerStore((s) => s.videoName);
   const setSubtitles       = usePlayerStore((s) => s.setSubtitles);
@@ -423,7 +426,7 @@ export default function ProcessingScreen() {
   const animatedProgress    = useRef(new Animated.Value(0)).current;
   const indeterminateAnimRef = useRef<Animated.CompositeAnimation | null>(null);
   const stageStartTimeRef   = useRef<Partial<Record<number, number>>>({});
-  const [timeText, setTimeText] = useState<string>("계산 중...");
+  const [timeText, setTimeText] = useState<string>("");
 
   // ── Effect 1: cache check + resume detection ──────────────────────────────
   useEffect(() => {
@@ -465,11 +468,11 @@ export default function ProcessingScreen() {
 
     if (modelError) {
       Alert.alert(
-        "모델 필요",
-        "Whisper 모델이 로드되지 않았습니다. 모델 관리 화면에서 다운로드해 주세요.",
+        t("processing.modelRequired"),
+        t("processing.modelNotLoaded"),
         [
-          { text: "모델 관리", onPress: () => router.replace("/models") },
-          { text: "취소",     onPress: () => router.back(), style: "cancel" },
+          { text: t("processing.modelManage"), onPress: () => router.replace("/models") },
+          { text: t("processing.cancel"),      onPress: () => router.back(), style: "cancel" },
         ]
       );
       return;
@@ -486,11 +489,11 @@ export default function ProcessingScreen() {
           setPlaying(true);
           if (translationSkipped) {
             Alert.alert(
-              "번역 모델 없음",
-              "번역 모델 없음 — 원문만 표시\n\n모델 관리 화면에서 Gemma 모델을 다운로드하면 한국어 번역이 가능합니다.",
+              t("processing.noTranslationModel"),
+              t("processing.noTranslationModelMsg"),
               [
-                { text: "모델 관리", onPress: () => router.replace("/models") },
-                { text: "원문으로 계속", onPress: () => router.replace("/player") },
+                { text: t("processing.modelManage"),        onPress: () => router.replace("/models") },
+                { text: t("processing.continueWithOriginal"), onPress: () => router.replace("/player") },
               ]
             );
           } else {
@@ -560,10 +563,10 @@ export default function ProcessingScreen() {
   };
 
   const stages: StageInfo[] = [
-    { id: 1, label: "오디오 추출",    status: getStatus(1) },
-    { id: 2, label: "음성 인식",      status: getStatus(2) },
-    { id: 3, label: "번역 모델 로딩", status: getStatus(3) },
-    { id: 4, label: "번역 중",        status: getStatus(4) },
+    { id: 1, label: t("processing.extractAudio"),       status: getStatus(1) },
+    { id: 2, label: t("processing.transcribe"),         status: getStatus(2) },
+    { id: 3, label: t("processing.loadTranslationModel"), status: getStatus(3) },
+    { id: 4, label: t("processing.translating"),        status: getStatus(4) },
   ];
 
   const activeStageId = stages.find((s) => s.status === "active")?.id ?? null;
@@ -580,7 +583,7 @@ export default function ProcessingScreen() {
     animatedProgress.setValue(0);
     indeterminateAnimRef.current?.stop();
     indeterminateAnimRef.current = null;
-    setTimeText("계산 중...");
+    setTimeText(t("processing.calculating"));
 
     // Indeterminate animation for stages 1 (fast) and 3 (slow)
     if (currentStageIdx === 1) {
@@ -623,8 +626,8 @@ export default function ProcessingScreen() {
   useEffect(() => {
     // Only compute for stages with real sub-progress
     if (currentStageIdx !== 2 && currentStageIdx !== 4) {
-      // Indeterminate stages — keep "계산 중..."
-      setTimeText("계산 중...");
+      // Indeterminate stages — keep calculating text
+      setTimeText(t("processing.calculating"));
       return;
     }
     if (effTotal <= 0) return;
@@ -632,11 +635,11 @@ export default function ProcessingScreen() {
     const realSp = Math.round((effCurrent / effTotal) * 100);
 
     if (realSp < 5) {
-      setTimeText("계산 중...");
+      setTimeText(t("processing.calculating"));
       return;
     }
     if (realSp >= 98) {
-      setTimeText("완료 중...");
+      setTimeText(t("processing.completing"));
       return;
     }
 
@@ -645,7 +648,7 @@ export default function ProcessingScreen() {
     const compute = () => {
       const elapsed = (Date.now() - startTime) / 1000;
       if (elapsed < 3) {
-        setTimeText("계산 중...");
+        setTimeText(t("processing.calculating"));
         return;
       }
       const rate = realSp / elapsed; // % per second
@@ -654,9 +657,9 @@ export default function ProcessingScreen() {
       if (remaining > 60) {
         const m = Math.floor(remaining / 60);
         const s = Math.round(remaining % 60);
-        setTimeText(`약 ${m}분 ${s}초`);
+        setTimeText(t("processing.timeMinSec", { m, s }));
       } else {
-        setTimeText(`약 ${Math.round(remaining)}초`);
+        setTimeText(t("processing.timeSec", { s: Math.round(remaining) }));
       }
     };
 
@@ -668,13 +671,13 @@ export default function ProcessingScreen() {
   // ── Sub-label for the active stage ────────────────────────────────────────
   const activeSubLabel: string = (() => {
     switch (activeStageId) {
-      case 1: return "오디오 변환 중...";
-      case 2: return effTotal > 0 ? `청크 ${effCurrent} / ${effTotal}` : "분석 중...";
+      case 1: return t("processing.convertingAudio");
+      case 2: return effTotal > 0 ? t("processing.chunk", { current: effCurrent, total: effTotal }) : t("processing.analyzing");
       case 3:
-        if (displayMessage.includes("언로드"))  return "Whisper 언로드 중...";
-        if (displayMessage.includes("안정화"))  return "메모리 안정화 중...";
-        return "모델 초기화 중...";
-      case 4: return effTotal > 0 ? `${effCurrent} / ${effTotal}개 문장 번역됨` : "준비 중...";
+        if (displayMessage.includes("언로드"))  return t("processing.whisperUnloading");
+        if (displayMessage.includes("안정화"))  return t("processing.memoryStabilizing");
+        return t("processing.modelInitializing");
+      case 4: return effTotal > 0 ? t("processing.sentencesTranslated", { current: effCurrent, total: effTotal }) : t("processing.preparing");
       default: return "";
     }
   })();
@@ -694,10 +697,10 @@ export default function ProcessingScreen() {
       <SafeAreaView style={styles.safe}>
         <View style={styles.centerContainer}>
           <Text style={styles.appName}>RealtimeSub</Text>
-          <Text style={styles.fileName} numberOfLines={2}>{videoName ?? "동영상"}</Text>
+          <Text style={styles.fileName} numberOfLines={2}>{videoName ?? t("processing.video")}</Text>
           <View style={styles.simpleCard}>
             <ActivityIndicator size="large" color="#3b82f6" />
-            <Text style={styles.simpleCardText}>캐시된 자막 불러오는 중…</Text>
+            <Text style={styles.simpleCardText}>{t("processing.loadingCache")}</Text>
           </View>
         </View>
       </SafeAreaView>
@@ -714,13 +717,13 @@ export default function ProcessingScreen() {
       >
         {/* Header */}
         <Text style={styles.appName}>RealtimeSub</Text>
-        <Text style={styles.fileName} numberOfLines={2}>{videoName ?? "동영상"}</Text>
+        <Text style={styles.fileName} numberOfLines={2}>{videoName ?? t("processing.video")}</Text>
 
         {/* Resume banner */}
         {resumeCount !== null && !isDone && !isError && (
           <View style={styles.resumeBanner}>
             <Text style={styles.resumeText}>
-              이전 작업 발견: {resumeCount}개 세그먼트 완료됨. 이어서 번역합니다…
+              {t("processing.resumeBanner", { count: resumeCount })}
             </Text>
           </View>
         )}
@@ -729,7 +732,7 @@ export default function ProcessingScreen() {
         {isWaitingForModel && !isDone && !isError && (
           <View style={styles.waitCard}>
             <ActivityIndicator size="small" color="#3b82f6" />
-            <Text style={styles.waitText}>Whisper 모델 로드 중…</Text>
+            <Text style={styles.waitText}>{t("processing.whisperLoading")}</Text>
           </View>
         )}
 
@@ -737,7 +740,7 @@ export default function ProcessingScreen() {
         {isError && (
           <View style={styles.errorCard}>
             <Text style={styles.errorIcon}>✗</Text>
-            <Text style={styles.errorTitle}>처리 실패</Text>
+            <Text style={styles.errorTitle}>{t("processing.processFailed")}</Text>
             {progress.error ? (
               <Text style={styles.errorDetail}>{progress.error}</Text>
             ) : null}
@@ -769,15 +772,15 @@ export default function ProcessingScreen() {
         {isDone && (
           <View style={styles.doneCard}>
             <Text style={styles.doneIcon}>✓</Text>
-            <Text style={styles.doneTitle}>처리 완료</Text>
-            <Text style={styles.doneSubtitle}>플레이어로 이동 중…</Text>
+            <Text style={styles.doneTitle}>{t("processing.done")}</Text>
+            <Text style={styles.doneSubtitle}>{t("processing.doneSubtitle")}</Text>
           </View>
         )}
 
         {/* Cancel / back button */}
         <TouchableOpacity style={styles.cancelBtn} onPress={handleCancel}>
           <Text style={styles.cancelBtnText}>
-            {isError ? "← 돌아가기" : "취소"}
+            {isError ? t("processing.goBack") : t("processing.cancel")}
           </Text>
         </TouchableOpacity>
       </ScrollView>

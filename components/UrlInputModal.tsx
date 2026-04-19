@@ -22,6 +22,7 @@ import {
   Alert,
   ActivityIndicator,
 } from "react-native";
+import { useTranslation } from "react-i18next";
 import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
 // ✅ 핵심 수정: YouTubePlayer에서 직접 import하지 않고 utils에서 import
@@ -69,6 +70,7 @@ export function UrlInputModal({
   onLocalFilePicked,
   onUrlPicked,
 }: UrlInputModalProps) {
+  const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState<Tab>("local");
   const [urlInput,  setUrlInput]  = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -90,13 +92,13 @@ export function UrlInputModal({
       const file = result.assets[0];
       const stableUri = await ensureFileUri(file.uri, file.name);
       if (!stableUri) {
-        Alert.alert("오류", "파일을 캐시에 복사할 수 없습니다.");
+        Alert.alert(t("url.error"), t("url.fileCopyError"));
         return;
       }
       onClose();
       onLocalFilePicked(stableUri, file.name);
     } catch (e) {
-      Alert.alert("오류", "파일을 열 수 없습니다: " + String(e));
+      Alert.alert(t("url.error"), t("url.fileOpenError") + String(e));
     } finally {
       setIsLoading(false);
     }
@@ -107,7 +109,7 @@ export function UrlInputModal({
     setUrlError(null);
     const trimmed = urlInput.trim();
     if (!trimmed) {
-      setUrlError("URL을 입력해 주세요.");
+      setUrlError(t("url.urlRequired"));
       return;
     }
 
@@ -122,13 +124,11 @@ export function UrlInputModal({
 
     // 일반 URL (http/https) — 향후 확장 예정
     if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
-      setUrlError("일반 URL 재생은 준비 중입니다.\nYouTube URL을 입력해 주세요.");
+      setUrlError(t("url.generalUrlNotSupported"));
       return;
     }
 
-    setUrlError(
-      "YouTube URL 또는 동영상 ID를 입력해 주세요.\n예) https://youtube.com/watch?v=..."
-    );
+    setUrlError(t("url.invalidUrl"));
   }, [urlInput, onClose, onUrlPicked]);
 
   // ── 모달 닫기 ────────────────────────────────────────────────────────────
@@ -153,7 +153,7 @@ export function UrlInputModal({
           <View style={styles.handle} />
 
           {/* 헤더 */}
-          <Text style={styles.title}>동영상 불러오기</Text>
+          <Text style={styles.title}>{t("url.title")}</Text>
 
           {/* 탭 */}
           <View style={styles.tabRow}>
@@ -162,7 +162,7 @@ export function UrlInputModal({
               onPress={() => setActiveTab("local")}
             >
               <Text style={[styles.tabText, activeTab === "local" && styles.tabTextActive]}>
-                📁 로컬 파일
+                {t("url.localFile")}
               </Text>
             </TouchableOpacity>
             <TouchableOpacity
@@ -170,7 +170,7 @@ export function UrlInputModal({
               onPress={() => setActiveTab("url")}
             >
               <Text style={[styles.tabText, activeTab === "url" && styles.tabTextActive]}>
-                🌐 URL / YouTube
+                {t("url.urlYoutube")}
               </Text>
             </TouchableOpacity>
           </View>
@@ -189,8 +189,8 @@ export function UrlInputModal({
                 ) : (
                   <>
                     <Text style={styles.bigPickIcon}>📂</Text>
-                    <Text style={styles.bigPickText}>파일 선택</Text>
-                    <Text style={styles.bigPickSub}>MP4, MKV, AVI, MOV 지원</Text>
+                    <Text style={styles.bigPickText}>{t("url.selectFile")}</Text>
+                    <Text style={styles.bigPickSub}>{t("url.supportedFormats")}</Text>
                   </>
                 )}
               </TouchableOpacity>
@@ -203,7 +203,7 @@ export function UrlInputModal({
 
               {/* 입력창 */}
               <View style={styles.inputWrap}>
-                <Text style={styles.inputLabel}>YouTube URL 또는 동영상 ID</Text>
+                <Text style={styles.inputLabel}>{t("url.youtubeUrlLabel")}</Text>
                 <View style={[
                   styles.inputRow,
                   parsedId && urlInput.length > 0 ? styles.inputRowValid : undefined,
@@ -212,7 +212,7 @@ export function UrlInputModal({
                   <TextInput
                     style={styles.input}
                     value={urlInput}
-                    onChangeText={(t) => { setUrlInput(t); setUrlError(null); }}
+                    onChangeText={(v) => { setUrlInput(v); setUrlError(null); }}
                     placeholder="https://youtube.com/watch?v=..."
                     placeholderTextColor="#444"
                     autoCorrect={false}
@@ -235,7 +235,7 @@ export function UrlInputModal({
                 {parsedId && urlInput.length > 0 && (
                   <View style={styles.parsedRow}>
                     <Text style={styles.parsedIcon}>✓</Text>
-                    <Text style={styles.parsedText}>ID 인식: {parsedId}</Text>
+                    <Text style={styles.parsedText}>{t("url.idDetected", { id: parsedId })}</Text>
                   </View>
                 )}
 
@@ -251,13 +251,13 @@ export function UrlInputModal({
                 onPress={confirmUrl}
                 disabled={!urlInput.trim()}
               >
-                <Text style={styles.confirmBtnText}>재생 →</Text>
+                <Text style={styles.confirmBtnText}>{t("url.play")}</Text>
               </TouchableOpacity>
 
               {/* 구분선 */}
               <View style={styles.divider}>
                 <View style={styles.dividerLine} />
-                <Text style={styles.dividerText}>예시</Text>
+                <Text style={styles.dividerText}>{t("url.examples")}</Text>
                 <View style={styles.dividerLine} />
               </View>
 
@@ -282,11 +282,7 @@ export function UrlInputModal({
 
               {/* 안내 박스 */}
               <View style={styles.infoBox}>
-                <Text style={styles.infoText}>
-                  💡 YouTube 자막 데이터(timedtext)를 직접 가져와{"\n"}
-                  Gemma로 번역합니다. 자막이 없는 영상은{"\n"}
-                  Whisper 음성 인식으로 자동 전환됩니다.
-                </Text>
+                <Text style={styles.infoText}>{t("url.infoText")}</Text>
               </View>
 
             </View>

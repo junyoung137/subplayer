@@ -43,7 +43,9 @@
       "expo-router",
       [
         "expo-document-picker",
-        { "iCloudContainerEnvironment": "Production" }
+        {
+          "iCloudContainerEnvironment": "Production"
+        }
       ],
       [
         "expo-media-library",
@@ -53,7 +55,8 @@
           "isAccessMediaLocationEnabled": true
         }
       ],
-      "llama.rn"
+      "llama.rn",
+      "expo-localization"
     ],
     "experiments": {
       "typedRoutes": true

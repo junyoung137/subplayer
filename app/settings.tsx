@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import {
   View,
   Text,
@@ -6,26 +6,49 @@ import {
   ScrollView,
   Switch,
   TouchableOpacity,
+  Modal,
+  Pressable,
 } from "react-native";
 import Slider from "@react-native-community/slider";
 import { router } from "expo-router";
+import { useTranslation } from "react-i18next";
 import { useSettingsStore } from "../store/useSettingsStore";
+import { LANGUAGES } from "../constants/languages";
 
 export default function SettingsScreen() {
   const settings = useSettingsStore();
   const { update } = settings;
+  const { t } = useTranslation();
+
+  const [langDropdownVisible, setLangDropdownVisible] = useState(false);
 
   const subtitleStyles = [
-    { key: "outline",  label: "외곽선형",   desc: "갈매기 스타일"   },
-    { key: "pill",     label: "박스형",     desc: "현재 스타일"     },
-    { key: "bar",      label: "바형",       desc: "넷플릭스 스타일" },
+    { key: "outline",  label: t("settings.outlineStyle"), desc: t("settings.outlineDesc") },
+    { key: "pill",     label: t("settings.pillStyle"),    desc: t("settings.pillDesc")    },
+    { key: "bar",      label: t("settings.barStyle"),     desc: t("settings.barDesc")     },
   ] as const;
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
 
+      {/* ── Interface language ──────────────────────────────────────────────── */}
+      <Section title={t("settings.languageSection")}>
+        <View style={styles.row}>
+          <Text style={styles.rowLabel}>{t("settings.displayLanguage")}</Text>
+          <TouchableOpacity
+            style={styles.dropdown}
+            onPress={() => setLangDropdownVisible(true)}
+          >
+            <Text style={styles.dropdownText}>
+              {LANGUAGES.find((l) => l.code === settings.interfaceLanguage)?.nativeName ?? "한국어"}
+            </Text>
+            <Text style={styles.dropdownArrow}>▾</Text>
+          </TouchableOpacity>
+        </View>
+      </Section>
+
       {/* ── Audio chunk duration ─────────────────────────────────────────────── */}
-      <Section title="오디오 청크 길이">
+      <Section title={t("settings.audioChunkDuration")}>
         <View style={styles.chipRow}>
           {([1, 2, 3] as const).map((n) => (
             <TouchableOpacity
@@ -34,7 +57,7 @@ export default function SettingsScreen() {
               onPress={() => update({ chunkDuration: n })}
             >
               <Text style={[styles.chipText, settings.chunkDuration === n && styles.chipTextActive]}>
-                {n}초
+                {n}{t("settings.seconds")}
               </Text>
             </TouchableOpacity>
           ))}
@@ -42,10 +65,10 @@ export default function SettingsScreen() {
       </Section>
 
       {/* ── Subtitle appearance ──────────────────────────────────────────────── */}
-      <Section title="자막 스타일">
+      <Section title={t("settings.subtitleStyleSection")}>
 
         {/* 자막 스타일 종류 선택 */}
-        <Text style={styles.subLabel}>자막 디자인</Text>
+        <Text style={styles.subLabel}>{t("settings.subtitleDesign")}</Text>
         <View style={styles.styleCardRow}>
           {subtitleStyles.map((s) => {
             const isActive = settings.subtitleStyle === s.key;
@@ -81,7 +104,7 @@ export default function SettingsScreen() {
           })}
         </View>
 
-        <Row label={`글자 크기: ${settings.subtitleFontSize}px`}>
+        <Row label={t("settings.fontSize", { size: settings.subtitleFontSize })}>
           <Slider
             style={{ flex: 1 }}
             minimumValue={12}
@@ -94,7 +117,7 @@ export default function SettingsScreen() {
           />
         </Row>
 
-        <Row label={`불투명도: ${Math.round(settings.subtitleOpacity * 100)}%`}>
+        <Row label={t("settings.opacity", { pct: Math.round(settings.subtitleOpacity * 100) })}>
           <Slider
             style={{ flex: 1 }}
             minimumValue={0.3}
@@ -107,7 +130,7 @@ export default function SettingsScreen() {
           />
         </Row>
 
-        <Row label="원문 표시">
+        <Row label={t("settings.showOriginal")}>
           <Switch
             value={settings.showOriginal}
             onValueChange={(v) => update({ showOriginal: v })}
@@ -115,7 +138,7 @@ export default function SettingsScreen() {
           />
         </Row>
 
-        <Row label="자막 모드">
+        <Row label={t("settings.subtitleMode")}>
           <View style={styles.chipRow}>
             {(["both", "translation", "original"] as const).map((mode) => (
               <TouchableOpacity
@@ -124,7 +147,7 @@ export default function SettingsScreen() {
                 onPress={() => update({ subtitleMode: mode })}
               >
                 <Text style={[styles.chipText, settings.subtitleMode === mode && styles.chipTextActive]}>
-                  {mode === "both" ? "둘 다" : mode === "translation" ? "번역만" : "원문만"}
+                  {mode === "both" ? t("settings.both") : mode === "translation" ? t("settings.translationOnly") : t("settings.originalOnly")}
                 </Text>
               </TouchableOpacity>
             ))}
@@ -133,7 +156,7 @@ export default function SettingsScreen() {
       </Section>
 
       {/* ── Timing offset ────────────────────────────────────────────────────── */}
-      <Section title={`타이밍 오프셋: ${settings.timingOffset}초`}>
+      <Section title={t("settings.timingOffset", { offset: settings.timingOffset })}>
         <Slider
           minimumValue={-5}
           maximumValue={0}
@@ -143,8 +166,43 @@ export default function SettingsScreen() {
           minimumTrackTintColor="#2563eb"
           maximumTrackTintColor="#333"
         />
-        <Text style={styles.hint}>STT 처리 지연을 보정합니다 (기본: -1.5초)</Text>
+        <Text style={styles.hint}>{t("settings.timingOffsetHint")}</Text>
       </Section>
+
+      <Modal
+        visible={langDropdownVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setLangDropdownVisible(false)}
+      >
+        <Pressable
+          style={styles.modalBackdrop}
+          onPress={() => setLangDropdownVisible(false)}
+        >
+          <Pressable style={styles.modalCard} onPress={() => {}}>
+            <Text style={styles.modalTitle}>{t("settings.selectDisplayLanguage")}</Text>
+            <ScrollView style={{ maxHeight: 360 }} nestedScrollEnabled>
+              {LANGUAGES.map((lang) => {
+                const isActive = settings.interfaceLanguage === lang.code;
+                return (
+                  <TouchableOpacity
+                    key={lang.code}
+                    style={[styles.modalOption, isActive && styles.modalOptionActive]}
+                    onPress={() => {
+                      update({ interfaceLanguage: lang.code });
+                      setLangDropdownVisible(false);
+                    }}
+                  >
+                    <Text style={styles.modalOptionText}>{lang.nativeName}</Text>
+                    <Text style={styles.modalOptionSub}>{lang.name}</Text>
+                    {isActive && <Text style={styles.modalCheck}>✓</Text>}
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+          </Pressable>
+        </Pressable>
+      </Modal>
 
     </ScrollView>
   );
@@ -303,6 +361,54 @@ const styles = StyleSheet.create({
     borderColor: "#2563eb",
   },
   manageBtnText: { color: "#93c5fd", fontSize: 13, fontWeight: "600" },
+
+  dropdown: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#222",
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    gap: 8,
+    borderWidth: 1,
+    borderColor: "#333",
+  },
+  dropdownText: { color: "#fff", fontSize: 14, fontWeight: "600" },
+  dropdownArrow: { color: "#666", fontSize: 12 },
+
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.6)",
+    justifyContent: "center",
+    paddingHorizontal: 32,
+  },
+  modalCard: {
+    backgroundColor: "#1a1a1a",
+    borderRadius: 16,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: "#2a2a2a",
+  },
+  modalTitle: {
+    color: "#fff",
+    fontSize: 15,
+    fontWeight: "700",
+    textAlign: "center",
+    marginBottom: 12,
+  },
+  modalOption: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 12,
+    paddingHorizontal: 8,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: "#2a2a2a",
+    gap: 8,
+  },
+  modalOptionActive: { backgroundColor: "#1e3a5f", borderRadius: 8 },
+  modalOptionText: { color: "#fff", fontSize: 15, flex: 1 },
+  modalOptionSub: { color: "#555", fontSize: 12 },
+  modalCheck: { color: "#2563eb", fontSize: 14, fontWeight: "700" },
 
   hint:     { color: "#555", fontSize: 11, marginTop: 2 },
   hintOk:   { color: "#22c55e" },

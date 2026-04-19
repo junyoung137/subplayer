@@ -20,6 +20,8 @@ export interface Settings {
   thermalProtection: boolean;
   /** Visual style of the subtitle overlay. */
   subtitleStyle: SubtitleStyleType;
+  /** UI display language code, e.g. "ko", "en", "ja". */
+  interfaceLanguage: string;
 }
 
 interface SettingsStore extends Settings {
@@ -42,6 +44,7 @@ const DEFAULTS: Settings = {
   subtitlePositionPct: 0.85,
   thermalProtection: true,
   subtitleStyle: "outline",  // 기본값: 갈매기형
+  interfaceLanguage: "ko",
 };
 
 const STORAGE_KEY = "realtimesub_settings";
@@ -81,6 +84,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       subtitlePositionPct: current.subtitlePositionPct,
       thermalProtection: current.thermalProtection,
       subtitleStyle: current.subtitleStyle,
+      interfaceLanguage: current.interfaceLanguage,
     };
     AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ ...toSave, ...partial }));
   },

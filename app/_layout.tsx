@@ -1,8 +1,10 @@
+import "../i18n";
 import { useEffect } from "react";
 import { AppRegistry } from "react-native";
 import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { useSettingsStore } from "../store/useSettingsStore";
+import { useAppLanguage } from "../i18n/useAppLanguage";
 import { initDB, purgeExpiredCache } from "../services/subtitleDB";
 // [FIX BUG1] Seed the proxy URL into AsyncStorage at FG startup so the
 // HeadlessJS BG task context (where __DEV__ is always false) can read the
@@ -11,6 +13,7 @@ import { setProxyBaseUrl, PROXY_BASE_URL_DEFAULT } from "../services/youtubeTime
 
 export default function RootLayout() {
   const hydrate = useSettingsStore((s) => s.hydrate);
+  useAppLanguage();
 
   useEffect(() => {
     hydrate();
