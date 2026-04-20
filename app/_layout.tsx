@@ -1,7 +1,7 @@
 import "../i18n";
 import { useEffect } from "react";
-import { AppRegistry } from "react-native";
-import { Stack } from "expo-router";
+import { AppRegistry, View, ActivityIndicator } from "react-native";
+import { Stack, router } from "expo-router";
 import { useTranslation } from "react-i18next";
 import { StatusBar } from "expo-status-bar";
 import { useSettingsStore } from "../store/useSettingsStore";
@@ -11,11 +11,19 @@ import { initDB, purgeExpiredCache } from "../services/subtitleDB";
 // HeadlessJS BG task context (where __DEV__ is always false) can read the
 // correct dev-server URL via getProxyBaseUrl().
 import { setProxyBaseUrl, PROXY_BASE_URL_DEFAULT } from "../services/youtubeTimedText";
+import { onAuthStateChanged } from "../services/authService";
+import { firestore } from "../services/firebase";
+import { useAuthStore } from "../store/useAuthStore";
 
 export default function RootLayout() {
   const { t } = useTranslation();
   const hydrate = useSettingsStore((s) => s.hydrate);
   useAppLanguage();
+
+  const setUser    = useAuthStore((s) => s.setUser);
+  const setIsPro   = useAuthStore((s) => s.setIsPro);
+  const setLoading = useAuthStore((s) => s.setLoading);
+  const isLoading  = useAuthStore((s) => s.isLoading);
 
   useEffect(() => {
     hydrate();
@@ -35,7 +43,40 @@ export default function RootLayout() {
       const { backgroundTranslationTask } = await import('../services/backgroundTranslationTask');
       await backgroundTranslationTask({ ...taskData, isHeadlessContext: true });
     });
+
+    // Auth state listener
+    const unsubscribe = onAuthStateChanged(async (user) => {
+      if (!user) {
+        setUser(null);
+        setIsPro(false);
+        setLoading(false);
+        router.replace("/login");
+        return;
+      }
+
+      setUser(user);
+
+      try {
+        const doc = await firestore().collection("users").doc(user.uid).get();
+        const isPro = (doc.data()?.isPro as boolean) ?? false;
+        setIsPro(isPro);
+      } catch {
+        setIsPro(false);
+      }
+
+      setLoading(false);
+    });
+
+    return () => unsubscribe();
   }, []);
+
+  if (isLoading) {
+    return (
+      <View style={{ flex: 1, backgroundColor: "#0a0a0a", alignItems: "center", justifyContent: "center" }}>
+        <ActivityIndicator size="large" color="#2563eb" />
+      </View>
+    );
+  }
 
   return (
     <>
@@ -56,6 +97,8 @@ export default function RootLayout() {
         <Stack.Screen name="gemmaModels"  options={{ title: "Gemma 모델 관리" }} />
         <Stack.Screen name="youtube-player" options={{ headerShown: false }} />
         <Stack.Screen name="support"        options={{ title: "피드백", headerShown: false }} />
+        <Stack.Screen name="login"          options={{ headerShown: false }} />
+        <Stack.Screen name="signup"         options={{ headerShown: false }} />
       </Stack>
     </>
   );

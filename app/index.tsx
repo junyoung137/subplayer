@@ -19,7 +19,8 @@ import { useTranslation } from "react-i18next";
 import * as DocumentPicker from "expo-document-picker";
 import * as ImagePicker from "expo-image-picker";
 import * as FileSystem from "expo-file-system/legacy";
-import { router } from "expo-router";
+import { router, useFocusEffect } from "expo-router";
+import { verifyModelIntegrity } from "../services/modelDownloadService";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { usePlayerStore } from "../store/usePlayerStore";
 import { useSettingsStore } from "../store/useSettingsStore";
@@ -614,6 +615,37 @@ export default function HomeScreen() {
   }>({ visible: false });
   const [moveModal, setMoveModal] = useState<{ visible: boolean; file?: RecentFile }>({ visible: false });
 
+  const [hasWhisperModel, setHasWhisperModel] = useState(true); // true = no banner on first render
+  const [hasGemmaModel,   setHasGemmaModel]   = useState(true);
+
+  const checkModels = useCallback(async () => {
+    const [whisperOk, gemmaOk] = await Promise.all([
+      (async () => {
+        try {
+          const modelDir = FileSystem.documentDirectory + "whisper-models/";
+          const dirInfo = await FileSystem.getInfoAsync(modelDir);
+          if (!dirInfo.exists) return false;
+          const files = await FileSystem.readDirectoryAsync(modelDir);
+          return files.some((f) => f.endsWith(".bin"));
+        } catch { return false; }
+      })(),
+      (async () => {
+        try {
+          const meta = await verifyModelIntegrity();
+          return meta !== null;
+        } catch { return false; }
+      })(),
+    ]);
+    setHasWhisperModel(whisperOk);
+    setHasGemmaModel(gemmaOk);
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      checkModels();
+    }, [checkModels])
+  );
+
   const setVideo = usePlayerStore((s) => s.setVideo);
   const setYoutubeVideo = usePlayerStore((s) => s.setYoutubeVideo); // ← 추가
   const setPendingGenre = usePlayerStore((s) => s.setPendingGenre);
@@ -1060,6 +1092,31 @@ export default function HomeScreen() {
         <Text style={styles.pickText}>{t("home.pickText")}</Text>
         <Text style={styles.pickSub}>{t("home.pickSub")}</Text>
       </TouchableOpacity>
+
+      {/* ── Missing-model combined card ────────────────────────────────────── */}
+      {(!hasWhisperModel || !hasGemmaModel) && (
+        <TouchableOpacity
+          style={bannerStyles.modelCard}
+          onPress={() => router.push("/models")}
+          activeOpacity={0.8}
+        >
+          <View style={bannerStyles.modelCardHeader}>
+            <Text style={bannerStyles.modelCardTitle}>⚠️  {t("home.modelBannerTitle")}</Text>
+            <Text style={bannerStyles.modelCardAction}>{t("home.modelBannerAction")}</Text>
+          </View>
+          <View style={bannerStyles.modelCardDivider} />
+          {!hasWhisperModel && (
+            <View style={bannerStyles.modelCardRow}>
+              <Text style={bannerStyles.modelCardRowText}>🎙  {t("home.noModelBanner")}</Text>
+            </View>
+          )}
+          {!hasGemmaModel && (
+            <View style={bannerStyles.modelCardRow}>
+              <Text style={bannerStyles.modelCardRowText}>🔤  {t("home.noGemmaBanner")}</Text>
+            </View>
+          )}
+        </TouchableOpacity>
+      )}
 
       {/* ── Recently played horizontal scroll ──────────────────────────────── */}
       {recentlyPlayed.length > 0 && (
@@ -1655,6 +1712,28 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   navBtnText: { color: "#ccc", fontSize: 13 },
+});
+
+const bannerStyles = StyleSheet.create({
+  modelCard: {
+    backgroundColor: "#1a1200",
+    borderWidth: 1,
+    borderColor: "#f59e0b",
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    marginTop: 8,
+  },
+  modelCardHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  modelCardTitle: { fontSize: 13, fontWeight: "700", color: "#f59e0b" },
+  modelCardAction: { fontSize: 13, fontWeight: "700", color: "#f59e0b" },
+  modelCardDivider: { height: 1, backgroundColor: "#2a2000", marginVertical: 6 },
+  modelCardRow: { flexDirection: "row", alignItems: "center", paddingVertical: 5 },
+  modelCardRowText: { fontSize: 12, color: "#a16207" },
 });
 
 const modalStyles = StyleSheet.create({
