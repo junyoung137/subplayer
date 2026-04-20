@@ -8,6 +8,7 @@ import {
   Alert,
   ActivityIndicator,
 } from "react-native";
+import { X, Check } from 'lucide-react-native';
 import {
   downloadGemmaModel,
   getModelMeta,
@@ -201,7 +202,7 @@ export default function GemmaModelsScreen() {
       {/* ── Error ───────────────────────────────────────────────────── */}
       {phase === "error" && (
         <View style={[styles.statusCard, styles.errorCard]}>
-          <Text style={styles.errorIcon}>✗</Text>
+          <X size={32} color="#ef4444" />
           <Text style={styles.errorTitle}>다운로드 실패</Text>
           <Text style={styles.errorMsg}>{errorMsg}</Text>
           <TouchableOpacity style={styles.primaryBtn} onPress={handleDownload}>
@@ -227,7 +228,7 @@ export default function GemmaModelsScreen() {
       {phase === "idle_downloaded" && (
         <>
           <View style={[styles.statusCard, styles.successCard]}>
-            <Text style={styles.successIcon}>✓</Text>
+            <Check size={32} color="#22c55e" />
             <Text style={styles.successText}>모델이 준비되었습니다</Text>
             <Text style={styles.successHint}>
               파일 크기 검증 완료 ({meta ? formatBytes(meta.size) : ""})
@@ -348,12 +349,10 @@ const styles = StyleSheet.create({
   progressBytes: { color: "#888", fontSize: 12 },
 
   successCard: { borderColor: "#14532d" },
-  successIcon: { fontSize: 36, color: "#22c55e" },
   successText: { color: "#22c55e", fontSize: 15, fontWeight: "700" },
   successHint: { color: "#666", fontSize: 12 },
 
   errorCard:  { borderColor: "#450a0a" },
-  errorIcon:  { fontSize: 36, color: "#ef4444" },
   errorTitle: { color: "#ef4444", fontSize: 15, fontWeight: "700" },
   errorMsg:   { color: "#888", fontSize: 12, textAlign: "center" },
 

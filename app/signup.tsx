@@ -14,6 +14,7 @@ import { router } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useTranslation } from "react-i18next";
 import { signUpWithEmail } from "../services/authService";
+import { Eye, EyeOff } from 'lucide-react-native';
 
 function mapFirebaseError(code: string, t: (k: string) => string): string {
   switch (code) {
@@ -104,7 +105,7 @@ export default function SignupScreen() {
               selectionColor="#2563eb"
             />
             <TouchableOpacity style={styles.eyeBtn} onPress={() => setShowPassword(v => !v)}>
-              <Text style={styles.eyeIcon}>{showPassword ? "👁" : "🔒"}</Text>
+              {showPassword ? <Eye size={18} color="#555" /> : <EyeOff size={18} color="#555" />}
             </TouchableOpacity>
           </View>
           <View style={styles.passwordWrapper}>
@@ -118,7 +119,7 @@ export default function SignupScreen() {
               selectionColor="#2563eb"
             />
             <TouchableOpacity style={styles.eyeBtn} onPress={() => setShowConfirmPw(v => !v)}>
-              <Text style={styles.eyeIcon}>{showConfirmPw ? "👁" : "🔒"}</Text>
+              {showConfirmPw ? <Eye size={18} color="#555" /> : <EyeOff size={18} color="#555" />}
             </TouchableOpacity>
           </View>
         </View>
@@ -188,8 +189,6 @@ const styles = StyleSheet.create({
   passwordWrapper: { position: "relative", marginBottom: 12 },
   passwordInput:   { marginBottom: 0, paddingRight: 44 },
   eyeBtn: { position: "absolute", right: 14, top: 0, bottom: 0, justifyContent: "center", padding: 4 },
-  eyeIcon: { color: "#555", fontSize: 18 },
-
   errorText: {
     color: "#ef4444",
     fontSize: 13,

@@ -25,6 +25,7 @@ import { SubtitleOverlay } from "../components/SubtitleOverlay";
 import { SubtitleQuickPanel } from "../components/SubtitleQuickPanel";
 import { LANGUAGES, getLanguageByCode } from "../constants/languages";
 import { useRetranslate } from "../hooks/useRetranslate";
+import { Settings, Globe, Check, Maximize2, Minimize2, Camera } from 'lucide-react-native';
 
 // ── expo-video-thumbnails (optional) ─────────────────────────────────────────
 let getThumbnailAsync: ((uri: string, opts: { time: number }) => Promise<{ uri: string }>) | null = null;
@@ -153,9 +154,7 @@ export default function PlayerScreen() {
       {isCapturing ? (
         <ActivityIndicator size="small" color="#ccc" />
       ) : (
-        <Text style={[styles.chipBtnText, captureSuccess && styles.chipBtnSuccess]}>
-          {captureSuccess ? "✓" : "📷"}
-        </Text>
+        captureSuccess ? <Check size={14} color="#22c55e" /> : <Camera size={14} color="#ccc" />
       )}
     </TouchableOpacity>
   ) : null;
@@ -166,8 +165,9 @@ export default function PlayerScreen() {
       onPress={() => { if (!isRetranslating) setLangModalVisible(true); }}
       activeOpacity={isRetranslating ? 1 : 0.75}
     >
-      <Text style={styles.chipBtnText} numberOfLines={1}>
-        🌐 {getLanguageByCode(targetLanguage)?.nativeName ?? targetLanguage}
+      <Globe size={14} color="#ccc" />
+      <Text style={[styles.chipBtnText, { marginLeft: 4 }]} numberOfLines={1}>
+        {getLanguageByCode(targetLanguage)?.nativeName ?? targetLanguage}
       </Text>
     </TouchableOpacity>
   );
@@ -189,7 +189,7 @@ export default function PlayerScreen() {
       </TouchableOpacity>
       <Text style={styles.lsTitle} numberOfLines={1}>{videoName ?? t("player.video")}</Text>
       <TouchableOpacity onPress={() => router.push("/settings")} style={styles.headerBtn}>
-        <Text style={styles.headerBtnText}>⚙</Text>
+        <Settings size={18} color="#fff" />
       </TouchableOpacity>
     </View>
   );
@@ -242,7 +242,7 @@ export default function PlayerScreen() {
                 <Text style={styles.langOptionNative}>{lang.nativeName}</Text>
                 <Text style={styles.langOptionCode}>{lang.name}</Text>
                 {targetLanguage === lang.code && (
-                  <Text style={styles.langCheckmark}>✓</Text>
+                  <Check size={14} color="#2563eb" />
                 )}
               </TouchableOpacity>
             ))}
@@ -300,7 +300,7 @@ export default function PlayerScreen() {
           {videoName ?? t("player.video")}
         </Text>
         <TouchableOpacity onPress={() => router.push("/settings")} style={styles.headerBtn}>
-          <Text style={styles.headerBtnText}>⚙</Text>
+          <Settings size={18} color="#fff" />
         </TouchableOpacity>
       </View>
 
@@ -338,7 +338,7 @@ export default function PlayerScreen() {
 
         {/* Fullscreen */}
         <TouchableOpacity style={styles.chipBtn} onPress={toggleFullscreen} activeOpacity={0.75}>
-          <Text style={styles.chipBtnText}>{isFullscreen ? "✕" : "⛶"}</Text>
+          {isFullscreen ? <Minimize2 size={16} color="#ccc" /> : <Maximize2 size={16} color="#ccc" />}
         </TouchableOpacity>
 
         {/* Subtitle mode */}
@@ -550,5 +550,4 @@ const styles = StyleSheet.create({
   langOptionSelected: { backgroundColor: "#1e3a5f" },
   langOptionNative: { color: "#fff", fontSize: 15, flex: 1 },
   langOptionCode: { color: "#666", fontSize: 13, marginRight: 8 },
-  langCheckmark: { color: "#2563eb", fontSize: 16, fontWeight: "700" },
 });

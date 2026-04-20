@@ -68,6 +68,7 @@ import { useMediaProjectionProcessor } from "../hooks/useMediaProjectionProcesso
 import { useWhisperModel } from "../hooks/useWhisperModel";
 import { LANGUAGES, getLanguageByCode } from "../constants/languages";
 import { useRetranslate } from "../hooks/useRetranslate";
+import { Settings, Check, CheckCircle2, XCircle, AlertTriangle, Mic } from 'lucide-react-native';
 import { useBackgroundTranslation } from '../hooks/useBackgroundTranslation';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
@@ -1746,7 +1747,7 @@ export default function YoutubePlayerScreen() {
           <Text style={styles.titleSub}>YouTube · 자막 번역</Text>
         </View>
         <TouchableOpacity onPress={() => router.push("./settings")} style={styles.headerBtn}>
-          <Text style={styles.headerBtnText}>⚙</Text>
+          <Settings size={18} color="#fff" />
         </TouchableOpacity>
       </View>}
 
@@ -1860,11 +1861,13 @@ export default function YoutubePlayerScreen() {
           pillStyles.container,
           { borderLeftColor: getPillBorderColor(displayPhase) },
         ]}>
-          <Text style={{ fontSize: 13, marginRight: 4 }}>
-            {displayPhase === 'error'            ? '❌'
-            : displayPhase === 'no_subtitles'    ? '⚠️'
-            : '🎙'}
-          </Text>
+          <View style={{ marginRight: 4 }}>
+            {displayPhase === 'error'
+              ? <XCircle size={14} color="#ef4444" />
+              : displayPhase === 'no_subtitles'
+              ? <AlertTriangle size={14} color="#f59e0b" />
+              : <Mic size={14} color="#aaa" />}
+          </View>
           <Text
             style={[
               pillStyles.statusText,
@@ -1918,7 +1921,7 @@ export default function YoutubePlayerScreen() {
 
       {!isLandscape && showBgDoneBanner && (
         <View style={[progressCard.card, { backgroundColor: '#0a1f0a', borderTopColor: '#22c55e' }]}>
-          <Text style={{ fontSize: 16 }}>✅</Text>
+          <CheckCircle2 size={16} color="#22c55e" />
           <Text style={[progressCard.title, { color: '#22c55e', marginLeft: 8 }]}>
             {t("player.bgDone")}
           </Text>
@@ -1927,9 +1930,12 @@ export default function YoutubePlayerScreen() {
 
       {!isLandscape && bgStatus?.status === 'error' && (
         <View style={[progressCard.card, { backgroundColor: '#1a0a0a', borderTopColor: '#ef4444' }]}>
-          <Text style={{ flex: 1, color: '#ef4444', fontSize: 11 }}>
-            ❌ {bgStatus.error ?? '번역 실패'}
-          </Text>
+          <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            <XCircle size={14} color="#ef4444" />
+            <Text style={{ color: '#ef4444', fontSize: 11 }}>
+              {bgStatus.error ?? '번역 실패'}
+            </Text>
+          </View>
           <TouchableOpacity onPress={handleSendToBackground} style={progressCard.cancelBtn}>
             <Text style={progressCard.cancelBtnText}>{t("common.retry")}</Text>
           </TouchableOpacity>
@@ -2069,7 +2075,7 @@ export default function YoutubePlayerScreen() {
                 >
                   <Text style={styles.langNative}>{lang.nativeName}</Text>
                   <Text style={styles.langCode}>{lang.name}</Text>
-                  {targetLanguage === lang.code && <Text style={styles.langCheck}>✓</Text>}
+                  {targetLanguage === lang.code && <Check size={14} color="#2563eb" />}
                 </TouchableOpacity>
               ))}
             </ScrollView>
@@ -2096,7 +2102,7 @@ export default function YoutubePlayerScreen() {
                   onPress={() => handleGenreChange(g.key)}
                 >
                   <Text style={styles.langNative}>{g.label}</Text>
-                  {selectedGenre === g.key && <Text style={styles.langCheck}>✓</Text>}
+                  {selectedGenre === g.key && <Check size={14} color="#2563eb" />}
                 </TouchableOpacity>
               ))}
             </ScrollView>
@@ -2233,7 +2239,6 @@ const styles = StyleSheet.create({
   langSelected: { backgroundColor: "#1e3a5f" },
   langNative:   { color: "#fff", fontSize: 15, flex: 1 },
   langCode:     { color: "#666", fontSize: 13, marginRight: 8 },
-  langCheck:    { color: "#2563eb", fontSize: 16, fontWeight: "700" },
 });
 
 const pillStyles = StyleSheet.create({

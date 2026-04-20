@@ -29,6 +29,7 @@ import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
 // ✅ 핵심 수정: YouTubePlayer에서 직접 import하지 않고 utils에서 import
 import { parseYoutubeId } from "../utils/youtubeUtils";
+import { FolderOpen, X, Check } from 'lucide-react-native';
 
 // ── 파일 URI 안정화 ───────────────────────────────────────────────────────────
 async function ensureFileUri(uri: string, filename: string): Promise<string | null> {
@@ -229,7 +230,7 @@ export function UrlInputModal({
                   <ActivityIndicator color="#fff" />
                 ) : (
                   <>
-                    <Text style={styles.bigPickIcon}>📂</Text>
+                    <FolderOpen size={20} color="#aaa" />
                     <Text style={styles.bigPickText}>{t("url.selectFile")}</Text>
                     <Text style={styles.bigPickSub}>{t("url.supportedFormats")}</Text>
                   </>
@@ -300,7 +301,7 @@ export function UrlInputModal({
                       style={styles.clearBtn}
                       onPress={() => { setUrlInput(""); setUrlError(null); }}
                     >
-                      <Text style={styles.clearBtnText}>✕</Text>
+                      <X size={16} color="#888" />
                     </TouchableOpacity>
                   )}
                 </View>
@@ -308,7 +309,7 @@ export function UrlInputModal({
                 {/* 파싱 성공 미리보기 */}
                 {parsedId && urlInput.length > 0 && (
                   <View style={styles.parsedRow}>
-                    <Text style={styles.parsedIcon}>✓</Text>
+                    <Check size={16} color="#22c55e" />
                     <Text style={styles.parsedText}>{t("url.idDetected", { id: parsedId })}</Text>
                   </View>
                 )}
@@ -398,7 +399,6 @@ const styles = StyleSheet.create({
     borderStyle: "dashed",
     gap: 6,
   },
-  bigPickIcon: { fontSize: 36 },
   bigPickText: { color: "#fff", fontSize: 16, fontWeight: "600" },
   bigPickSub:  { color: "#555", fontSize: 12 },
 
@@ -424,7 +424,6 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
   },
   clearBtn:     { padding: 4 },
-  clearBtnText: { color: "#555", fontSize: 14 },
 
   // 파싱 성공 미리보기
   parsedRow: {
@@ -432,7 +431,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 6,
   },
-  parsedIcon: { color: "#22c55e", fontSize: 13 },
   parsedText: { color: "#22c55e", fontSize: 12, fontWeight: "600" },
 
   errorText: {

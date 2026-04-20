@@ -26,6 +26,11 @@ import { usePlayerStore } from "../store/usePlayerStore";
 import { useSettingsStore } from "../store/useSettingsStore";
 import { LANGUAGES } from "../constants/languages";
 import { UrlInputModal } from "../components/UrlInputModal";
+import {
+  Camera, Film, Settings, FolderOpen, Folder, Package,
+  Clock, CaseSensitive, Search, Star, Check, X,
+  AlertTriangle, Mic, Pencil,
+} from 'lucide-react-native';
 
 // ── Thumbnail helper (graceful fallback if expo-video-thumbnails not installed) ──
 let getThumbnailAsync: ((uri: string, opts: { time: number }) => Promise<{ uri: string }>) | null = null;
@@ -287,7 +292,7 @@ function FileThumbnail({
           hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
           activeOpacity={0.7}
         >
-          <Text style={thumbStyles.camIcon}>📷</Text>
+          <Camera size={18} color="#aaa" />
         </TouchableOpacity>
       </View>
     );
@@ -300,7 +305,7 @@ function FileThumbnail({
       onPress={onPickManual}
       activeOpacity={0.7}
     >
-      <Text style={thumbStyles.emptyIcon}>🎞</Text>
+      <Film size={32} color="#555" />
       <Text style={thumbStyles.emptyLabel}>사진 추가</Text>
     </TouchableOpacity>
   );
@@ -352,9 +357,7 @@ const thumbStyles = StyleSheet.create({
     paddingHorizontal: 3,
     paddingVertical: 1,
   },
-  camIcon: { fontSize: 9 },
   // Empty placeholder
-  emptyIcon: { fontSize: 18, opacity: 0.4 },
   emptyLabel: { color: "#444", fontSize: 9, fontWeight: "600", letterSpacing: 0.2 },
 });
 
@@ -365,7 +368,10 @@ function SubBadge({ status, percent }: { status?: SubtitleStatus; percent?: numb
   if (status === "processing") {
     return (
       <View style={[badgeStyles.badge, badgeStyles.processing]}>
-        <Text style={badgeStyles.text}>⚙️ {percent ?? 0}%</Text>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 3 }}>
+          <Settings size={18} color="#ccc" />
+          <Text style={badgeStyles.text}>{percent ?? 0}%</Text>
+        </View>
       </View>
     );
   }
@@ -416,7 +422,7 @@ function LangSetupModal({ visible, onConfirm, onCancel }: LangSetupModalProps) {
                 >
                   <Text style={modalStyles.langOptionNative}>{lang.nativeName}</Text>
                   <Text style={modalStyles.langOptionCode}>{lang.name}</Text>
-                  {isSelected && <Text style={modalStyles.checkmark}>✓</Text>}
+                  {isSelected && <Check size={14} color="#2563eb" />}
                 </TouchableOpacity>
               );
             })}
@@ -504,9 +510,9 @@ function MoveCategoryModal({ visible, categories, currentCategory, onSelect, onC
               style={[moveStyles.option, !currentCategory && moveStyles.optionActive]}
               onPress={() => onSelect(undefined)}
             >
-              <Text style={moveStyles.optionIcon}>📂</Text>
+              <FolderOpen size={20} color="#aaa" />
               <Text style={moveStyles.optionName}>{t("home.uncat")}</Text>
-              {!currentCategory && <Text style={moveStyles.check}>✓</Text>}
+              {!currentCategory && <Check size={14} color="#2563eb" />}
             </TouchableOpacity>
             {roots.map((cat) => {
               const children = categories.filter((c) => c.parentId === cat.id);
@@ -516,9 +522,9 @@ function MoveCategoryModal({ visible, categories, currentCategory, onSelect, onC
                     style={[moveStyles.option, currentCategory === cat.id && moveStyles.optionActive]}
                     onPress={() => onSelect(cat.id)}
                   >
-                    <Text style={moveStyles.optionIcon}>📁</Text>
+                    <Folder size={16} color="#aaa" />
                     <Text style={moveStyles.optionName}>{cat.name}</Text>
-                    {currentCategory === cat.id && <Text style={moveStyles.check}>✓</Text>}
+                    {currentCategory === cat.id && <Check size={14} color="#2563eb" />}
                   </TouchableOpacity>
                   {children.map((child) => (
                     <TouchableOpacity
@@ -526,9 +532,9 @@ function MoveCategoryModal({ visible, categories, currentCategory, onSelect, onC
                       style={[moveStyles.option, moveStyles.childOption, currentCategory === child.id && moveStyles.optionActive]}
                       onPress={() => onSelect(child.id)}
                     >
-                      <Text style={moveStyles.optionIcon}>  📂</Text>
+                      <FolderOpen size={20} color="#aaa" />
                       <Text style={moveStyles.optionName}>{child.name}</Text>
-                      {currentCategory === child.id && <Text style={moveStyles.check}>✓</Text>}
+                      {currentCategory === child.id && <Check size={14} color="#2563eb" />}
                     </TouchableOpacity>
                   ))}
                 </React.Fragment>
@@ -553,10 +559,10 @@ interface SortModalProps {
 }
 function SortModal({ visible, current, onSelect, onCancel }: SortModalProps) {
   const { t } = useTranslation();
-  const options: { key: SortOrder; label: string; icon: string }[] = [
-    { key: "recent", label: t("home.sortRecent"), icon: "🕐" },
-    { key: "name",   label: t("home.sortName"),   icon: "🔤" },
-    { key: "size",   label: t("home.sortSize"),   icon: "📦" },
+  const options: { key: SortOrder; label: string; icon: React.ReactNode }[] = [
+    { key: "recent", label: t("home.sortRecent"), icon: <Clock size={14} color="#aaa" /> },
+    { key: "name",   label: t("home.sortName"),   icon: <CaseSensitive size={14} color="#aaa" /> },
+    { key: "size",   label: t("home.sortSize"),   icon: <Package size={14} color="#aaa" /> },
   ];
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onCancel}>
@@ -569,9 +575,9 @@ function SortModal({ visible, current, onSelect, onCancel }: SortModalProps) {
               style={[moveStyles.option, { borderRadius: 10, marginVertical: 2 }, current === o.key && moveStyles.optionActive]}
               onPress={() => onSelect(o.key)}
             >
-              <Text style={{ fontSize: 18 }}>{o.icon}</Text>
+              {o.icon}
               <Text style={moveStyles.optionName}>{o.label}</Text>
-              {current === o.key && <Text style={moveStyles.check}>✓</Text>}
+              {current === o.key && <Check size={14} color="#2563eb" />}
             </TouchableOpacity>
           ))}
         </Pressable>
@@ -1014,7 +1020,7 @@ export default function HomeScreen() {
         {/* Multi-select checkbox */}
         {multiSelect && (
           <View style={[styles.checkbox, isSelected && styles.checkboxSelected]}>
-            {isSelected && <Text style={styles.checkboxMark}>✓</Text>}
+            {isSelected && <Check size={14} color="#fff" />}
           </View>
         )}
 
@@ -1029,7 +1035,7 @@ export default function HomeScreen() {
         {/* Info */}
         <View style={{ flex: 1, gap: 2 }}>
           <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-            {item.isFavorite && <Text style={styles.starIcon}>★</Text>}
+            {item.isFavorite && <Star size={14} color="#f59e0b" fill="#f59e0b" />}
             <Text style={styles.recentName} numberOfLines={1}>{item.name}</Text>
           </View>
 
@@ -1050,7 +1056,10 @@ export default function HomeScreen() {
 
           {/* Category badge in 전체 view */}
           {catName && selectedCat === DEFAULT_CATEGORY && (
-            <Text style={styles.recentCatBadge}>📁 {catName}</Text>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 3 }}>
+              <Folder size={16} color="#aaa" />
+              <Text style={styles.recentCatBadge}>{catName}</Text>
+            </View>
           )}
         </View>
 
@@ -1061,9 +1070,9 @@ export default function HomeScreen() {
               onPress={() => toggleFavorite(item.uri)}
               hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}
             >
-              <Text style={[styles.actionIcon, item.isFavorite && styles.starActive]}>
-                {item.isFavorite ? "★" : "☆"}
-              </Text>
+              {item.isFavorite
+                ? <Star size={14} color="#f59e0b" fill="#f59e0b" />
+                : <Star size={14} color="#555" />}
             </TouchableOpacity>
             <TouchableOpacity
               onPress={() => setFileActionModal({ visible: true, file: item })}
@@ -1088,7 +1097,7 @@ export default function HomeScreen() {
         style={styles.pickButton} 
         onPress={() => setFilePickerVisible(true)}
       >
-        <Text style={styles.pickIcon}>📂</Text>
+        <FolderOpen size={20} color="#aaa" />
         <Text style={styles.pickText}>{t("home.pickText")}</Text>
         <Text style={styles.pickSub}>{t("home.pickSub")}</Text>
       </TouchableOpacity>
@@ -1101,18 +1110,23 @@ export default function HomeScreen() {
           activeOpacity={0.8}
         >
           <View style={bannerStyles.modelCardHeader}>
-            <Text style={bannerStyles.modelCardTitle}>⚠️  {t("home.modelBannerTitle")}</Text>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+              <AlertTriangle size={16} color="#f59e0b" />
+              <Text style={bannerStyles.modelCardTitle}>{t("home.modelBannerTitle")}</Text>
+            </View>
             <Text style={bannerStyles.modelCardAction}>{t("home.modelBannerAction")}</Text>
           </View>
           <View style={bannerStyles.modelCardDivider} />
           {!hasWhisperModel && (
             <View style={bannerStyles.modelCardRow}>
-              <Text style={bannerStyles.modelCardRowText}>🎙  {t("home.noModelBanner")}</Text>
+              <Mic size={14} color="#aaa" />
+              <Text style={[bannerStyles.modelCardRowText, { marginLeft: 6 }]}>{t("home.noModelBanner")}</Text>
             </View>
           )}
           {!hasGemmaModel && (
             <View style={bannerStyles.modelCardRow}>
-              <Text style={bannerStyles.modelCardRowText}>🔤  {t("home.noGemmaBanner")}</Text>
+              <CaseSensitive size={14} color="#aaa" />
+              <Text style={[bannerStyles.modelCardRowText, { marginLeft: 6 }]}>{t("home.noGemmaBanner")}</Text>
             </View>
           )}
         </TouchableOpacity>
@@ -1142,7 +1156,7 @@ export default function HomeScreen() {
       <View style={styles.searchRow}>
         {searchActive ? (
           <View style={styles.searchBar}>
-            <Text style={styles.searchIcon}>🔍</Text>
+            <Search size={16} color="#555" />
             <TextInput
               style={styles.searchInput}
               value={searchQuery}
@@ -1153,19 +1167,21 @@ export default function HomeScreen() {
               selectionColor="#2563eb"
             />
             <TouchableOpacity onPress={() => { setSearchQuery(""); setSearchActive(false); }}>
-              <Text style={styles.searchClear}>✕</Text>
+              <X size={14} color="#888" />
             </TouchableOpacity>
           </View>
         ) : (
           <TouchableOpacity style={styles.searchBarInactive} onPress={() => setSearchActive(true)}>
-            <Text style={styles.searchIcon}>🔍</Text>
+            <Search size={16} color="#555" />
             <Text style={styles.searchPlaceholder}>{t("home.searchPlaceholder")}</Text>
           </TouchableOpacity>
         )}
         <TouchableOpacity style={styles.sortBtn} onPress={() => setSortModalVisible(true)}>
-          <Text style={styles.sortBtnText}>
-            {sortOrder === "recent" ? "🕐" : sortOrder === "name" ? "🔤" : "📦"}
-          </Text>
+          {sortOrder === "recent"
+            ? <Clock size={14} color="#aaa" />
+            : sortOrder === "name"
+            ? <CaseSensitive size={14} color="#aaa" />
+            : <Package size={14} color="#aaa" />}
         </TouchableOpacity>
       </View>
 
@@ -1212,9 +1228,10 @@ export default function HomeScreen() {
               }
               delayLongPress={400}
             >
-              <Text style={[styles.catTabText, selectedCat === cat.id && styles.catTabTextActive]}>
-                📁 {cat.name}
-              </Text>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+                <Folder size={16} color="#aaa" />
+                <Text style={[styles.catTabText, selectedCat === cat.id && styles.catTabTextActive]}>{cat.name}</Text>
+              </View>
             </TouchableOpacity>
           ))}
 
@@ -1257,9 +1274,10 @@ export default function HomeScreen() {
                   }
                   delayLongPress={400}
                 >
-                  <Text style={[styles.subCatText, selectedCat === sub.id && styles.subCatTextActive]}>
-                    📂 {sub.name} ({count})
-                  </Text>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+                    <FolderOpen size={20} color="#aaa" />
+                    <Text style={[styles.subCatText, selectedCat === sub.id && styles.subCatTextActive]}>{sub.name} ({count})</Text>
+                  </View>
                 </TouchableOpacity>
               );
             })}
@@ -1294,13 +1312,21 @@ export default function HomeScreen() {
       {recentFiles.length > 0 && (
         <View style={styles.recentSection}>
           <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>
-              {parentCatObj ? `📁 ${parentCatObj.name} › ` : ""}
-              {currentCatObj ? `📁 ${currentCatObj.name}` :
-               selectedCat === "__uncat__" ? t("home.uncat") :
-               selectedCat === "__fav__"   ? t("home.favorites") : t("home.fileList")}
-              <Text style={styles.fileCount}> {t("home.fileCount", { count: filteredFiles.length })}</Text>
-            </Text>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 4, flexShrink: 1 }}>
+              {parentCatObj && (
+                <>
+                  <Folder size={16} color="#aaa" />
+                  <Text style={styles.sectionTitle}>{parentCatObj.name} › </Text>
+                </>
+              )}
+              {currentCatObj && <Folder size={16} color="#aaa" />}
+              <Text style={styles.sectionTitle}>
+                {currentCatObj ? currentCatObj.name :
+                 selectedCat === "__uncat__" ? t("home.uncat") :
+                 selectedCat === "__fav__"   ? t("home.favorites") : t("home.fileList")}
+                <Text style={styles.fileCount}> {t("home.fileCount", { count: filteredFiles.length })}</Text>
+              </Text>
+            </View>
             <View style={{ flexDirection: "row", gap: 12, alignItems: "center" }}>
               {!multiSelect && (
                 <TouchableOpacity onPress={() => setMultiSelect(true)}>
@@ -1413,19 +1439,23 @@ export default function HomeScreen() {
             </Text>
 
             {[
-              { label: `📷  ${t("home.changeThumbnail")}`, onPress: () => { setFileActionModal({ visible: false }); pickManualThumbnail(fileActionModal.file!.uri); } },
-              { label: `✏️  ${t("home.rename")}`,          onPress: () => { setFileActionModal({ visible: false }); setRenameModal({ visible: true, file: fileActionModal.file }); } },
-              { label: `📁  ${t("home.moveFolder")}`,      onPress: () => { setFileActionModal({ visible: false }); setMoveModal({ visible: true, file: fileActionModal.file }); } },
+              { key: "thumb",  icon: <Camera size={18} color="#ccc" />,   label: t("home.changeThumbnail"), onPress: () => { setFileActionModal({ visible: false }); pickManualThumbnail(fileActionModal.file!.uri); } },
+              { key: "rename", icon: <Pencil size={16} color="#aaa" />,    label: t("home.rename"),          onPress: () => { setFileActionModal({ visible: false }); setRenameModal({ visible: true, file: fileActionModal.file }); } },
+              { key: "move",   icon: <Folder size={16} color="#aaa" />,   label: t("home.moveFolder"),      onPress: () => { setFileActionModal({ visible: false }); setMoveModal({ visible: true, file: fileActionModal.file }); } },
             ].map((btn) => (
               <TouchableOpacity
-                key={btn.label}
+                key={btn.key}
                 style={{
                   paddingVertical: 16,
                   borderBottomWidth: StyleSheet.hairlineWidth,
                   borderBottomColor: "#2a2a2a",
+                  flexDirection: "row",
+                  alignItems: "center",
+                  gap: 12,
                 }}
                 onPress={btn.onPress}
               >
+                {btn.icon}
                 <Text style={{ color: "#fff", fontSize: 16 }}>{btn.label}</Text>
               </TouchableOpacity>
             ))}
@@ -1517,7 +1547,6 @@ const styles = StyleSheet.create({
     borderColor: "#333",
     borderStyle: "dashed",
   },
-  pickIcon: { fontSize: 40, marginBottom: 8 },
   pickText: { color: "#fff", fontSize: 18, fontWeight: "600" },
   pickSub: { color: "#666", fontSize: 12, marginTop: 4 },
 
@@ -1554,9 +1583,7 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     gap: 8,
   },
-  searchIcon: { fontSize: 14 },
   searchInput: { flex: 1, color: "#fff", fontSize: 14, padding: 0 },
-  searchClear: { color: "#555", fontSize: 14, paddingLeft: 4 },
   searchPlaceholder: { color: "#444", fontSize: 14 },
   sortBtn: {
     width: 38,
@@ -1568,7 +1595,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  sortBtnText: { fontSize: 18 },
 
   // ── Category tabs ───────────────────────────────────────────────────────────
   catBarWrap: { marginTop: 8 },
@@ -1678,7 +1704,6 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   checkboxSelected: { backgroundColor: "#2563eb", borderColor: "#2563eb" },
-  checkboxMark: { color: "#fff", fontSize: 12, fontWeight: "700" },
 
   recentName: { color: "#ddd", fontSize: 13, fontWeight: "500", flex: 1 },
   metaRow: { flexDirection: "row", alignItems: "center", gap: 5, flexWrap: "wrap" },
@@ -1693,11 +1718,9 @@ const styles = StyleSheet.create({
     borderRadius: 4,
   },
   recentCatBadge: { color: "#555", fontSize: 11, marginTop: 2 },
-  starIcon: { color: "#f59e0b", fontSize: 12 },
 
   itemActions: { flexDirection: "row", gap: 6, alignItems: "center" },
   actionIcon: { fontSize: 18, color: "#555" },
-  starActive: { color: "#f59e0b" },
 
   emptyBox: { paddingVertical: 40, alignItems: "center", gap: 8 },
   emptyText: { color: "#444", fontSize: 14 },
@@ -1768,7 +1791,6 @@ const modalStyles = StyleSheet.create({
   langOptionSelected: { backgroundColor: "#1e3a5f" },
   langOptionNative: { color: "#fff", fontSize: 14, flex: 1 },
   langOptionCode: { color: "#555", fontSize: 12 },
-  checkmark: { color: "#2563eb", fontSize: 15, fontWeight: "700" },
   hint: { color: "#444", fontSize: 12, textAlign: "center", marginTop: 4 },
   btnRow: { flexDirection: "row", gap: 10, marginTop: 4 },
   cancelBtn: {
@@ -1821,9 +1843,7 @@ const moveStyles = StyleSheet.create({
   },
   childOption: { paddingLeft: 32, backgroundColor: "#0f0f0f" },
   optionActive: { backgroundColor: "#1e3a5f" },
-  optionIcon: { fontSize: 18 },
   optionName: { color: "#ddd", fontSize: 15, flex: 1 },
-  check: { color: "#2563eb", fontSize: 15, fontWeight: "700" },
   cancelBtn: { margin: 16, paddingVertical: 13, borderRadius: 10, backgroundColor: "#222", alignItems: "center" },
   cancelText: { color: "#aaa", fontSize: 14, fontWeight: "600" },
 });

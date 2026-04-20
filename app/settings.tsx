@@ -20,6 +20,7 @@ import { LANGUAGES } from "../constants/languages";
 import { useAuthStore } from "../store/useAuthStore";
 import { signOut } from "../services/authService";
 import { auth } from "../services/firebase";
+import { KeyRound, LogOut, Trash2, Eye, EyeOff, Check } from 'lucide-react-native';
 
 export default function SettingsScreen() {
   const settings = useSettingsStore();
@@ -156,7 +157,7 @@ export default function SettingsScreen() {
             onPress={() => { setPwError(""); setPwSuccess(""); setPwModalVisible(true); }}
             activeOpacity={0.7}
           >
-            <Text style={styles.accountRowIcon}>🔑</Text>
+            <KeyRound size={18} color="#ccc" />
             <Text style={styles.accountRowText}>{t("auth.changePassword")}</Text>
             <Text style={styles.accountRowChevron}>›</Text>
           </TouchableOpacity>
@@ -164,13 +165,13 @@ export default function SettingsScreen() {
 
         {/* Logout */}
         <TouchableOpacity style={styles.accountRow} onPress={handleLogout} activeOpacity={0.7}>
-          <Text style={styles.accountRowIcon}>🚪</Text>
+          <LogOut size={18} color="#ccc" />
           <Text style={styles.accountRowText}>{t("auth.logout")}</Text>
         </TouchableOpacity>
 
         {/* Delete account */}
         <TouchableOpacity style={styles.accountRow} onPress={handleDeleteAccount} activeOpacity={0.7}>
-          <Text style={styles.accountRowIcon}>🗑</Text>
+          <Trash2 size={18} color="#ef4444" />
           <Text style={[styles.accountRowText, styles.accountRowDanger]}>{t("auth.deleteAccount")}</Text>
         </TouchableOpacity>
       </View>
@@ -335,7 +336,7 @@ export default function SettingsScreen() {
                 selectionColor="#2563eb"
               />
               <TouchableOpacity style={styles.pwEyeBtn} onPress={() => setShowCurrentPw(v => !v)}>
-                <Text style={styles.pwEyeIcon}>{showCurrentPw ? "👁" : "🔒"}</Text>
+                {showCurrentPw ? <Eye size={18} color="#555" /> : <EyeOff size={18} color="#555" />}
               </TouchableOpacity>
             </View>
             <View style={styles.pwWrapper}>
@@ -349,7 +350,7 @@ export default function SettingsScreen() {
                 selectionColor="#2563eb"
               />
               <TouchableOpacity style={styles.pwEyeBtn} onPress={() => setShowNewPw(v => !v)}>
-                <Text style={styles.pwEyeIcon}>{showNewPw ? "👁" : "🔒"}</Text>
+                {showNewPw ? <Eye size={18} color="#555" /> : <EyeOff size={18} color="#555" />}
               </TouchableOpacity>
             </View>
             <View style={styles.pwWrapper}>
@@ -363,7 +364,7 @@ export default function SettingsScreen() {
                 selectionColor="#2563eb"
               />
               <TouchableOpacity style={styles.pwEyeBtn} onPress={() => setShowConfirmPw(v => !v)}>
-                <Text style={styles.pwEyeIcon}>{showConfirmPw ? "👁" : "🔒"}</Text>
+                {showConfirmPw ? <Eye size={18} color="#555" /> : <EyeOff size={18} color="#555" />}
               </TouchableOpacity>
             </View>
             {!!pwError   && <Text style={styles.pwError}>{pwError}</Text>}
@@ -416,7 +417,7 @@ export default function SettingsScreen() {
                   >
                     <Text style={styles.modalOptionText}>{lang.nativeName}</Text>
                     <Text style={styles.modalOptionSub}>{lang.name}</Text>
-                    {isActive && <Text style={styles.modalCheck}>✓</Text>}
+                    {isActive && <Check size={14} color="#2563eb" />}
                   </TouchableOpacity>
                 );
               })}
@@ -630,7 +631,6 @@ const styles = StyleSheet.create({
   modalOptionActive: { backgroundColor: "#1e3a5f", borderRadius: 8 },
   modalOptionText: { color: "#fff", fontSize: 15, flex: 1 },
   modalOptionSub: { color: "#555", fontSize: 12 },
-  modalCheck: { color: "#2563eb", fontSize: 14, fontWeight: "700" },
 
   supportBtn: {
     backgroundColor: "#141414",
@@ -722,7 +722,6 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: "#1f1f1f",
   },
-  accountRowIcon:    { fontSize: 16, width: 22, textAlign: "center" },
   accountRowText:    { flex: 1, color: "#ccc", fontSize: 14 },
   accountRowChevron: { color: "#555", fontSize: 18 },
   accountRowDanger:  { color: "#ef4444" },
@@ -731,7 +730,6 @@ const styles = StyleSheet.create({
   pwWrapper:    { position: "relative", marginBottom: 10 },
   pwInputInner: { marginBottom: 0, paddingRight: 44 },
   pwEyeBtn:     { position: "absolute", right: 14, top: 0, bottom: 0, justifyContent: "center", padding: 4 },
-  pwEyeIcon:    { color: "#555", fontSize: 18 },
   pwInput: {
     backgroundColor: "#111",
     borderWidth: 1,

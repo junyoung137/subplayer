@@ -12,6 +12,7 @@ import {
   Easing,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { X, Check } from 'lucide-react-native';
 import { router } from "expo-router";
 import { useTranslation } from "react-i18next";
 import { usePlayerStore } from "../store/usePlayerStore";
@@ -70,7 +71,7 @@ function StageRow({ stage, isLast, animatedWidth, subLabel, timeText }: StageRow
       {/* Status icon */}
       <View style={rowStyles.iconWrap}>
         {isDone ? (
-          <Text style={rowStyles.iconDone}>✓</Text>
+          <Check size={14} color="#22c55e" />
         ) : isActive ? (
           <ActivityIndicator size="small" color="#3b82f6" />
         ) : (
@@ -141,7 +142,6 @@ const rowStyles = StyleSheet.create({
   rowBorder: { borderBottomWidth: 1, borderBottomColor: "#1c1c1c" },
 
   iconWrap: { width: 22, height: 22, alignItems: "center", justifyContent: "center", marginTop: 1 },
-  iconDone: { fontSize: 14, color: "#22c55e", fontWeight: "700" },
   iconCircle: {
     width: 10,
     height: 10,
@@ -739,7 +739,7 @@ export default function ProcessingScreen() {
         {/* Error card */}
         {isError && (
           <View style={styles.errorCard}>
-            <Text style={styles.errorIcon}>✗</Text>
+            <X size={32} color="#ef4444" />
             <Text style={styles.errorTitle}>{t("processing.processFailed")}</Text>
             {progress.error ? (
               <Text style={styles.errorDetail}>{progress.error}</Text>
@@ -771,7 +771,7 @@ export default function ProcessingScreen() {
         {/* Done card */}
         {isDone && (
           <View style={styles.doneCard}>
-            <Text style={styles.doneIcon}>✓</Text>
+            <Check size={32} color="#22c55e" />
             <Text style={styles.doneTitle}>{t("processing.done")}</Text>
             <Text style={styles.doneSubtitle}>{t("processing.doneSubtitle")}</Text>
           </View>
@@ -851,7 +851,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#7f1d1d",
   },
-  errorIcon:   { fontSize: 36, color: "#ef4444" },
   errorTitle:  { color: "#ef4444", fontSize: 16, fontWeight: "700" },
   errorDetail: { color: "#888", fontSize: 12, textAlign: "center" },
 
@@ -905,7 +904,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#14532d",
   },
-  doneIcon:     { fontSize: 38, color: "#22c55e" },
   doneTitle:    { color: "#22c55e", fontSize: 17, fontWeight: "700" },
   doneSubtitle: { color: "#4ade80", fontSize: 13 },
 

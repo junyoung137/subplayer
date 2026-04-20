@@ -10,6 +10,7 @@ import {
   Alert,
 } from "react-native";
 import * as Sharing from "expo-sharing";
+import { Save, Share2, Trash2, X, Check, Folder } from 'lucide-react-native';
 import {
   saveSubtitleFile,
   listSavedSubtitles,
@@ -190,9 +191,12 @@ export function SubtitleSaveModal({
 
           {/* ── Header ─────────────────────────────────────────────────── */}
           <View style={styles.header}>
-            <Text style={styles.headerTitle}>💾 자막 저장</Text>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+              <Save size={18} color="#ccc" />
+              <Text style={styles.headerTitle}>자막 저장</Text>
+            </View>
             <TouchableOpacity onPress={onClose} hitSlop={HIT_SLOP}>
-              <Text style={styles.closeBtn}>✕</Text>
+              <X size={16} color="#888" />
             </TouchableOpacity>
           </View>
 
@@ -277,7 +281,10 @@ export function SubtitleSaveModal({
                     <Text style={styles.saveBtnText}>저장 중...</Text>
                   </View>
                 ) : (
-                  <Text style={styles.saveBtnText}>📤 공유</Text>
+                  <View style={styles.saveBtnInner}>
+                    <Share2 size={16} color="#fff" />
+                    <Text style={styles.saveBtnText}>공유</Text>
+                  </View>
                 )}
               </TouchableOpacity>
 
@@ -293,7 +300,10 @@ export function SubtitleSaveModal({
                     <Text style={styles.saveBtnText}>저장 중...</Text>
                   </View>
                 ) : (
-                  <Text style={styles.saveBtnText}>💾 기기에 저장</Text>
+                  <View style={styles.saveBtnInner}>
+                    <Save size={16} color="#fff" />
+                    <Text style={styles.saveBtnText}>기기에 저장</Text>
+                  </View>
                 )}
               </TouchableOpacity>
             </View>
@@ -308,9 +318,10 @@ export function SubtitleSaveModal({
             {/* ── Saved files list ───────────────────────────────────── */}
             {savedFiles.length > 0 && (
               <>
-                <Text style={[styles.sectionLabel, styles.sectionLabelTop]}>
-                  📁 저장된 자막 목록
-                </Text>
+                <View style={[{ flexDirection: "row", alignItems: "center", gap: 6 }, styles.sectionLabelTop]}>
+                  <Folder size={16} color="#aaa" />
+                  <Text style={styles.sectionLabel}>저장된 자막 목록</Text>
+                </View>
                 {savedFiles.map((file) => (
                   <View key={file.uri} style={styles.fileRow}>
                     <TouchableOpacity
@@ -330,7 +341,7 @@ export function SubtitleSaveModal({
                       hitSlop={HIT_SLOP}
                       style={styles.deleteBtn}
                     >
-                      <Text style={styles.deleteBtnText}>🗑</Text>
+                      <Trash2 size={16} color="#ef4444" />
                     </TouchableOpacity>
                   </View>
                 ))}
@@ -406,11 +417,6 @@ const styles = StyleSheet.create({
     color:      "#fff",
     fontSize:   18,
     fontWeight: "700",
-  },
-  closeBtn: {
-    color:    "#888",
-    fontSize: 18,
-    padding:  4,
   },
 
   // ── Section labels ─────────────────────────────────────────────────────────
@@ -556,9 +562,6 @@ const styles = StyleSheet.create({
   },
   deleteBtn: {
     paddingLeft: 12,
-  },
-  deleteBtnText: {
-    fontSize: 18,
   },
 
   // ── Bottom padding ─────────────────────────────────────────────────────────

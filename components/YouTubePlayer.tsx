@@ -27,6 +27,7 @@ import {
 } from "../services/youtubeTimedText";
 import { parseYoutubeId } from "../utils/youtubeUtils";
 export { parseYoutubeId };
+import { AlertTriangle, Maximize2, Minimize2 } from 'lucide-react-native';
 
 // ── Props / Handle 타입 ───────────────────────────────────────────────────────
 export interface YouTubePlayerProps {
@@ -353,7 +354,7 @@ export const YouTubePlayer = React.forwardRef<
   if (hasError) {
     return (
       <View style={[styles.container, { height }, style, styles.errorBox]}>
-        <Text style={styles.errorIcon}>⚠️</Text>
+        <AlertTriangle size={32} color="#f59e0b" />
         <Text style={styles.errorText}>
           {errMsg === "150" || errMsg === "101" || errMsg === "embed_not_allowed"
             ? "이 영상은 임베드가 허용되지 않습니다.\n다른 영상을 시도해 보세요."
@@ -472,7 +473,7 @@ export const YouTubePlayer = React.forwardRef<
         onPress={onFullscreenToggle}
         activeOpacity={0.7}
       >
-        <Text style={styles.fullscreenBtnText}>{isFullscreen ? "⊡" : "⛶"}</Text>
+        {isFullscreen ? <Minimize2 size={18} color="#fff" /> : <Maximize2 size={18} color="#fff" />}
       </TouchableOpacity>
       {!isReady && (
         <View style={[styles.loadingOverlay, { height }]}>
@@ -496,7 +497,6 @@ const styles = StyleSheet.create({
   },
   loadingText: { color: "#888", fontSize: 13 },
   errorBox:    { justifyContent: "center", alignItems: "center", gap: 10, padding: 24 },
-  errorIcon:   { fontSize: 36 },
   errorText:   { color: "#aaa", fontSize: 13, textAlign: "center", lineHeight: 20 },
   retryBtn: {
     marginTop: 8,
@@ -517,5 +517,4 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     alignItems: "center",
   },
-  fullscreenBtnText: { color: "#fff", fontSize: 14, lineHeight: 18 },
 });
