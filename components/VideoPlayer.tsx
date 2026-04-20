@@ -94,9 +94,9 @@ function SeekBar({ currentTime, duration, onSeekStart, onSeekChange, onSeekEnd }
       {...panResponder.panHandlers}
     >
       <View style={styles.seekTrack}>
-        <View style={[styles.seekFill, { width: `${(pct * 100).toFixed(2)}%` }]} />
+        <View style={[styles.seekFill, { width: `${(pct * 100).toFixed(2)}%` as any}]} />
       </View>
-      <View style={[styles.seekThumb, { left: `${(pct * 100).toFixed(2)}%` }]} />
+      <View style={[styles.seekThumb, { left: `${(pct * 100).toFixed(2)}%` as any}]} />
     </View>
   );
 }
@@ -151,8 +151,8 @@ function ScrubOverlay({ scrubTime, scrubDelta, duration }: ScrubOverlayProps) {
 
         {/* Scrub progress bar */}
         <View style={styles.scrubTrack}>
-          <View style={[styles.scrubFill, { width: `${(pct * 100).toFixed(1)}%` }]} />
-          <View style={[styles.scrubThumb, { left: `${(pct * 100).toFixed(1)}%` }]} />
+          <View style={[styles.scrubFill, { width: `${(pct * 100).toFixed(1)}%` as any }]} />
+          <View style={[styles.scrubThumb, { left: `${(pct * 100).toFixed(1)}%` as any }]} />
         </View>
       </View>
     </View>

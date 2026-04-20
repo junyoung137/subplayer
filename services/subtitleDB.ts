@@ -64,6 +64,7 @@ export interface CacheInfo {
 // ── DB 싱글톤 ─────────────────────────────────────────────────────────────────
 
 let _db: SQLite.SQLiteDatabase | null = null;
+let _initPromise: Promise<void> | null = null;
 
 function getDB(): SQLite.SQLiteDatabase {
   if (!_db) throw new Error("[DB] initDB()를 먼저 호출하세요.");
@@ -85,9 +86,12 @@ const _partialLastSaved = new Map<string, number>();
 // ── 초기화 ────────────────────────────────────────────────────────────────────
 
 export async function initDB(): Promise<void> {
-  _db = await SQLite.openDatabaseAsync(DB_NAME);
+  if (_db) return;
+  if (_initPromise) return _initPromise;
+  _initPromise = (async () => {
+    _db = await SQLite.openDatabaseAsync(DB_NAME);
 
-  await _db.execAsync(`
+    await _db.execAsync(`
     PRAGMA journal_mode = WAL;
     PRAGMA foreign_keys = ON;
     PRAGMA synchronous = NORMAL;
@@ -124,7 +128,9 @@ export async function initDB(): Promise<void> {
       ON subtitle_segments(cache_id, segment_id);
   `);
 
-  console.log("[DB] v5 초기화 완료");
+    console.log("[DB] v5 초기화 완료");
+  })();
+  await _initPromise;
 }
 
 // ── 저장: 완료 자막 ───────────────────────────────────────────────────────────
