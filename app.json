@@ -11,7 +11,7 @@
     "newArchEnabled": true,
 
     "splash": {
-      "image": "./assets/adaptive-icon.png",
+      "image": "./assets/icon.png",
       "resizeMode": "contain",
       "backgroundColor": "#000000"
     },
@@ -27,7 +27,7 @@
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive_foreground.png",
-        "backgroundColor": "#ffffff"
+        "backgroundColor": "#000000"
       },
       "package": "com.realtimesub.app",
       "minSdkVersion": 23,
