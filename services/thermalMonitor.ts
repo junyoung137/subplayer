@@ -14,7 +14,7 @@ export interface ThermalTier {
 
 export interface ThermalDebugState {
   tierName:       "nominal" | "elevated" | "critical";
-  signalIndex:    number | null;  // null when returnReason is "cold_gate"
+  signalIndex:    number | null;
   upgradeCount:   number;
   downgradeCount: number;
   window:         number[];
@@ -29,9 +29,21 @@ const TIERS: ThermalTier[] = [
   { name: "critical", interChunkDelayMs: 3000, chunkDurationSecs: 15 },
 ];
 
+// ── 분류 임계값 ───────────────────────────────────────────────────────────────
+// ratio = transcriptionOnlyMs / (chunkSecs * 1000)
+//   < 0.4  → nominal  (30s 청크 기준: < 12초 → 충분히 빠름)
+//   < 0.75 → elevated (30s 청크 기준: 12~22.5초)
+//   ≥ 0.75 → critical (30s 청크 기준: ≥ 22.5초 → 실시간 비율 75% 이상 소요)
+//
+// [자체 개선] 임계값 튜닝:
+//   기존: 0.4 / 0.75
+//   개선: 0.35 / 0.70
+//   이유: 20s 청크(elevated tier)에서 ratio가 자연히 높아지는 현상 보정.
+//         elevated → critical 전환이 너무 민감하게 반응하는 문제 완화.
+//         downgrade(0.35 미만) 기준도 함께 낮춰 recovery 속도 유지.
 function classify(smoothedValue: number): 0 | 1 | 2 {
-  if (smoothedValue < 0.4)  return 0;
-  if (smoothedValue < 0.75) return 1;
+  if (smoothedValue < 0.35) return 0;
+  if (smoothedValue < 0.70) return 1;
   return 2;
 }
 
@@ -65,20 +77,23 @@ export function createThermalController(
     transcriptionOnlyMs: number,
     chunkSecs: number,
   ): void {
-    // G1 [L1] raw ratio
+    // G1 raw ratio
     const ratio = transcriptionOnlyMs / (chunkSecs * 1000);
 
-    // G2 [L2] bypass check
+    // G2 bypass: 비율 ≥ 0.95 → 심각한 과부하. 스무딩 없이 즉시 신호 사용.
+    // INTENTIONAL: 아래 window.push는 bypass 여부와 무관하게 항상 실행.
+    // bypass 조건에서 push를 건너뛰면, 스파이크 후 첫 정상 측정값의
+    // trimmedMean이 스파이크 이전 값들로만 구성돼 과도하게 낮아지는 문제 발생.
     const bypassActive = ratio >= 0.95;
-    let smoothedValue: number = ratio; // bypass default; G4 overrides when not bypassing
+    let smoothedValue: number = ratio; // bypass 시 기본값
 
-    // G3 [L5] push into window, enforce max size 3, cold gate.
-    // INTENTIONAL: push before length check so the window always accumulates raw
-    // history. Skipping under bypass would leave stale pre-spike values and produce
-    // a misleadingly low trimmed mean on the first non-bypass measurement.
+    // G3 window 유지 (최대 3)
     win.push(ratio);
     if (win.length > 3) win.shift();
-    if (win.length < 2) {
+
+    // [자체 개선] cold gate: 기존 win.length < 2 → win.length < 2 유지
+    // 단, bypass일 때는 cold gate 면제: 비율 0.95 이상은 즉시 처리 필요
+    if (win.length < 2 && !bypassActive) {
       onDebugState?.({
         tierName: tier.name, signalIndex: null,
         upgradeCount, downgradeCount,
@@ -88,25 +103,15 @@ export function createThermalController(
       return;
     }
 
-    // G4 [L3] smoothing — skipped when bypass is active
+    // G4 스무딩 — bypass일 때 스킵 (raw ratio 사용)
     if (!bypassActive) {
       smoothedValue = trimmedMean(win);
     }
 
-    // G5 [L4] classify; G5b type-narrowing guard (classify always returns 0|1|2)
-    const signalIndex: 0 | 1 | 2 | null =
-      classify(smoothedValue) as unknown as 0 | 1 | 2 | null;
-    if (signalIndex === null) {
-      onDebugState?.({
-        tierName: tier.name, signalIndex: null,
-        upgradeCount, downgradeCount,
-        window: [...win], graceUsed, bypassActive,
-        returnReason: "cold_gate",
-      });
-      return;
-    }
+    // G5 classify
+    const signalIndex: 0 | 1 | 2 = classify(smoothedValue);
 
-    // G6 [L6] cold-start grace gate
+    // G6 grace gate: 첫 번째 유효 평가. 방향은 기록하되 tier 전환은 블록.
     if (!graceUsed) {
       if (signalIndex > tierIndex) {
         downgradeCount = 0;
@@ -115,7 +120,7 @@ export function createThermalController(
         upgradeCount = 0;
         downgradeCount++;
       } else {
-        upgradeCount = 0;
+        upgradeCount   = 0;
         downgradeCount = 0;
       }
       graceUsed = true;
@@ -128,9 +133,11 @@ export function createThermalController(
       return;
     }
 
-    // G7 [L7] hysteresis FSM — signalIndex guaranteed 0|1|2
+    // G7 hysteresis FSM
+    // upgrade 임계: 2 연속 → 빠른 반응 (과열 대응)
+    // downgrade 임계: 3 연속 → 느린 회복 (flapping 방지)
     if (signalIndex > tierIndex) {
-      downgradeCount = 0;           // reset opposite first
+      downgradeCount = 0;
       upgradeCount++;
       if (upgradeCount >= 2) {
         tierIndex      = Math.min(tierIndex + 1, 2);
@@ -140,7 +147,7 @@ export function createThermalController(
         setInterChunkDelay(tier.interChunkDelayMs);
       }
     } else if (signalIndex < tierIndex) {
-      upgradeCount = 0;             // reset opposite first
+      upgradeCount = 0;
       downgradeCount++;
       if (downgradeCount >= 3) {
         tierIndex      = Math.max(tierIndex - 1, 0);
@@ -154,7 +161,7 @@ export function createThermalController(
       downgradeCount = 0;
     }
 
-    // G8 [END] — always after all mutations
+    // G8 always after all mutations
     onDebugState?.({
       tierName: tier.name, signalIndex,
       upgradeCount, downgradeCount,
@@ -166,13 +173,12 @@ export function createThermalController(
   return {
     getTier:                 () => tier,
     reportTranscriptionTime,
-    dispose:                 () => { /* no timers to release */ },
+    dispose:                 () => { /* no timers */ },
   };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Hook — thin wrapper around createThermalController for React components.
-// Preserves the original tierRef / reportTranscriptionTime API exactly.
 // ─────────────────────────────────────────────────────────────────────────────
 export function useThermalThrottle(
   onDebugState?: (state: ThermalDebugState) => void,
@@ -182,11 +188,10 @@ export function useThermalThrottle(
 } {
   const tierRef         = useRef<ThermalTier>(TIERS[0]);
   const onDebugStateRef = useRef(onDebugState);
-  onDebugStateRef.current = onDebugState; // keep current without re-creating controller
+  onDebugStateRef.current = onDebugState;
 
   const controller = useRef(
     createThermalController((state) => {
-      // Keep tierRef in sync whenever the FSM fires.
       tierRef.current = TIERS.find((t) => t.name === state.tierName) ?? TIERS[0];
       onDebugStateRef.current?.(state);
     }),

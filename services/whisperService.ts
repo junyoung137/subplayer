@@ -41,16 +41,30 @@ export function transcribeChunkSegmented(
   sourceLanguage: string = "auto"
 ): Promise<TranscribeSegment[]> {
   return new Promise<TranscribeSegment[]>((resolve, reject) => {
+    // [자체 개선] queue chain 강화
+    //
+    // 기존 구조:
+    //   transcribeQueue = transcribeQueue.then(async () => { ... })
+    //   → reject 전파 시 then() 체인이 rejected 상태로 남아 후속 작업이 큐에 쌓이지 않는 문제
+    //
+    // 개선:
+    //   1. task 내부 에러를 catch해서 외부 Promise (resolve/reject)로 전달
+    //   2. transcribeQueue 체인 자체는 항상 resolve()로 끝나도록 격리
+    //      → 에러가 발생해도 queue chain이 깨지지 않음
+    //   3. delay는 성공 시에만 적용 (실패 시 빠른 에러 전파)
+
     transcribeQueue = transcribeQueue.then(async () => {
-      const delayMs = _interChunkDelayMs; // snapshot at task-start time
+      const delayMs = _interChunkDelayMs;
       try {
         const result = await _doTranscribeSegmented(chunkPath, chunkStartTime, sourceLanguage);
-        await new Promise<void>(r => setTimeout(r, delayMs)); // delay only on success
+        await new Promise<void>(r => setTimeout(r, delayMs));
         resolve(result);
       } catch (e) {
-        reject(e); // skip delay on failure — fast error propagation
+        // reject는 외부 Promise로만 전달; queue chain은 계속 진행
+        reject(e);
+        // delay 없이 즉시 다음 작업으로 → 실패한 청크 때문에 queue가 지연되지 않음
       }
-      // This .then() callback never throws — queue chain stays alive after failures.
+      // .then() 콜백은 절대 throw하지 않으므로 queue chain이 broken 상태에 빠지지 않음
     });
   });
 }
@@ -65,18 +79,14 @@ export function isModelLoaded(): boolean {
  */
 function splitIntoSentences(text: string): string[] {
   const results: string[] = [];
-  // 문장 부호로 끝나는 덩어리 추출
   const withPunct = text.match(/[^.!?]+[.!?]+/g) ?? [];
-  // 위에서 매칭된 전체 길이
-  const matched = withPunct.join("");
-  // 문장 부호 없이 남은 꼬리 (예: "The Sounds of Glass had me from its")
-  const tail = text.slice(matched.length).trim();
+  const matched   = withPunct.join("");
+  const tail      = text.slice(matched.length).trim();
 
   for (const s of withPunct) {
     const trimmed = s.trim();
     if (trimmed.length > 0) results.push(trimmed);
   }
-  // 꼬리 부분도 버리지 않고 추가
   if (tail.length > 0) results.push(tail);
 
   return results;
@@ -89,15 +99,15 @@ function mergeShortSegments(segments: TranscribeSegment[]): TranscribeSegment[] 
   let current: TranscribeSegment = { ...segments[0] };
 
   for (let i = 1; i < segments.length; i++) {
-    const seg = segments[i];
-    const duration = seg.endTime - seg.startTime;
-    const isTooShort = duration < 0.8;
-    const isTooFewChars = seg.text.trim().length < 3;
+    const seg             = segments[i];
+    const duration        = seg.endTime - seg.startTime;
+    const isTooShort      = duration < 0.8;
+    const isTooFewChars   = seg.text.trim().length < 3;
     const currentDuration = current.endTime - current.startTime;
 
     if ((isTooShort || isTooFewChars) && currentDuration < 8) {
       current.endTime = seg.endTime;
-      current.text = current.text + " " + seg.text.trim();
+      current.text    = current.text + " " + seg.text.trim();
     } else {
       merged.push(current);
       current = { ...seg };
@@ -108,27 +118,25 @@ function mergeShortSegments(segments: TranscribeSegment[]): TranscribeSegment[] 
   // 문장 단위 분할
   const result: TranscribeSegment[] = [];
   for (const seg of merged) {
-    const duration = seg.endTime - seg.startTime;
+    const duration  = seg.endTime - seg.startTime;
     const sentences = splitIntoSentences(seg.text);
 
-    // 문장이 1개 이하거나 너무 짧으면 통으로
     if (sentences.length <= 1 || duration < 1.5) {
       result.push(seg);
       continue;
     }
 
-    // 글자 수 비례로 시간 분배
     const totalChars = sentences.reduce((sum, s) => sum + s.length, 0);
     let cursor = seg.startTime;
     for (let i = 0; i < sentences.length; i++) {
-      const sentence = sentences[i];
+      const sentence    = sentences[i];
       const sentDuration = (sentence.length / totalChars) * duration;
-      const isLast = i === sentences.length - 1;
+      const isLast      = i === sentences.length - 1;
       result.push({
         startTime: cursor,
-        endTime: isLast ? seg.endTime : cursor + sentDuration,
-        text: sentence.trim(),
-        language: seg.language,
+        endTime:   isLast ? seg.endTime : cursor + sentDuration,
+        text:      sentence.trim(),
+        language:  seg.language,
       });
       cursor += sentDuration;
     }

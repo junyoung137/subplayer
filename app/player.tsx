@@ -176,6 +176,12 @@ export default function PlayerScreen() {
     };
   }, []);
 
+  // ── [FIX 3-B] SQLite/BG 결과 로드 중복 실행 방지 ──────────────────────────
+  // 문제: useVideoProcessor가 SQLite에 저장 → PlayerScreen이 cacheKey effect에서
+  //       loadSubtitles()로 읽어 setSubtitles() → 재렌더 → effect 재실행 루프
+  // 해결: 이 cacheKey에 대해 이미 로드 완료한 경우 effect 내부에서 early return
+  const subtitleLoadedRef = useRef<string | null>(null);
+
   useEffect(() => {
     bgResultApplied.current = false;
     setTranslationEverCompleted(false);
@@ -186,10 +192,16 @@ export default function PlayerScreen() {
     bgPrevProgressRef.current = 0; bgPrevTimestampRef.current = 0;
     bgSecsPerPctRef.current = 0; bgUpdateCountRef.current = 0;
     setBgRemainingSecs(null);
+    // cacheKey가 바뀌면 로드 완료 플래그도 초기화
+    subtitleLoadedRef.current = null;
   }, [cacheKey]);
 
   useEffect(() => {
     if (!cacheKey) return;
+    // [FIX 3-B] 이미 이 cacheKey에 대해 로드 완료했으면 재실행 방지
+    // setSubtitles → 재렌더 → cacheKey effect 재실행 루프를 차단
+    if (subtitleLoadedRef.current === cacheKey) return;
+
     (async () => {
       const bgResult = await loadBgResult(cacheKey);
       if (bgResult && !isBgRunningRef.current) {
@@ -202,6 +214,7 @@ export default function PlayerScreen() {
             original: seg.original, translated: seg.translated,
           }));
           bgResultApplied.current = true;
+          subtitleLoadedRef.current = cacheKey; // 로드 완료 표시
           setSubtitles(restored);
           setSubtitlePhase("done"); setSubtitleProgress(1); setTranslationEverCompleted(true);
           saveSubtitles(cacheKey, targetLanguage, "local", restored).catch(() => {});
@@ -211,6 +224,7 @@ export default function PlayerScreen() {
       }
       const cached = await loadSubtitles(cacheKey, targetLanguage, "local");
       if (!cached) return;
+      subtitleLoadedRef.current = cacheKey; // 로드 완료 표시
       setSubtitles(cached.segments);
       if (!cached.isPartial) {
         setSubtitlePhase("done"); setSubtitleProgress(1); setTranslationEverCompleted(true);
@@ -232,6 +246,7 @@ export default function PlayerScreen() {
         original: seg.original, translated: seg.translated,
       }));
       bgResultApplied.current = true;
+      subtitleLoadedRef.current = cacheKey; // 로드 완료 표시
       setSubtitles(restored);
       setSubtitlePhase("done"); setSubtitleProgress(1); setTranslationEverCompleted(true);
       saveSubtitles(cacheKey, targetLanguage, "local", restored).catch(() => {});
@@ -484,10 +499,8 @@ export default function PlayerScreen() {
   // ══════════════════════════════════════════════════════════════════════════
   if (isLandscape) {
     return (
-      // 가로 모드: 전체 화면 wrapper 안에 VideoPlayer + SubtitleOverlay를 함께 배치
       <View style={{ width: screenWidth, height: screenHeight, backgroundColor: "#000" }}>
         <VideoPlayer rate={playbackRate} overlayHeader={landscapeHeader} overlayControls={landscapeControls} />
-        {/* ✅ absoluteFillObject가 이 View(screenWidth×screenHeight)를 기준으로 덮음 */}
         <SubtitleOverlay />
         {isRetranslating && (
           <View style={styles.lsRetranslateBanner}>
@@ -527,24 +540,6 @@ export default function PlayerScreen() {
         </TouchableOpacity>
       </View>
 
-      {/*
-       * ✅ 핵심 수정: videoWrapper 안에 VideoPlayer와 SubtitleOverlay를 함께 배치
-       *
-       * [문제] 기존 코드:
-       *   <View style={videoWrapper}>          ← 높이 고정된 박스
-       *     <VideoPlayer />
-       *   </View>
-       *   <SubtitleOverlay />                  ← wrapper 바깥! absoluteFillObject가
-       *                                           SafeAreaView 전체를 기준으로 잡혀서
-       *                                           비디오 아래 빈 공간에 렌더링됨
-       *
-       * [해결] 수정된 코드:
-       *   <View style={videoWrapper}>          ← position:relative 기준점
-       *     <VideoPlayer />
-       *     <SubtitleOverlay />               ← wrapper 안! absoluteFillObject가
-       *   </View>                                videoWrapper를 기준으로 잡혀서
-       *                                         비디오 위에 정확히 오버레이됨
-       */}
       <View style={isFullscreen ? styles.videoWrapperFullscreen : [styles.videoWrapper, { height: videoHeight }]}>
         <VideoPlayer rate={playbackRate} />
         <SubtitleOverlay />
@@ -713,7 +708,6 @@ const styles = StyleSheet.create({
   headerBtnText: { color: "#fff", fontSize: 20 },
   title: { flex: 1, color: "#fff", fontSize: 14, fontWeight: "600", marginHorizontal: 8 },
 
-  // ✅ position: "relative" 명시 → SubtitleOverlay의 absoluteFillObject 기준점
   videoWrapper: {
     width: "100%",
     backgroundColor: "#000",

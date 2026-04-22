@@ -1,13 +1,12 @@
 /**
- * UrlInputModal (v2-fix)
+ * UrlInputModal (v2-fix-2)
  *
- * 변경사항:
- * - parseYoutubeId import 경로: "./YouTubePlayer" → "../utils/youtubeUtils"
- *   (순환 의존성 제거 + 빨간줄 해결)
- * - 기존 탭 구조(local / url) 유지
- * - URL 탭 안내 문구: timedtext 기반 자막으로 설명 업데이트
- * - YouTube Shorts URL 지원 추가 (utils에서 처리)
- * - 입력값 유효성 미리보기 (videoId 파싱 결과 표시)
+ * [FIX] ensureFileUri:
+ *   DocumentPicker가 file:///...cache/DocumentPicker/... URI를 주는 경우,
+ *   file://로 시작해도 앱 소유 디렉토리가 아니므로 Android가 언제든 삭제할 수 있음.
+ *   → cache/DocumentPicker/ 경로는 반드시 앱 소유 cacheDirectory/videos/ 로 복사.
+ *   → content:// 도 동일하게 복사.
+ *   → FileSystem.cacheDirectory 나 documentDirectory 소속 파일만 그대로 사용.
  */
 
 import React, { useState, useCallback } from "react";
@@ -27,19 +26,45 @@ import { useTranslation } from "react-i18next";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
-// ✅ 핵심 수정: YouTubePlayer에서 직접 import하지 않고 utils에서 import
 import { parseYoutubeId } from "../utils/youtubeUtils";
 import { FolderOpen, X, Check } from 'lucide-react-native';
 
 // ── 파일 URI 안정화 ───────────────────────────────────────────────────────────
-async function ensureFileUri(uri: string, filename: string): Promise<string | null> {
-  if (uri.startsWith("file://")) return uri;
+// [FIX] 기존: file:// 이면 무조건 그대로 반환 → DocumentPicker 임시 파일 삭제 버그
+// [FIX] 수정: 앱 소유 디렉토리(cacheDirectory / documentDirectory) 소속인지 확인,
+//             아니면 반드시 cacheDirectory/videos/ 로 복사
+async function ensureStableFileUri(uri: string, filename: string): Promise<string | null> {
+  const cacheDir = FileSystem.cacheDirectory ?? "";
+  const docDir   = FileSystem.documentDirectory ?? "";
+
+  // 이미 앱 소유 안정 경로에 있으면 그대로 사용
+  // (단, DocumentPicker 임시 경로는 cacheDirectory 하위라도 불안정하므로 제외)
+  const isStable =
+    (cacheDir && uri.startsWith(cacheDir) && !uri.includes("/DocumentPicker/")) ||
+    (docDir   && uri.startsWith(docDir));
+
+  if (isStable) {
+    console.log("[FILE] Already in stable path, skipping copy:", uri);
+    return uri;
+  }
+
+  // content:// 또는 cache/DocumentPicker/ 등 불안정 경로 → 안정 경로로 복사
   try {
-    const cacheDir = FileSystem.cacheDirectory + "videos/";
-    await FileSystem.makeDirectoryAsync(cacheDir, { intermediates: true });
-    const dest = cacheDir + filename;
+    const videosDir = cacheDir + "videos/";
+    await FileSystem.makeDirectoryAsync(videosDir, { intermediates: true });
+
+    // 파일명 충돌 방지: timestamp prefix
+    const safeName = Date.now() + "_" + filename.replace(/[^a-zA-Z0-9._\-]/g, "_");
+    const dest = videosDir + safeName;
+
+    console.log("[FILE] Copying to stable path:", dest);
+    await FileSystem.copyAsync({ from: uri, to: dest });
+
+    // 복사 성공 확인
     const info = await FileSystem.getInfoAsync(dest);
-    if (!info.exists) await FileSystem.copyAsync({ from: uri, to: dest });
+    if (!info.exists) throw new Error("Copy succeeded but dest not found: " + dest);
+
+    console.log("[FILE] Copy complete:", dest);
     return dest;
   } catch (e) {
     console.error("[FILE] Copy failed:", e);
@@ -51,13 +76,10 @@ async function ensureFileUri(uri: string, filename: string): Promise<string | nu
 interface UrlInputModalProps {
   visible: boolean;
   onClose: () => void;
-  /** 로컬 파일 선택 완료 시 — 기존 플로우와 동일하게 langModal 표시 */
   onLocalFilePicked: (uri: string, name: string, genre: string) => void;
-  /** YouTube/URL 선택 완료 시 — player로 바로 이동 */
   onUrlPicked: (videoId: string, title: string, isYoutube: boolean, genre?: string) => void;
 }
 
-// ── 탭 타입 ───────────────────────────────────────────────────────────────────
 type Tab = "local" | "url";
 
 // ── 컴포넌트 ──────────────────────────────────────────────────────────────────
@@ -84,7 +106,6 @@ export function UrlInputModal({
   const [urlError,      setUrlError]      = useState<string | null>(null);
   const [selectedGenre, setSelectedGenre] = useState("general");
 
-  // 실시간 videoId 파싱 미리보기
   const parsedId = parseYoutubeId(urlInput.trim());
 
   // ── 로컬 파일 선택 ───────────────────────────────────────────────────────
@@ -98,11 +119,19 @@ export function UrlInputModal({
       if (result.canceled) return;
 
       const file = result.assets[0];
-      const stableUri = await ensureFileUri(file.uri, file.name);
+
+      console.log("[FILE] URI being passed to player:", file.uri);
+      console.log("[FILE] URI type:", file.uri.startsWith("file://") ? "file:// ✓" : file.uri.startsWith("content://") ? "content:// (needs copy)" : "other");
+
+      // [FIX] ensureStableFileUri: DocumentPicker 임시 경로도 반드시 복사
+      const stableUri = await ensureStableFileUri(file.uri, file.name);
       if (!stableUri) {
         Alert.alert(t("url.error"), t("url.fileCopyError"));
         return;
       }
+
+      console.log("[FILE] Stable URI:", stableUri);
+
       onClose();
       onLocalFilePicked(stableUri, file.name, selectedGenre);
     } catch (e) {
@@ -110,7 +139,7 @@ export function UrlInputModal({
     } finally {
       setIsLoading(false);
     }
-  }, [onClose, onLocalFilePicked]);
+  }, [onClose, onLocalFilePicked, selectedGenre, t]);
 
   // ── URL 확인 ─────────────────────────────────────────────────────────────
   const confirmUrl = useCallback(() => {
@@ -121,17 +150,15 @@ export function UrlInputModal({
       return;
     }
 
-    // YouTube 판별
     const ytId = parseYoutubeId(trimmed);
     if (ytId) {
-      const genreSnapshot = selectedGenre; // capture BEFORE onClose resets state
+      const genreSnapshot = selectedGenre;
       onClose();
       onUrlPicked(ytId, `YouTube: ${ytId}`, true, genreSnapshot);
       setUrlInput("");
       return;
     }
 
-    // 일반 URL (http/https) — 향후 확장 예정
     if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
       setUrlError(t("url.generalUrlNotSupported"));
       return;
@@ -159,13 +186,10 @@ export function UrlInputModal({
       <Pressable style={styles.backdrop} onPress={handleClose}>
         <Pressable style={[styles.sheet, { paddingBottom: Math.max(insets.bottom + 16, 40) }]} onPress={() => {}}>
 
-          {/* 드래그 핸들 */}
           <View style={styles.handle} />
 
-          {/* 헤더 */}
           <Text style={styles.title}>{t("url.title")}</Text>
 
-          {/* 탭 */}
           <View style={styles.tabRow}>
             <TouchableOpacity
               style={[styles.tab, activeTab === "local" && styles.tabActive]}
@@ -188,8 +212,6 @@ export function UrlInputModal({
           {/* ── 로컬 탭 ──────────────────────────────────────────────────── */}
           {activeTab === "local" && (
             <View style={styles.tabContent}>
-
-              {/* Genre selector — same as URL tab */}
               <View style={styles.genreSection}>
                 <Text style={styles.genreLabel}>{t("genre.sectionTitle")}</Text>
                 <ScrollView
@@ -200,18 +222,10 @@ export function UrlInputModal({
                   {GENRE_OPTIONS.map((g) => (
                     <TouchableOpacity
                       key={g.key}
-                      style={[
-                        styles.genrePill,
-                        selectedGenre === g.key && styles.genrePillActive,
-                      ]}
+                      style={[styles.genrePill, selectedGenre === g.key && styles.genrePillActive]}
                       onPress={() => setSelectedGenre(g.key)}
                     >
-                      <Text
-                        style={[
-                          styles.genrePillText,
-                          selectedGenre === g.key && styles.genrePillTextActive,
-                        ]}
-                      >
+                      <Text style={[styles.genrePillText, selectedGenre === g.key && styles.genrePillTextActive]}>
                         {g.label}
                       </Text>
                     </TouchableOpacity>
@@ -219,7 +233,6 @@ export function UrlInputModal({
                 </ScrollView>
               </View>
 
-              {/* Existing file pick button — unchanged */}
               <TouchableOpacity
                 style={styles.bigPickBtn}
                 onPress={pickLocalFile}
@@ -236,15 +249,12 @@ export function UrlInputModal({
                   </>
                 )}
               </TouchableOpacity>
-
             </View>
           )}
 
           {/* ── URL 탭 ───────────────────────────────────────────────────── */}
           {activeTab === "url" && (
             <View style={styles.tabContent}>
-
-              {/* 장르 선택 */}
               <View style={styles.genreSection}>
                 <Text style={styles.genreLabel}>{t("genre.sectionTitle")}</Text>
                 <ScrollView
@@ -255,20 +265,10 @@ export function UrlInputModal({
                   {GENRE_OPTIONS.map((g) => (
                     <TouchableOpacity
                       key={g.key}
-                      style={[
-                        styles.genrePill,
-                        selectedGenre === g.key && styles.genrePillActive,
-                      ]}
-                      onPress={() => {
-                        setSelectedGenre(g.key);
-                      }}
+                      style={[styles.genrePill, selectedGenre === g.key && styles.genrePillActive]}
+                      onPress={() => setSelectedGenre(g.key)}
                     >
-                      <Text
-                        style={[
-                          styles.genrePillText,
-                          selectedGenre === g.key && styles.genrePillTextActive,
-                        ]}
-                      >
+                      <Text style={[styles.genrePillText, selectedGenre === g.key && styles.genrePillTextActive]}>
                         {g.label}
                       </Text>
                     </TouchableOpacity>
@@ -276,7 +276,6 @@ export function UrlInputModal({
                 </ScrollView>
               </View>
 
-              {/* 입력창 */}
               <View style={styles.inputWrap}>
                 <Text style={styles.inputLabel}>{t("url.youtubeUrlLabel")}</Text>
                 <View style={[
@@ -306,7 +305,6 @@ export function UrlInputModal({
                   )}
                 </View>
 
-                {/* 파싱 성공 미리보기 */}
                 {parsedId && urlInput.length > 0 && (
                   <View style={styles.parsedRow}>
                     <Check size={16} color="#22c55e" />
@@ -314,13 +312,11 @@ export function UrlInputModal({
                   </View>
                 )}
 
-                {/* 에러 메시지 */}
                 {urlError && (
                   <Text style={styles.errorText}>{urlError}</Text>
                 )}
               </View>
 
-              {/* 확인 버튼 */}
               <TouchableOpacity
                 style={[styles.confirmBtn, !urlInput.trim() && styles.confirmBtnDisabled]}
                 onPress={confirmUrl}
@@ -328,7 +324,6 @@ export function UrlInputModal({
               >
                 <Text style={styles.confirmBtnText}>{t("url.play")}</Text>
               </TouchableOpacity>
-
             </View>
           )}
 
@@ -368,7 +363,6 @@ const styles = StyleSheet.create({
     textAlign: "center",
   },
 
-  // ── 탭 ──────────────────────────────────────────────────────────────────────
   tabRow: {
     flexDirection: "row",
     backgroundColor: "#1a1a1a",
@@ -388,7 +382,6 @@ const styles = StyleSheet.create({
 
   tabContent: { gap: 12 },
 
-  // ── 로컬 파일 버튼 ──────────────────────────────────────────────────────────
   bigPickBtn: {
     backgroundColor: "#1e1e1e",
     borderRadius: 16,
@@ -402,7 +395,6 @@ const styles = StyleSheet.create({
   bigPickText: { color: "#fff", fontSize: 16, fontWeight: "600" },
   bigPickSub:  { color: "#555", fontSize: 12 },
 
-  // ── URL 입력 ────────────────────────────────────────────────────────────────
   inputWrap: { gap: 6 },
   inputLabel: { color: "#666", fontSize: 12, fontWeight: "600" },
   inputRow: {
@@ -423,9 +415,8 @@ const styles = StyleSheet.create({
     fontSize: 13,
     paddingVertical: 12,
   },
-  clearBtn:     { padding: 4 },
+  clearBtn: { padding: 4 },
 
-  // 파싱 성공 미리보기
   parsedRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -439,7 +430,6 @@ const styles = StyleSheet.create({
     lineHeight: 18,
   },
 
-  // ── 확인 버튼 ───────────────────────────────────────────────────────────────
   confirmBtn: {
     backgroundColor: "#2563eb",
     borderRadius: 12,
@@ -449,7 +439,6 @@ const styles = StyleSheet.create({
   confirmBtnDisabled: { opacity: 0.35 },
   confirmBtnText: { color: "#fff", fontSize: 15, fontWeight: "700" },
 
-  // ── 장르 선택 ───────────────────────────────────────────────────────────────
   genreSection: { gap: 8 },
   genreLabel:   { color: "#666", fontSize: 12, fontWeight: "600" },
   genreRow:     { flexDirection: "row", gap: 8, paddingVertical: 2 },

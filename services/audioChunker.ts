@@ -9,26 +9,11 @@ export interface AudioChunk {
   index: number;
 }
 
-export async function extractAndChunkAudio(
-  videoPath: string,
-  chunkDuration: number = 30
-): Promise<AudioChunk[]> {
-  if (!AudioChunker || typeof AudioChunker.getVideoDuration !== "function") {
+// ── 모듈 가용성 검사 ──────────────────────────────────────────────────────────
+function assertModule(): void {
+  if (!AudioChunker || typeof AudioChunker.extractSingleChunk !== "function") {
     throw new Error("AudioChunker native module not found.");
   }
-  const totalDuration: number = await AudioChunker.getVideoDuration(videoPath);
-  if (!totalDuration || totalDuration <= 0) {
-    throw new Error("오디오 트랙을 찾을 수 없습니다. mp4/mkv/mov 권장");
-  }
-  const chunkCount = Math.ceil(totalDuration / chunkDuration);
-  const chunks: AudioChunk[] = [];
-  for (let i = 0; i < chunkCount; i++) {
-    const startSec = i * chunkDuration;
-    const actualDuration = Math.min(chunkDuration, totalDuration - startSec);
-    const chunk: AudioChunk = await AudioChunker.extractSingleChunk(videoPath, startSec, actualDuration, i);
-    chunks.push(chunk);
-  }
-  return chunks;
 }
 
 export async function getVideoDuration(videoPath: string): Promise<number> {
@@ -48,9 +33,8 @@ export async function extractSingleChunkAt(
   durationSec: number,
   index: number,
 ): Promise<AudioChunk> {
-  if (!AudioChunker || typeof AudioChunker.extractSingleChunk !== "function") {
-    throw new Error("AudioChunker native module not found.");
-  }
+  assertModule();
+  // SILENT_CHUNK / EMPTY_AUDIO reject는 그대로 throw — 호출부(videoProcessor)에서 분류
   return AudioChunker.extractSingleChunk(videoPath, startSec, durationSec, index);
 }
 
