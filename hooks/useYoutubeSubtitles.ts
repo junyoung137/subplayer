@@ -1,21 +1,29 @@
 /**
- * useYoutubeSubtitles (v3) — diff-update + 초반 빠른 UI
+ * useYoutubeSubtitles (v4) — overlap chunk pipeline
  *
- * 변경사항 (v2 → v3):
- * [PERF-1] diff update: translateWithContext 내부에서 전체 배열 재생성 제거
- *          → translatedMapRef(Map)에만 저장, Store는 변경된 id만 patch
- *          → 500+ segments 환경에서 렌더 비용 최대 70~90% 감소
- * [UX-1]   초반 빠른 UI: completed <= 3 구간은 throttle 없이 즉시 반영
- *          → 첫 1~3개 번역 결과가 즉시 보여 "멈췄나?" 느낌 제거
- * [UX-2]   Whisper fallback Alert 완전 제거
- *          → phase: "fallback_whisper" 상태만 세팅, 호출자가 상태바로 처리
+ * v3 → v4 변경사항:
+ *
+ * [PIPELINE-1] timedtext 전용 사전 병합 추가
+ *   - mergeSegmentsForYoutube(): YouTube fragment를 의미 단위로 병합
+ *   - 3단어 이하 fragment 강제 병합, 5초/100자 상한, pause 기반 분리
+ *
+ * [PIPELINE-2] 분리 호출 구조 → 단일 overlap chunk 파이프라인으로 교체
+ *   - 기존: translateWithContext()가 8개 단위로 독립 호출 반복
+ *     → SBD가 청크 경계에서 리셋, 문장 단절 발생
+ *   - 변경: createOverlappedChunks(core=8, overlap=2) + stitchChunkResults()
+ *     → 청크 경계에 앞뒤 2개 컨텍스트 제공, 경계 단절 완전 제거
+ *
+ * [PIPELINE-3] 초기/나머지 분리 구조 제거 (옵션 2 채택)
+ *   - 기존: translateWithContext(0→firstBatch) + translateWithContext(firstBatch→end)
+ *     → 두 구간 경계에서 또 단절 발생, 프리페치 루프와 충돌
+ *   - 변경: translateAllSegments()로 전체를 단일 overlap chunk 파이프라인 처리
+ *     → UI 스트리밍은 onProgress 콜백으로만
  *
  * 유지된 구조 (변경 없음):
+ * - diff patch (PERF-1), 초반 빠른 UI (UX-1)
  * - jobIdRef 패턴 (race condition 방어)
- * - makeSegmentId ms 기반 (subtitle sync 안정성)
- * - translatedCount 기반 resume
- * - 컨텍스트 청킹 (CONTEXT_CHUNK_SIZE = 8)
- * - 프리페치 루프 (PREFETCH_WINDOW_SEC = 90)
+ * - videoHash(videoId) 기반 고유명사 캐싱 (translateSegments 내부)
+ * - gemmaLoadedRef, cancelledRef
  */
 
 import { useState, useRef, useCallback, useEffect } from "react";
@@ -33,17 +41,21 @@ import {
 import { getLocalModelPath } from "../services/modelDownloadService";
 import { getLanguageByCode } from "../constants/languages";
 import { SubtitleSegment } from "../store/usePlayerStore";
+import {
+  mergeSegmentsForYoutube,
+  createOverlappedChunks,
+  stitchChunkResults,
+  toTranslationInput,
+  buildTranslationMap,
+  MergedTimedSegment,
+  OverlappedChunk,
+  OVERLAP_SIZE,
+  CHUNK_CORE_SIZE,
+} from "../services/youtubeSegmentPipeline";
 
 // ── 상수 ─────────────────────────────────────────────────────────────────────
 
-/** Gemma에 한 번에 넘기는 자막 줄 수 (컨텍스트 청킹) */
-const CONTEXT_CHUNK_SIZE = 8;
-
-/** 프리페치 윈도우: 현재 재생 시간 기준 앞 N초 분량을 미리 번역 */
-const PREFETCH_WINDOW_SEC = 90;
-
-/** 프리페치 polling 간격 (ms) */
-const PREFETCH_INTERVAL_MS = 5_000;
+/** [PIPELINE-2] overlap chunk 방식으로 교체되어 PREFETCH_WINDOW, 프리페치 루프 제거 */
 
 // ── 타입 ─────────────────────────────────────────────────────────────────────
 
@@ -54,7 +66,7 @@ export type YoutubeSubtitlePhase =
   | "done"
   | "error"
   | "no_subtitles"
-  | "fallback_whisper"; // 자막 없음 → Whisper 폴백 진행 중 (Alert 없음, 상태바만)
+  | "fallback_whisper";
 
 export interface YoutubeSubtitleStatus {
   phase: YoutubeSubtitlePhase;
@@ -70,9 +82,6 @@ export interface YoutubeSubtitleStatus {
 
 // ── 헬퍼 ─────────────────────────────────────────────────────────────────────
 
-/**
- * TimedTextSegment 배열 → SubtitleSegment 배열 (원문만, translated 빈 문자열)
- */
 function toOriginalOnly(segs: TimedTextSegment[]): SubtitleSegment[] {
   return segs.map((seg, i) => ({
     id:         `yt_${i}_${Math.round(seg.startTime * 1000)}`,
@@ -87,9 +96,8 @@ function toOriginalOnly(segs: TimedTextSegment[]): SubtitleSegment[] {
 
 export function useYoutubeSubtitles() {
   const setSubtitles    = usePlayerStore((s) => s.setSubtitles);
-  const patchSubtitles  = usePlayerStore((s) => s.patchSubtitles);   // [PERF-1] diff update용
+  const patchSubtitles  = usePlayerStore((s) => s.patchSubtitles);
   const clearSubtitles  = usePlayerStore((s) => s.clearSubtitles);
-  const currentTime     = usePlayerStore((s) => s.currentTime);
 
   const targetLanguage  = useSettingsStore((s) => s.targetLanguage);
 
@@ -106,32 +114,20 @@ export function useYoutubeSubtitles() {
   const cancelledRef        = useRef(false);
   const gemmaLoadedRef      = useRef(false);
 
-  /**
-   * [PERF-1] translatedMapRef: index → translatedText
-   * Store 전체 배열 재생성 대신, 변경된 id만 patch하기 위한 Map
-   */
+  /** [PERF-1] index → translatedText */
   const translatedMapRef    = useRef<Map<number, string>>(new Map());
 
-  /**
-   * [PERF-1] segmentIdsRef: toOriginalOnly로 생성된 id 배열 캐시
-   * patchSubtitles 호출 시 index → id 조회에 사용
-   */
+  /** [PERF-1] diff patch용 id 배열 캐시 */
   const segmentIdsRef       = useRef<string[]>([]);
 
   const allSegmentsRef      = useRef<TimedTextSegment[]>([]);
-  const prefetchTimerRef    = useRef<ReturnType<typeof setInterval> | null>(null);
-  const prefetchUpToRef     = useRef(0);
-
-  // currentTime을 렌더 없이 추적
-  const currentTimeRef = useRef(currentTime);
-  useEffect(() => { currentTimeRef.current = currentTime; }, [currentTime]);
 
   // ── Gemma 지연 로드 ──────────────────────────────────────────────────────
   const ensureGemma = async (): Promise<boolean> => {
     if (gemmaLoadedRef.current) return true;
     const path = await getLocalModelPath();
     if (!path) {
-      console.warn("[YT_SUBS v3] Gemma 없음 — 원문만 표시");
+      console.warn("[YT_SUBS v4] Gemma 없음 — 원문만 표시");
       return false;
     }
     await loadGemma();
@@ -139,180 +135,196 @@ export function useYoutubeSubtitles() {
     return true;
   };
 
-  /**
-   * [PERF-1] diff patch: 번역된 인덱스들만 Store에 반영
-   *
-   * 전체 배열 재생성(map) 대신 변경된 항목만 id 기준으로 patch.
-   * 500+ segments 환경에서 렌더 비용 최대 70~90% 감소.
-   */
+  // ── [PERF-1] diff patch ───────────────────────────────────────────────────
   const flushPatchToStore = useCallback(
     (newEntries: Array<{ index: number; translated: string }>) => {
       const patches: Array<{ id: string; translated: string }> = [];
-
       for (const { index, translated } of newEntries) {
         const id = segmentIdsRef.current[index];
         if (id) patches.push({ id, translated });
       }
-
-      if (patches.length > 0) {
-        patchSubtitles(patches);
-      }
+      if (patches.length > 0) patchSubtitles(patches);
     },
     [patchSubtitles],
   );
 
+  // ── [PIPELINE-2] 핵심: overlap chunk 파이프라인 번역 ─────────────────────
   /**
-   * 컨텍스트 청킹 번역:
-   * - CONTEXT_CHUNK_SIZE(8)개씩 묶어서 번역 → 앞뒤 문맥 파악
-   * - [PERF-1] 번역된 세그먼트는 diff patch로 Store에 반영 (전체 재생성 없음)
-   * - [UX-1]   completed <= 3 구간은 throttle 없이 즉시 반영
-   * - videoGenre: 향후 외부에서 "기술 강의", "코미디" 등 주입 가능
+   * 전체 timedtext 세그먼트를 단일 overlap chunk 파이프라인으로 번역.
+   *
+   * 흐름:
+   *   1) mergeSegmentsForYoutube()  — fragment 사전 병합
+   *   2) createOverlappedChunks()   — overlap chunk 분할
+   *   3) 청크별 translateSegments() — 동일 videoId로 호출 (고유명사 캐시 공유)
+   *   4) stitchChunkResults()       — overlap 제거 후 최종 조립
+   *   5) buildTranslationMap()      — merged → 원본 timedtext 인덱스 매핑
+   *   6) patchSubtitles()           — diff patch로 UI 업데이트
+   *
+   * @param segs      원본 timedtext 세그먼트 전체
+   * @param videoId   videoHash (고유명사 캐시 키)
+   * @param langName  번역 대상 언어 이름
+   * @param videoGenre 장르 힌트
    */
-  const translateWithContext = async (
+  const translateAllSegments = async (
     segs: TimedTextSegment[],
-    startIdx: number,
-    endIdx: number,   // exclusive
     videoId: string,
     langName: string,
-    videoGenre: string = "general"
+    videoGenre: string = "general",
   ): Promise<void> => {
-    const slice = segs.slice(startIdx, endIdx);
-    if (slice.length === 0) return;
+    if (segs.length === 0) return;
 
-    const total = segs.length;
-    let batchNumber = 0;
+    // ── Step 1: timedtext 전용 사전 병합 ────────────────────────────────────
+    // [PIPELINE-1] YouTube fragment를 의미 단위로 병합
+    const merged = mergeSegmentsForYoutube(segs);
+    console.log(
+      `[YT_SUBS v4] merge: ${segs.length} raw → ${merged.length} merged (${
+        Math.round((1 - merged.length / segs.length) * 100)
+      }% reduction)`,
+    );
 
-    // CONTEXT_CHUNK_SIZE씩 배치 분할
-    for (let batchStart = 0; batchStart < slice.length; batchStart += CONTEXT_CHUNK_SIZE) {
+    if (cancelledRef.current) return;
+
+    // ── Step 2: overlap chunk 분할 ───────────────────────────────────────────
+    // [PIPELINE-2] core=8, overlap=2
+    const chunks = createOverlappedChunks(merged);
+    const totalChunks = chunks.length;
+
+    console.log(
+      `[YT_SUBS v4] chunks: ${totalChunks} (core=${CHUNK_CORE_SIZE}, overlap=${OVERLAP_SIZE})`,
+    );
+
+    // ── Step 3: 청크별 번역 ──────────────────────────────────────────────────
+    const chunkResults: Array<ReturnType<typeof translateSegments> extends Promise<infer T> ? T : never> = [];
+
+    let completedSourceSegs = 0;
+    const totalSourceSegs = segs.length;
+
+    const partialTranslations: string[] = new Array(merged.length).fill("");
+
+    for (let ci = 0; ci < chunks.length; ci++) {
       if (cancelledRef.current) return;
 
-      const batchEnd   = Math.min(batchStart + CONTEXT_CHUNK_SIZE, slice.length);
-      const batch      = slice.slice(batchStart, batchEnd);
-      const batchInput = batch.map((seg) => ({
-        start:      seg.startTime,
-        end:        seg.endTime,
-        text:       seg.text,
-        translated: "",
-      }));
+      const chunk = chunks[ci];
+      const chunkInput = toTranslationInput(chunk.segments);
 
-      batchNumber++;
+      console.log(
+        `[YT_SUBS v4] chunk ${ci + 1}/${totalChunks}: ` +
+        `segs=${chunk.segments.length}, keep=[${chunk.keepStart}~${chunk.keepEnd}]`,
+      );
 
+      let chunkTranslated: Awaited<ReturnType<typeof translateSegments>>;
       try {
-        const translated = await translateSegments(
-          batchInput,
-          () => {},      // 배치 내부 progress (프리페치 시 생략)
+        chunkTranslated = await translateSegments(
+          chunkInput,
+          (completed, total) => {
+            if (cancelledRef.current) return;
+            const chunkSourceSegs = chunk.segments
+              .slice(chunk.keepStart, chunk.keepEnd + 1)
+              .reduce((sum, seg) => sum + seg.sourceIndices.length, 0);
+            const chunkProgress = total > 0 ? completed / total : 0;
+            const approxDone = completedSourceSegs + Math.round(chunkSourceSegs * chunkProgress);
+            const progress = totalSourceSegs > 0 ? approxDone / totalSourceSegs : 0;
+
+            setStatus((s) => ({
+              ...s,
+              translatedCount: approxDone,
+              progress: Math.min(progress, 0.99),
+            }));
+          },
           videoId,
           langName,
           videoGenre,
         );
+      } catch (e: any) {
+        console.warn(`[YT_SUBS v4] chunk ${ci + 1} 번역 실패, 원문 사용:`, e);
+        chunkTranslated = chunkInput.map((seg) => ({ ...seg, translated: seg.text }));
+      }
 
-        if (cancelledRef.current) return;
+      if (cancelledRef.current) return;
 
-        // [PERF-1] 번역 결과를 Map에 저장 + diff patch 준비
-        const newEntries: Array<{ index: number; translated: string }> = [];
-        translated.forEach((seg, i) => {
-          const globalIdx = startIdx + batchStart + i;
-          const translatedText = seg.translated || seg.text;
+      // ── Step 3.5: 중간 결과 UI 스트리밍 ────────────────────────────────────
+      const newEntries: Array<{ index: number; translated: string }> = [];
 
-          // 이미 번역된 항목은 스킵 (중복 patch 방지)
-          if (!translatedMapRef.current.has(globalIdx)) {
-            translatedMapRef.current.set(globalIdx, translatedText);
-            newEntries.push({ index: globalIdx, translated: translatedText });
+      for (let li = chunk.keepStart; li <= chunk.keepEnd; li++) {
+        const globalMergedIdx = chunk.globalStart + (li - chunk.keepStart);
+        if (globalMergedIdx >= merged.length) break;
+
+        const seg = chunkTranslated[li];
+        if (!seg) continue;
+
+        const translatedText = seg.translated || seg.text || chunk.segments[li]?.text || "";
+        partialTranslations[globalMergedIdx] = translatedText;
+
+        for (const srcIdx of merged[globalMergedIdx].sourceIndices) {
+          if (!translatedMapRef.current.has(srcIdx)) {
+            translatedMapRef.current.set(srcIdx, translatedText);
+            newEntries.push({ index: srcIdx, translated: translatedText });
           }
-        });
-
-        // [PERF-1] 변경된 항목만 Store에 patch (전체 배열 재생성 없음)
-        const done = translatedMapRef.current.size;
-
-        // [UX-1] 초반 3개 배치는 throttle 없이 즉시 반영
-        //        이후는 3배치마다 or 마지막 배치에서 반영
-        const isEarlyBatch  = batchNumber <= 3;
-        const isThrottleTick = batchNumber % 3 === 0;
-        const isLastBatch    = startIdx + batchStart + batch.length >= endIdx;
-
-        if (isEarlyBatch || isThrottleTick || isLastBatch) {
-          flushPatchToStore(newEntries);
-
-          setStatus((s) => ({
-            ...s,
-            translatedCount: done,
-            progress: total > 0 ? done / total : 0,
-          }));
-        } else {
-          // throttle 구간: Map만 업데이트, Store patch는 다음 tick으로 지연
-          // (newEntries는 다음 isThrottleTick 시 함께 flush됨)
-          // → 단순화를 위해 newEntries는 즉시 flush하되 setStatus만 지연
-          flushPatchToStore(newEntries);
         }
-
-      } catch (e) {
-        console.warn("[YT_SUBS v3] 배치 번역 실패, 원문 사용:", e);
-        // 실패한 배치는 원문으로 채움
-        const fallbackEntries: Array<{ index: number; translated: string }> = [];
-        batch.forEach((seg, i) => {
-          const globalIdx = startIdx + batchStart + i;
-          if (!translatedMapRef.current.has(globalIdx)) {
-            translatedMapRef.current.set(globalIdx, seg.text);
-            fallbackEntries.push({ index: globalIdx, translated: seg.text });
-          }
-        });
-        flushPatchToStore(fallbackEntries);
       }
+
+      completedSourceSegs += chunk.segments
+        .slice(chunk.keepStart, chunk.keepEnd + 1)
+        .reduce((sum, seg) => sum + seg.sourceIndices.length, 0);
+
+      flushPatchToStore(newEntries);
+
+      setStatus((s) => ({
+        ...s,
+        translatedCount: completedSourceSegs,
+        progress: totalSourceSegs > 0
+          ? Math.min(completedSourceSegs / totalSourceSegs, 0.99)
+          : 0,
+      }));
+
+      chunkResults.push(chunkTranslated as any);
     }
-  };
 
-  // ── 프리페치 루프 ─────────────────────────────────────────────────────────
-  /**
-   * 현재 재생 위치 기준 PREFETCH_WINDOW_SEC 앞까지 미번역 세그먼트를 선번역.
-   * 5초마다 polling하여 필요한 구간만 추가 번역.
-   */
-  const startPrefetchLoop = (videoId: string, langName: string, videoGenre: string) => {
-    if (prefetchTimerRef.current) clearInterval(prefetchTimerRef.current);
+    if (cancelledRef.current) return;
 
-    prefetchTimerRef.current = setInterval(async () => {
-      if (cancelledRef.current) {
-        clearInterval(prefetchTimerRef.current!);
-        return;
+    // ── Step 4: overlap 제거 후 최종 조립 ───────────────────────────────────
+    const stitched = stitchChunkResults(chunks, chunkResults as any, merged.length);
+
+    // ── Step 5: merged → 원본 timedtext 인덱스 매핑 ──────────────────────────
+    // [FIX] v6 시그니처에 맞게 originalSegments(segs)와 targetLanguage(langName) 추가
+    const translationMap = buildTranslationMap(merged, stitched, segs, langName);
+
+    // ── Step 6: 최종 patch ───────────────────────────────────────────────────
+    const finalEntries: Array<{ index: number; translated: string }> = [];
+    translationMap.forEach((translated, srcIdx) => {
+      const prev = translatedMapRef.current.get(srcIdx);
+      if (prev !== translated) {
+        translatedMapRef.current.set(srcIdx, translated);
+        finalEntries.push({ index: srcIdx, translated });
       }
-      const segs = allSegmentsRef.current;
-      if (segs.length === 0) return;
+    });
 
-      const ct = currentTimeRef.current;
-      const prefetchUntil = ct + PREFETCH_WINDOW_SEC;
-
-      const targetEnd = segs.findIndex((s) => s.startTime > prefetchUntil);
-      const endIdx    = targetEnd === -1 ? segs.length : targetEnd;
-
-      if (endIdx > prefetchUpToRef.current) {
-        const newStart = prefetchUpToRef.current;
-        prefetchUpToRef.current = endIdx;
-        translateWithContext(segs, newStart, endIdx, videoId, langName, videoGenre).catch(
-          (e) => console.warn("[YT_SUBS v3] 프리페치 오류:", e)
-        );
-      }
-    }, PREFETCH_INTERVAL_MS);
-  };
-
-  const stopPrefetchLoop = () => {
-    if (prefetchTimerRef.current) {
-      clearInterval(prefetchTimerRef.current);
-      prefetchTimerRef.current = null;
+    if (finalEntries.length > 0) {
+      flushPatchToStore(finalEntries);
     }
+
+    setStatus((s) => ({
+      ...s,
+      translatedCount: totalSourceSegs,
+      progress: 1,
+    }));
+
+    console.log(
+      `[YT_SUBS v4] done: ${totalSourceSegs} source segs, ` +
+      `${merged.length} merged, ${totalChunks} chunks`,
+    );
   };
 
   // ── 메인 load ─────────────────────────────────────────────────────────────
   /**
    * @param videoId     YouTube video ID
    * @param videoGenre  영상 장르 힌트 (예: "tech lecture", "comedy", "news")
-   *                    없으면 "general"
    */
   const load = useCallback(async (videoId: string, videoGenre: string = "general") => {
     cancelledRef.current    = false;
     translatedMapRef.current.clear();
     segmentIdsRef.current   = [];
-    prefetchUpToRef.current = 0;
     allSegmentsRef.current  = [];
-    stopPrefetchLoop();
     clearSubtitles();
 
     const langName = getLanguageByCode(targetLanguage)?.name ?? targetLanguage;
@@ -331,23 +343,21 @@ export function useYoutubeSubtitles() {
     if (cancelledRef.current) return;
 
     if (!result || result.segments.length === 0) {
-      // ── [UX-2] Fallback: Alert 없이 phase만 변경, 호출자가 상태바로 처리 ──
       setStatus((s) => ({
         ...s,
         phase: "no_subtitles",
         error: null,
         sourceLanguage: null,
       }));
-      console.log("[YT_SUBS v3] timedtext 없음 → Fallback 신호 (Alert 없음)");
+      console.log("[YT_SUBS v4] timedtext 없음 → Fallback 신호");
       return;
     }
 
     const { segments: rawSegs, language: sourceLang } = result;
     allSegmentsRef.current = rawSegs;
 
-    // ── 2. 원문 먼저 Store에 적재 (번역 전에도 원문 자막 노출) ─────────────
+    // ── 2. 원문 먼저 Store에 적재 ───────────────────────────────────────────
     const originalOnly = toOriginalOnly(rawSegs);
-    // [PERF-1] id 캐시 저장 (이후 diff patch에서 index → id 조회용)
     segmentIdsRef.current = originalOnly.map((s) => s.id);
     setSubtitles(originalOnly);
 
@@ -360,55 +370,39 @@ export function useYoutubeSubtitles() {
       translatedCount: 0,
     });
 
-    // ── 3. Gemma 로드 ──────────────────────────────────────────────────────
+    // ── 3. Gemma 로드 ───────────────────────────────────────────────────────
     const hasGemma = await ensureGemma();
     if (cancelledRef.current) return;
 
     if (!hasGemma) {
+      setStatus((s) => ({ ...s, phase: "done", progress: 1 }));
+      return;
+    }
+
+    // ── 4. [PIPELINE-2] 전체를 단일 overlap chunk 파이프라인으로 번역 ────────
+    try {
+      await translateAllSegments(rawSegs, videoId, langName, videoGenre);
+    } catch (e) {
+      if (cancelledRef.current) return;
+      console.error("[YT_SUBS v4] 번역 파이프라인 오류:", e);
       setStatus((s) => ({
         ...s,
-        phase: "done",
-        progress: 1,
-        error: null,
+        phase: "error",
+        error: String(e),
       }));
       return;
     }
 
-    // ── 4. 초기 번역: 처음 PREFETCH_WINDOW_SEC 분량 (즉시 표시) ──────────
-    const initialEnd = rawSegs.findIndex((s) => s.startTime > PREFETCH_WINDOW_SEC);
-    const firstBatchEnd = initialEnd === -1 ? rawSegs.length : initialEnd;
-
-    prefetchUpToRef.current = firstBatchEnd;
-    await translateWithContext(rawSegs, 0, firstBatchEnd, videoId, langName, videoGenre);
     if (cancelledRef.current) return;
 
-    // ── 5. 프리페치 루프 시작 (나머지 구간을 백그라운드 번역) ─────────────
-    startPrefetchLoop(videoId, langName, videoGenre);
+    setStatus((s) => ({
+      ...s,
+      phase: "done",
+      progress: 1,
+      translatedCount: rawSegs.length,
+    }));
 
-    // ── 6. 나머지 전체 번역 (순차 진행, 프리페치가 앞서간 부분은 스킵) ────
-    if (firstBatchEnd < rawSegs.length) {
-      await translateWithContext(
-        rawSegs,
-        firstBatchEnd,
-        rawSegs.length,
-        videoId,
-        langName,
-        videoGenre
-      );
-    }
-
-    stopPrefetchLoop();
-
-    if (!cancelledRef.current) {
-      setStatus((s) => ({
-        ...s,
-        phase: "done",
-        progress: 1,
-        translatedCount: rawSegs.length,
-      }));
-    }
-
-    // ── 7. Gemma 해제 ──────────────────────────────────────────────────────
+    // ── 5. Gemma 해제 ───────────────────────────────────────────────────────
     if (gemmaLoadedRef.current) {
       try { await unloadGemma(); } catch {}
       gemmaLoadedRef.current = false;
@@ -419,7 +413,6 @@ export function useYoutubeSubtitles() {
   // ── cancel ────────────────────────────────────────────────────────────────
   const cancel = useCallback(() => {
     cancelledRef.current = true;
-    stopPrefetchLoop();
     if (gemmaLoadedRef.current) {
       unloadGemma().catch(() => {});
       gemmaLoadedRef.current = false;
