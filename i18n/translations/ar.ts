@@ -126,7 +126,7 @@
     noTranslationModelMsg: "لا يوجد نموذج — يتم عرض الأصلي فقط\n\nقم بتنزيل نموذج Gemma لتفعيل الترجمة.",
     continueWithOriginal: "المتابعة بالأصلي",
     resumeBanner: "الجلسة السابقة: اكتملت {{count}} مقاطع. جارٍ الاستئناف…",
-    whisperLoading: "تحميل Whisper…",
+    whisperLoading: "تحميل…",
     processFailed: "فشلت المعالجة",
     totalProgress: "التقدم الإجمالي",
     translationModelReady: "تحضير النموذج… يرجى الانتظار",

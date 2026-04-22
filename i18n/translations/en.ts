@@ -126,7 +126,7 @@
     noTranslationModelMsg: "No translation model — showing original only\n\nDownload the Gemma model from the Models screen to enable translation.",
     continueWithOriginal: "Continue with Original",
     resumeBanner: "Previous session found: {{count}} segments completed. Resuming…",
-    whisperLoading: "Loading Whisper model…",
+    whisperLoading: "Loading…",
     processFailed: "Processing Failed",
     totalProgress: "Overall Progress",
     translationModelReady: "Preparing translation model… Please wait",

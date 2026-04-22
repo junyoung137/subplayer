@@ -126,7 +126,7 @@
     noTranslationModelMsg: "无翻译模型 — 仅显示原文\n\n从模型管理界面下载Gemma模型以启用翻译。",
     continueWithOriginal: "使用原文继续",
     resumeBanner: "发现上次任务: 已完成{{count}}个片段。继续翻译…",
-    whisperLoading: "正在加载Whisper模型…",
+    whisperLoading: "正在加载…",
     processFailed: "处理失败",
     totalProgress: "总体进度",
     translationModelReady: "正在准备翻译模型… 请稍候",

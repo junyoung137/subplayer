@@ -126,7 +126,7 @@
     noTranslationModelMsg: "Không có mô hình — chỉ hiển thị bản gốc\n\nTải xuống mô hình Gemma để kích hoạt dịch thuật.",
     continueWithOriginal: "Tiếp tục với bản gốc",
     resumeBanner: "Phiên trước: {{count}} đoạn đã hoàn thành. Đang tiếp tục…",
-    whisperLoading: "Đang tải Whisper…",
+    whisperLoading: "Đang tải…",
     processFailed: "Xử lý thất bại",
     totalProgress: "Tiến trình tổng",
     translationModelReady: "Đang chuẩn bị mô hình… Vui lòng chờ",

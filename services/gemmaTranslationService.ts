@@ -45,11 +45,11 @@ const EMA_ALPHA_BG = 0.4;
 const EMA_REANCHOR_WEIGHT = 0.5;
 
 // ── Thermal management ────────────────────────────────────────────────────────
-const THERMAL_NPREDICT_SCALE = [1.0, 0.75, 0.55] as const; // level 0/1/2
+const THERMAL_NPREDICT_SCALE = [1.0, 0.75, 0.55] as const;
 
-let _thermalLevel = 0;             // 0 = cool, 1 = warm, 2 = hot
-let _thermalConsecutiveHigh = 0;   // batches above threshold → level up
-let _thermalConsecutiveLow  = 0;   // batches below threshold → level down
+let _thermalLevel = 0;
+let _thermalConsecutiveHigh = 0;
+let _thermalConsecutiveLow  = 0;
 
 const SAVE_INTERVAL_MS = 1500;
 const CHECKPOINT_TTL_MS = 24 * 60 * 60 * 1000;
@@ -58,29 +58,19 @@ const PROPER_NOUN_MIN_COUNT = 3;
 const SECS_PER_CHAR_KO = 0.065;
 const MAX_TIMING_OVERLAP = 0.1;
 
-// Netflix 레이아웃 상수
 const NETFLIX_MAX_CHARS_PER_LINE = 20;
 const NETFLIX_MIN_CHARS_FOR_SPLIT = 15;
 
-// expand: gap 기준 자연 분할 임계값
 const EXPAND_GAP_THRESHOLD_S = 0.8;
-
-// 기본 병합 gap 상한 (SBD fallback 용)
 const MERGE_GAP_HARD_LIMIT_S = 0.6;
-
-// 발화자 전환이 강하게 의심될 때 적용하는 더 엄격한 gap 상한
 const MERGE_GAP_SPEAKER_CHANGE_S = 0.35;
-// ── 그룹 크기 제한 (추가) ─────────────────────────────────────────────────────
-
 const MAX_WORDS_PER_GROUP = 35;
 
-// ── SBD 관련 상수 ─────────────────────────────────────────────────────────────
 const SBD_BATCH_SIZE = 30;
 const SBD_FALLBACK_RATIO = 0.9;
 
 const RE_DANGLING_FRAGMENT = /\b(with|for|and|but|or|to|in|at|on|of|by|a|an|the|is|are|was|were|be|been|being|have|has|had|will|would|could|should|may|might|must|do|does|did|not|no|i|you|we|they|he|she|it)\s*$/i;
 
-// ── 소셜미디어 앱명 정규화 ────────────────────────────────────────────────────
 const SOCIAL_MEDIA_NORMALIZATION: Record<string, string> = {
   "vine": "Vine", "snapchat": "Snapchat", "pinterest": "Pinterest",
   "instagram": "Instagram", "twitter": "Twitter", "facebook": "Facebook",
@@ -88,7 +78,6 @@ const SOCIAL_MEDIA_NORMALIZATION: Record<string, string> = {
   "reddit": "Reddit", "discord": "Discord", "twitch": "Twitch",
 };
 
-// ── 환각 / 오염 패턴 ──────────────────────────────────────────────────────────
 const RE_HALLUCINATED_TERMS_KO = /자기야[,，\s]*|자기[,，\s]+|여보[,，\s]*|오빠[,，\s]*|언니[,，\s]*/g;
 const RE_HALLUCINATION_GUARD = /\b(honey|sweetie|darling|dear|oppa|unnie)\b/i;
 const RE_OUTPUT_CORRUPTION = /^##\s*Translation\s*:?\s*/i;
@@ -98,45 +87,27 @@ const RE_PARENS_ANY = /\([^)]*\)/g;
 const RE_ENGLISH_WORD = /\b([a-zA-Z]{3,})\b/g;
 const RE_NUMERIC_TOKEN = /^\d+([:.]\d+)*[%]?$|^\d+(st|nd|rd|th)$/i;
 
-// ── 접두사 / 지시사 오염 패턴 ────────────────────────────────────────────────
 const RE_NUMBERED_PREFIX = /^\d+\.\s+/;
 const RE_AWKWARD_DEMONSTRATIVE = /^저것은\s/;
 const RE_AWKWARD_DEMONSTRATIVE_I = /^저것이\s/;
 
-// ── 발화자 전환 신호 패턴 ────────────────────────────────────────────────────
 const RE_LIKELY_QUESTION_END = /\?$|\bright\b|\bunderstood\b|\bunderstand\b|\bgot it\b/i;
 const RE_LIKELY_RESPONSE_START = /^(yes|no|yeah|nope|yep|nah|i do|i don'?t|not really|of course|okay|ok|sure|right|hmm|uh|oh|well|i|we|that|it'?s|what|why|how)\b/i;
 
-// ── 환각 추가 내용 감지 패턴 ─────────────────────────────────────────────────
 const RE_HALLUCINATED_ADDITION_KO = /놀랍네요|놀랍습니다|놀랍군요|이상하네요|이상합니다/g;
-
-// ── 시간대 후처리 패턴 ───────────────────────────────────────────────────────
 const RE_MORNING_TIME_KO = /아침\s*(\d{1,2})시/g;
-
-// ── [FIX-TIME] 시간 표기 변환 패턴 ─────────────────────────────────────────
 const RE_TIME_HHMM = /\b(\d{1,2}):(\d{2})(?::\d{2})?(?:\s*(AM|PM|am|pm))?\b/g;
-
-// ── [FIX-TIME-DEDUP] "8시 시" 중복 감지 패턴 ────────────────────────────────
 const RE_TIME_UNIT_DEDUP = /(\d{1,2})시\s*시/g;
 const RE_MINUTE_UNIT_DEDUP = /(\d{1,2})분\s*분/g;
-
-// ── [FIX-2] "until (like) X(:00)? in the morning" — 새벽 판정 ───────────────
 const RE_UNTIL_IN_MORNING = /until\s+(?:like\s+)?(\d{1,2})(?::\d{2})?\s+in\s+the\s+morning/i;
-
-// ── [FIX-2B] 도착/행동 시간: "until (like) X(:00)?" 패턴 ────────────────────
 const RE_UNTIL_TIME_ONLY = /until\s+(?:like\s+)?(\d{1,2})(?::\d{2})?\b(?!\s+in\s+the\s+morning)/i;
-
-// ── [FIX-3] Placeholder 잔존 감지 ────────────────────────────────────────────
 const RE_PLACEHOLDER_LEAK = /__NUM\d+__/g;
-
-// ── [FIX-THAT-KIND-OF] 패턴 ─────────────────────────────────────────────────
 const RE_THAT_KIND_OF_THING = /that\s+kind\s+of\s+thing/i;
 const RE_THAT_KIND_OF_NOUN = /that\s+kind\s+of\s+([a-z]+(?:\s+[a-z]+)?)/i;
 const RE_THAT_KIND_OF_VERB_ADJ = /that\s+kind\s+of\s+(is|was|are|were|feels|feel|seems|seem|looks|look|sounds|sound|works|work|makes|make|does|do|did|doesn't|don't|won't|can't|isn't|wasn't)/i;
 const RE_KIND_OF_ALONE = /(?<!that\s)kind\s+of\b/i;
 const RE_NEGATIVE_VERB = /\b(doesn't|don't|won't|can't|isn't|wasn't|didn't|never|no|not)\b/i;
 
-// ── 장르 페르소나 ─────────────────────────────────────────────────────────────
 const GENRE_PERSONA: Record<string, string> = {
   "general": `[ROLE] Professional subtitle translator.
 
@@ -215,7 +186,7 @@ EN: For thousands of years, this place has remained untouched. → KR: 수천 �
 
 [FORBIDDEN]
 - Do NOT flatten poetic language into plain statements
-- Do NOT use casual or choppy sentences`,
+- Do NOT use choppy sentences`,
 
   "tech lecture": `[ROLE] Technical education subtitle translator for software, engineering, and science.
 
@@ -225,15 +196,14 @@ EN: For thousands of years, this place has remained untouched. → KR: 수천 �
 3. Natural flow — avoid robotic phrasing
 
 [STYLE RULES]
-- Keep English technical terms in English when universally used in Korean tech communities (Promise, API, array, deploy, refactor, debug, etc.)
+- Keep English technical terms in English when universally used in Korean tech communities
 - Use standard Korean vocabulary for concepts with established Korean terms
-- Maintain strict term consistency: once a term is chosen, reuse it identically throughout
+- Maintain strict term consistency throughout
 - Use 합쇼체 (-습니다)
 
 [EXAMPLES]
 EN: This function returns a Promise. → KR: 이 함수는 Promise를 반환합니다
 EN: The API call is asynchronous. → KR: API 호출은 비동기로 처리됩니다
-EN: We refactored the entire module. → KR: 전체 모듈을 리팩토링했습니다
 
 [FORBIDDEN]
 - Do NOT replace well-known English terms with awkward Korean equivalents
@@ -249,17 +219,10 @@ EN: We refactored the entire module. → KR: 전체 모듈을 리팩토링했습
 [STYLE RULES]
 - Keep gaming terms in phonetic Korean form (너프, 버프, 렉, 딜, 탱커, 힐러, 궁극기)
 - Use casual 반말 and gamer slang naturally
-- Prefer shorter, fast-paced phrasing to match gameplay speed
-- Preserve short reaction expressions: "no way" → 말도 안 돼 / "let's go" → 가자 / "what?" → 뭐?
-
-[EXAMPLES]
-EN: He got nerfed hard. → KR: 너프 제대로 먹었네
-EN: That build is broken. → KR: 저 빌드 완전 사기잖아
-EN: I'm so tilted right now. → KR: 나 지금 완전 틸트왔어
+- Prefer shorter, fast-paced phrasing
 
 [FORBIDDEN]
-- Do NOT translate "nerf" → use "너프" / "buff" → use "버프" / "broken/OP" → use "사기"
-- Do NOT over-formalize emotional reactions`,
+- Do NOT translate "nerf" → use "너프" / "buff" → use "버프"`,
 
   "education": `[ROLE] Educational content subtitle translator. Maximum comprehension for learners.
 
@@ -270,16 +233,11 @@ EN: I'm so tilted right now. → KR: 나 지금 완전 틸트왔어
 
 [STYLE RULES]
 - Break complex expressions into clear, simple Korean
-- Use common vocabulary over academic jargon where possible
 - Warm, encouraging tone; use 합쇼체 (-습니다)
 
-[EXAMPLES]
-EN: Think of it like a container that holds information. → KR: 정보를 담는 그릇이라고 생각하면 됩니다
-
 [FORBIDDEN]
-- Do NOT use obscure vocabulary learners would need to look up
-- Do NOT add explanations or context beyond what is in the source
-- Do NOT use slang inappropriate for a learning environment`,
+- Do NOT use obscure vocabulary
+- Do NOT add explanations beyond what is in the source`,
 };
 
 const COMMON_WORDS = new Set([
@@ -299,7 +257,6 @@ const COMMON_WORDS = new Set([
   "Save",
 ]);
 
-// ── 보호 고유명사 (번역 금지) ─────────────────────────────────────────────────
 const PROTECTED_PROPER_NOUNS = new Set([
   "Siri", "Alexa", "Google", "ChatGPT", "GPT", "AI",
   "Snapchat", "Pinterest", "Instagram", "Vine", "Twitter", "Facebook",
@@ -312,181 +269,178 @@ const PROTECTED_PROPER_NOUNS = new Set([
 const PROTECTED_ACRONYMS = new Set(["HR", "CEO", "CFO", "CTO", "IT", "PR", "VP"]);
 
 let llamaContext: LlamaContext | null = null;
-// Dedup concurrent loadModel() calls: both callers await the same promise
 let _loadModelPromise: Promise<void> | null = null;
-
-// Tracks whether the app is currently in the background. Set by backgroundTranslationTask
-// via setAppBackgroundedHint() using an AppState listener. This flag is the single source
-// of truth for background state inside gemmaTranslationService — do NOT read
-// AppState.currentState directly here; its propagation delay on Android makes it unreliable
-// for per-batch decisions.
+let _unloadModelPromise: Promise<void> | null = null;
 let _isAppBackgrounded = false;
 
 export function setAppBackgroundedHint(val: boolean): void {
   _isAppBackgrounded = val;
 }
 
-// ── Inference serialization ─────────────────────────────────────────────────
-// Serialises all translateSegments calls so llama.rn (single-context) is
-// never driven concurrently by FG and BG.  Uses two separate counters to
-// avoid the classic race: cancel-FG must NOT cancel the already-queued BG job.
+// ── Inference serialization ───────────────────────────────────────────────────
+//
+// [ACTIVE JOBS — Race Condition 완전 제거]
+//
+// 기존 문제:
+//   enqueueId/activeJobId 단조증가 방식은 "이미 실행 중인 job을 취소" 하지만
+//   새 job이 enqueue되기 *전* 구간에서 stale job이 계속 실행될 수 있었음.
+//   또한 isCancelled()를 받지 않는 내부 함수(SBD, validate 등)에서
+//   llamaContext null 체크만으로는 취소 신호가 전달되지 않는 구간 존재.
+//
+// 해결 방식 — activeJobs Set:
+//   - 모든 enqueue 시점에 고유 jobId를 Set에 등록
+//   - 취소 시 해당 jobId를 Set에서 제거
+//   - isCancelled() = "내 jobId가 Set에 없으면 취소됨"
+//   - 이 방식은 enqueue 타이밍과 무관하게 즉시 동작하며
+//     내부 async 함수 어디서든 동일한 isCancelled() 클로저로 체크 가능
+//
+// cancelCurrentInference() → 모든 active job 취소 (unload 등 전체 중단 시)
+// cancelFgInference()      → BG job 보호 하에 FG job만 취소
+// setBgJobProtection(true) → BG job의 jobId를 보호 Set에 등록해 cancel 면제
+//
+// [FIX: stopCompletion + unload 동기화]
+//
+// 추가된 보호:
+//   - cancelCurrentInference() 시 llamaContext.stopCompletion() 즉시 호출
+//     → 네이티브 레이어에서 진행 중인 completion을 실제로 중단
+//   - unloadModel()에서 _activeJobs가 빌 때까지 최대 2초 대기 후 release()
+//     → completion() 진입 직후~완료 사이 구간의 Context not found 에러 차단
+//   - enqueueInference() 내부에서 completion 호출 직전 이중 체크
+//     → queue 대기 시간 동안 취소된 job이 completion 진입하는 경우 차단
+//
+// ─────────────────────────────────────────────────────────────────────────────
+
 let _inferenceQueue: Promise<void> = Promise.resolve();
-let _enqueueId    = 0;  // incremented per enqueue call; never reset
-let _activeJobId  = 0;  // set to myEnqueueId when a job starts executing
+let _nextJobId      = 0;
+const _activeJobs   = new Set<number>(); // 현재 실행 허가된 job ID들
+const _bgProtected  = new Set<number>(); // cancelFgInference에서 보호할 BG job ID들
+
 let _isInferenceRunning = false;
 
-// BG job protection flag — module-level singleton that survives screen unmount.
-// When true, cancelFgInference() is a no-op so screen unmount cannot interrupt
-// a BG translateSegments call that is already executing in the queue.
-let _bgJobProtected = false;
-
-/**
- * Set to true immediately before BG calls translateSegments; false in the
- * finally block after it returns (or throws).  While protected,
- * cancelFgInference() is a no-op so screen-unmount cleanup cannot cancel BG.
- */
 export function setBgJobProtection(val: boolean): void {
-  _bgJobProtected = val;
+  if (val) {
+    for (const id of _activeJobs) _bgProtected.add(id);
+  } else {
+    _bgProtected.clear();
+  }
 }
 
-/** Returns true while translateSegments is executing inside the queue. */
 export function isTranslating(): boolean {
   return _isInferenceRunning;
 }
 
-/**
- * Returns true while any inference job is actively running.
- * Use this to gate BG work: the enqueueInference queue serialises execution,
- * but callers can also poll this to make the waiting intent explicit.
- */
 export function isModelBusy(): boolean {
   return _isInferenceRunning;
 }
 
-/**
- * Cancels only the CURRENTLY EXECUTING job.
- * Queued-but-not-yet-started jobs are NOT affected.
- *
- * ⚠️  Do NOT call this before enqueuing a BG job — use cancelFgInference()
- *     instead.  This function only bumps _activeJobId; if _activeJobId was
- *     already ahead of _enqueueId the next BG enqueue will see
- *     myEnqueueId < _activeJobId and be instantly cancelled.
- */
+// llama.rn 버전에 따라 stopCompletion()이 Promise를 반환하지 않을 수 있음.
+// .catch()를 직접 체이닝하면 "Cannot read property 'catch' of undefined" 크래시 발생.
+// 반환값을 먼저 받아서 Promise인 경우에만 .catch() 호출.
+function safeStopCompletion(ctx: LlamaContext): void {
+  try {
+    const result = (ctx as any).stopCompletion();
+    if (result && typeof result.catch === 'function') {
+      result.catch(() => {});
+    }
+  } catch {}
+}
+
 export function cancelCurrentInference(): void {
-  _activeJobId++;
-}
-
-/**
- * Cancels the currently-executing FG job AND re-aligns the counters so
- * that the NEXT enqueued job (the BG job) is guaranteed NOT to be treated
- * as stale by the `myEnqueueId < _activeJobId` guard.
- *
- * Why this is necessary instead of cancelCurrentInference():
- *   cancelCurrentInference() increments _activeJobId.  If _activeJobId was
- *   already > _enqueueId (e.g. due to a prior cancel or double-tap race),
- *   the gap widens further and the next BG job's myEnqueueId will be strictly
- *   less than _activeJobId → instant INFERENCE_CANCELLED for BG.
- *
- *   By setting _enqueueId = _activeJobId - 1 after the bump we guarantee:
- *     next enqueue:  myEnqueueId = _enqueueId + 1 = _activeJobId
- *     stale check:   myEnqueueId < _activeJobId  →  false  ✓
- */
-export function cancelFgInference(): void {
-  if (_bgJobProtected) {
-    console.log('[INFERENCE] cancelFgInference() suppressed — BG job is protected');
-    return;
+  if (llamaContext) {
+    safeStopCompletion(llamaContext);
   }
-  _activeJobId++;
-  // Re-align so the very next enqueueInference call gets myEnqueueId === _activeJobId.
-  _enqueueId = _activeJobId - 1;
+  _bgProtected.clear();
 }
 
-/**
- * Returns current queue counter state for debugging.
- * Log this at the start of backgroundTranslationTask to determine whether
- * the HeadlessJS task shares this module instance with the foreground
- * (counters > 0 → shared context; counters = 0 → fresh context).
- */
-export function debugInferenceCounters(): { enqueueId: number; activeJobId: number } {
-  return { enqueueId: _enqueueId, activeJobId: _activeJobId };
+export function cancelFgInference(): void {
+  const toRemove: number[] = [];
+  for (const id of _activeJobs) {
+    if (!_bgProtected.has(id)) toRemove.push(id);
+  }
+  if (toRemove.length > 0 && llamaContext) {
+    const hasBgJobRunning = _bgProtected.size > 0 && [..._activeJobs].some(id => _bgProtected.has(id));
+    if (!hasBgJobRunning) {
+      safeStopCompletion(llamaContext);
+    }
+  }
+  for (const id of toRemove) _activeJobs.delete(id);
+  if (__DEV__) {
+    console.log(`[INFERENCE] cancelFgInference: removed ${toRemove.length} jobs, ${_activeJobs.size} remain`);
+  }
+}
+
+export function debugInferenceCounters(): {
+  enqueueId: number;
+  activeJobId: number;
+  activeJobs: number[];
+  bgProtected: number[];
+} {
+  // enqueueId / activeJobId: backgroundTranslationTask.ts 로그 호환용
+  // (Set 기반으로 바뀌었으므로 _nextJobId와 최신 activeJob으로 근사값 제공)
+  const activeArr = [..._activeJobs];
+  return {
+    enqueueId:   _nextJobId,
+    activeJobId: activeArr.length > 0 ? Math.max(...activeArr) : _nextJobId,
+    activeJobs:  activeArr,
+    bgProtected: [..._bgProtected],
+  };
 }
 
 function enqueueInference<T>(fn: (isCancelled: () => boolean) => Promise<T>): Promise<T> {
-  const myEnqueueId = ++_enqueueId;
+  const myJobId = ++_nextJobId;
+  _activeJobs.add(myJobId);
+
+  const isCancelled = () => !_activeJobs.has(myJobId);
 
   const task = _inferenceQueue.then(async () => {
-    // A prior cancel bumped _activeJobId above this job's ID → stale, skip.
-    // Using strict `<` (not `<=`) so that a queued job whose ID happens to
-    // equal the post-cancel _activeJobId is NOT incorrectly cancelled.
-    if (myEnqueueId < _activeJobId) {
+    if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
+
+    // [FIX] queue 대기 후 진입 직전 이중 체크 — unloadModel 완료 후 진입 방지
+    if (!llamaContext) {
+      _activeJobs.delete(myJobId);
       throw new Error('INFERENCE_CANCELLED');
     }
-    _activeJobId = myEnqueueId;
-
-    // isCancelled: true if cancelCurrentInference() was called after this job started.
-    const isCancelled = () => myEnqueueId !== _activeJobId;
 
     _isInferenceRunning = true;
     try {
       return await fn(isCancelled);
     } finally {
       _isInferenceRunning = false;
+      _activeJobs.delete(myJobId);
+      _bgProtected.delete(myJobId);
     }
   });
 
-  // Drain errors so the queue chain never breaks on cancellation or failure.
   _inferenceQueue = task.then(() => {}, () => {});
   return task;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-// When backgrounded, delegates to Handler.postDelayed via the native bridge so the
-// sleep fires regardless of Hermes timer throttling. In foreground, uses setTimeout
-// to avoid the bridge call overhead. Falls back to setTimeout if the native module
-// is unavailable (iOS, or module not yet registered).
 async function sleep(ms: number): Promise<void> {
   if (_isAppBackgrounded && NativeModules.TranslationService?.nativeSleep) {
     return NativeModules.TranslationService.nativeSleep(ms);
   }
   return new Promise<void>((r) => setTimeout(r, ms));
 }
-/** Returns the thread count appropriate for the current thermal level. */
+
 function getInferenceThreadCount(): number {
   if (_thermalLevel >= 2) return 2;
   if (_thermalLevel >= 1) return 3;
   return 4;
 }
 
-/**
- * Scales n_predict by the current thermal level.
- * floor=8 prevents the value from collapsing so low that the model truncates real output.
- */
 function applyThermalNPredict(base: number): number {
   const scaled = Math.round(base * THERMAL_NPREDICT_SCALE[_thermalLevel]);
   return Math.max(scaled, 8);
 }
 
-/**
- * Returns the periodic thermal pause duration (ms).
- * At level 0 there is NO periodic pause — only the normal inter-batch sleep applies.
- * At level 1+, returns a longer sleep to let the SoC cool down.
- */
 function getThermalSleepMs(): number {
   if (_thermalLevel === 0) return 0;
   if (_thermalLevel === 1) return 800;
   return 1500;
 }
 
-/**
- * Updates _thermalLevel using asymmetric hysteresis:
- *   UP   uses rawBatchMs  (fast reaction to heat)
- *   DOWN uses emaBatchMs  (slow recovery when cool)
- *
- * Thresholds: >2500 ms = HOT, <1200 ms = COOL (relative to each step).
- * Requires 2 consecutive high batches to level up; 3 consecutive low to level down.
- */
 function checkThermalPressure(rawBatchMs: number, emaBatchMs: number): void {
-  // Level-up uses raw duration (react quickly)
   if (rawBatchMs > 2500) {
     _thermalConsecutiveLow = 0;
     _thermalConsecutiveHigh++;
@@ -496,7 +450,6 @@ function checkThermalPressure(rawBatchMs: number, emaBatchMs: number): void {
       if (__DEV__) console.log(`[THERMAL] Level UP → ${_thermalLevel} (raw=${rawBatchMs}ms)`);
     }
   } else if (emaBatchMs < 1200) {
-    // Level-down uses EMA duration (recover slowly)
     _thermalConsecutiveHigh = 0;
     _thermalConsecutiveLow++;
     if (_thermalConsecutiveLow >= 3 && _thermalLevel > 0) {
@@ -505,7 +458,6 @@ function checkThermalPressure(rawBatchMs: number, emaBatchMs: number): void {
       if (__DEV__) console.log(`[THERMAL] Level DOWN → ${_thermalLevel} (ema=${Math.round(emaBatchMs)}ms)`);
     }
   } else {
-    // Neither threshold crossed — reset streak counters
     _thermalConsecutiveHigh = 0;
     _thermalConsecutiveLow  = 0;
   }
@@ -646,7 +598,6 @@ function applyThatKindOfFix(out: string, sourceText: string): string {
   return out;
 }
 
-// ── 발화자 전환 가능성 판단 ───────────────────────────────────────────────────
 function likelySpeakerChange(prevText: string, currText: string, gap: number): boolean {
   const prev = prevText.trim();
   const curr = currText.trim();
@@ -660,20 +611,21 @@ function likelySpeakerChange(prevText: string, currText: string, gap: number): b
 
 // ── Model lifecycle ───────────────────────────────────────────────────────────
 export async function loadModel(onProgress?: (fraction: number) => void): Promise<void> {
+  if (_unloadModelPromise) {
+    console.log('[Gemma] loadModel() waiting for unloadModel() to complete...');
+    try { await _unloadModelPromise; } catch {}
+  }
+
   if (llamaContext) return;
-  // If another caller already started loading, share the same promise
   if (_loadModelPromise) return _loadModelPromise;
   _loadModelPromise = (async () => {
-    if (llamaContext) return; // recheck after await queue clears
+    if (llamaContext) return;
     const info = await FileSystem.getInfoAsync(MODEL_PATH);
     if (!info.exists) throw new Error("Gemma 모델 파일을 찾을 수 없습니다. 먼저 다운로드해 주세요.");
     const modelPath = MODEL_PATH.startsWith("file://") ? MODEL_PATH.slice(7) : MODEL_PATH;
     try {
       llamaContext = await initLlama(
-        // use_mlock: false — do NOT pin model pages in RAM.
-        // use_mlock: true caused Android OOM kills during model load: the OS could
-        // not page out the ~1.5 GB allocation and the OOM killer terminated the process.
-        { model: modelPath, n_threads: getInferenceThreadCount(), n_gpu_layers: 0, n_ctx: 2000, use_mlock: false }, // increased from 1000 — provides additional headroom for longer prompts without reverting to 4096 waste
+        { model: modelPath, n_threads: getInferenceThreadCount(), n_gpu_layers: 0, n_ctx: 2000, use_mlock: false },
         onProgress ? (p: number) => onProgress(p / 100) : undefined
       );
       console.log("[Gemma] Model loaded.");
@@ -687,26 +639,50 @@ export async function loadModel(onProgress?: (fraction: number) => void): Promis
   return _loadModelPromise;
 }
 
-let _unloadGeneration = 0; // incremented before each release; checked after to prevent stale null-set
+let _unloadGeneration = 0;
 
 export async function unloadModel(): Promise<void> {
   _thermalLevel = 0;
   _thermalConsecutiveHigh = 0;
   _thermalConsecutiveLow  = 0;
+
+  // [FIX] stopCompletion + activeJobs 취소를 cancelCurrentInference() 한 번에 처리
+  // stopCompletion이 내부에서 호출되므로 진행 중인 네이티브 completion도 중단됨
+  cancelCurrentInference();
+
   if (!llamaContext) return;
-  const myGeneration  = ++_unloadGeneration;
-  const ctxToRelease  = llamaContext;
-  llamaContext = null; // null BEFORE release so loadModel() can start a fresh init immediately
-  try {
-    await ctxToRelease.release();
-  } catch (e) {
-    console.warn("[Gemma] release error:", e);
-  }
-  // If a new loadModel() ran during our release, do NOT re-null the new context
-  if (_unloadGeneration !== myGeneration) {
-    console.log('[Gemma] unloadModel: skipping final null-set — new context was loaded during release');
-  }
-  // (llamaContext was already set to null before release — no further assignment needed)
+
+  const myGeneration = ++_unloadGeneration;
+  const ctxToRelease = llamaContext;
+  llamaContext = null; // 새 completion 진입 차단 (enqueueInference에서 null 체크)
+
+  _unloadModelPromise = (async () => {
+    try {
+      // [FIX] active job이 완전히 종료될 때까지 최대 2000ms 대기
+      // stopCompletion() 호출 후 네이티브 레이어가 실제로 완료될 시간 확보
+      // completion() 리턴 후 finally 블록에서 _activeJobs.delete()가 호출되므로
+      // _activeJobs가 비면 모든 job이 정리된 것으로 간주
+      const UNLOAD_WAIT_MS = 2000;
+      const POLL_INTERVAL_MS = 20;
+      const deadline = Date.now() + UNLOAD_WAIT_MS;
+      while (_activeJobs.size > 0 && Date.now() < deadline) {
+        await new Promise<void>(r => setTimeout(r, POLL_INTERVAL_MS));
+      }
+      if (_activeJobs.size > 0 && __DEV__) {
+        console.warn(`[Gemma] unloadModel: ${_activeJobs.size} job(s) still active after ${UNLOAD_WAIT_MS}ms wait, proceeding with release`);
+      }
+      await ctxToRelease.release();
+      console.log('[Gemma] Context released successfully.');
+    } catch (e) {
+      console.warn("[Gemma] release error:", e);
+    } finally {
+      if (_unloadGeneration === myGeneration) {
+        _unloadModelPromise = null;
+      }
+    }
+  })();
+
+  await _unloadModelPromise;
 }
 
 // ── Deduplication ─────────────────────────────────────────────────────────────
@@ -747,7 +723,7 @@ function isFillerText(text: string): boolean {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ── SBD: Sentence Boundary Detection ─────────────────────────────────────────
+// ── SBD ──────────────────────────────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const SBD_SYSTEM_PROMPT = `You are a sentence boundary detector for ASR (speech recognition) subtitles.
@@ -768,7 +744,6 @@ RULES:
   * "I do" / "I don't" / "I did" / "I will" as a SHORT standalone response (2 words or fewer) = always its own sentence
   * New independent clause with subject+verb
 - Short responses (Yes, No, I do, Hmm, Oh wow) are ALWAYS their own sentence
-- "who gets up at X" continues the PREVIOUS clause if the previous fragment ends with "for me" or similar
 - When in doubt, keep fragments together
 
 EXAMPLE:
@@ -780,25 +755,19 @@ Input:
 5. I need to speak
 6. to someone
 
-Output: [1, 4, 5]
-(fragments 1+2+3 form one sentence, 4 is new, 5+6 form one sentence)`;
+Output: [1, 4, 5]`;
 
 function parseSBDResponse(response: string, segCount: number): number[] | null {
   try {
     const jsonMatch = response.match(/\[[\d,\s]+\]/);
     if (!jsonMatch) return null;
-
     const parsed = JSON.parse(jsonMatch[0]);
     if (!Array.isArray(parsed)) return null;
-
     const valid = parsed
       .filter((n) => typeof n === "number" && n >= 1 && n <= segCount)
       .map((n) => Math.floor(n));
-
     const unique = [...new Set(valid)].sort((a, b) => a - b);
-
     if (unique.length === 0 || unique[0] !== 1) unique.unshift(1);
-
     return unique;
   } catch {
     return null;
@@ -811,12 +780,10 @@ function groupSegmentsByBoundaries(
 ): SBDSentence[] {
   const sentences: SBDSentence[] = [];
   const boundarySet = new Set(boundaries);
-
   let currentGroup: number[] = [];
 
   for (let i = 0; i < segments.length; i++) {
     const oneBased = i + 1;
-
     if (boundarySet.has(oneBased) && currentGroup.length > 0) {
       const segs = currentGroup.map((idx) => segments[idx]);
       sentences.push({
@@ -827,7 +794,6 @@ function groupSegmentsByBoundaries(
       });
       currentGroup = [];
     }
-
     currentGroup.push(i);
   }
 
@@ -840,45 +806,63 @@ function groupSegmentsByBoundaries(
       end: segs[segs.length - 1].end,
     });
   }
-
   return sentences;
 }
 
-async function runSBDBatch(segments: TranslationSegment[]): Promise<number[]> {
-  if (!llamaContext) return [1];
+async function runSBDBatch(
+  segments: TranslationSegment[],
+  isCancelled: () => boolean
+): Promise<number[]> {
+  if (!llamaContext || isCancelled()) return [1];
 
   const inputLines = segments
     .map((seg, i) => `${i + 1}. ${seg.text}`)
     .join("\n");
 
   try {
+    // [FIX] completion 직전 이중 체크 — 대기 중 취소된 경우 방지
+    if (!llamaContext || isCancelled()) return [1];
+
+    // [FIX] n_predict를 segments.length * 6 → segments.length * 12로 확대
+    // 근거: 25개 세그먼트 기준 [1,2,3,...,25] 형태 출력 시 최소 ~75토큰 필요
+    //       segments.length * 6 = 150이면 경계 정보가 많을 때 잘림 발생
+    //       segments.length * 12 = 300으로 여유 확보 (최소 64 보장)
+    const sbdNPredict = Math.max(64, segments.length * 12);
+
     const result = await llamaContext.completion({
       messages: [
         { role: "system", content: SBD_SYSTEM_PROMPT },
         { role: "user", content: inputLines },
       ],
-      n_predict: segments.length * 6,
+      n_predict: sbdNPredict,
       temperature: 0.05,
       top_p: 0.9,
       stop: ["</s>", "<end_of_turn>", "<|end|>"],
     });
+
+    if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
 
     const parsed = parseSBDResponse(result.text, segments.length);
     if (!parsed || parsed.length === 0) {
       console.warn("[SBD] parse failed, treating all as one sentence");
       return [1];
     }
-
     console.log(`[SBD] batch(${segments.length}) → boundaries: [${parsed.join(",")}]`);
     return parsed;
-  } catch (e) {
+  } catch (e: any) {
+    if (e?.message === 'INFERENCE_CANCELLED') throw e;
+    if (e?.message?.includes('Context') && e?.message?.includes('not found')) {
+      console.warn('[SBD] Context already released — skipping SBD batch');
+      return [1];
+    }
     console.warn("[SBD] LLM error:", e);
     return [1];
   }
 }
 
 async function detectSentenceBoundaries(
-  segments: TranslationSegment[]
+  segments: TranslationSegment[],
+  isCancelled: () => boolean
 ): Promise<SBDSentence[]> {
   if (segments.length === 0) return [];
   if (segments.length === 1) {
@@ -896,30 +880,28 @@ async function detectSentenceBoundaries(
   let globalOffset = 0;
 
   while (globalOffset < segments.length) {
-    const batchEnd = Math.min(globalOffset + SBD_BATCH_SIZE, segments.length);
-    const batch = segments.slice(globalOffset, batchEnd);
-
-    const localBoundaries = await runSBDBatch(batch);
-
-    // Inter-SBD-batch sleep — prevents completion() burst before translation.
-    // Applied only between batches, not after the last one.
-    if (globalOffset + SBD_BATCH_SIZE < segments.length) {
-      await sleep(_thermalLevel >= 1 ? 300 : 120);
+    if (!llamaContext || isCancelled()) {
+      console.warn('[SBD] Cancelled or context null mid-loop — aborting SBD');
+      return [];
     }
 
-    const globalBoundaries = localBoundaries.map((b) => b);
+    const batchEnd = Math.min(globalOffset + SBD_BATCH_SIZE, segments.length);
+    const batch = segments.slice(globalOffset, batchEnd);
+    const localBoundaries = await runSBDBatch(batch, isCancelled);
 
-    const batchSentences = groupSegmentsByBoundaries(batch, globalBoundaries);
+    if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
 
-    if (
-      allSentences.length > 0 &&
-      batchSentences.length > 0
-    ) {
+    if (globalOffset + SBD_BATCH_SIZE < segments.length) {
+      await sleep(_thermalLevel >= 1 ? 300 : 120);
+      if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
+    }
+
+    const batchSentences = groupSegmentsByBoundaries(batch, localBoundaries);
+
+    if (allSentences.length > 0 && batchSentences.length > 0) {
       const lastSentence = allSentences[allSentences.length - 1];
       const lastText = lastSentence.text;
-
       const isDangling = RE_DANGLING_FRAGMENT.test(lastText);
-
       if (isDangling) {
         const firstOfBatch = batchSentences.shift()!;
         const mergedIndices = [
@@ -927,7 +909,6 @@ async function detectSentenceBoundaries(
           ...firstOfBatch.segmentIndices.map((idx) => idx + globalOffset),
         ];
         const mergedSegs = mergedIndices.map((idx) => segments[idx]);
-
         allSentences[allSentences.length - 1] = {
           segmentIndices: mergedIndices,
           text: [lastText, firstOfBatch.text].join(" ").trim(),
@@ -943,7 +924,6 @@ async function detectSentenceBoundaries(
         segmentIndices: sent.segmentIndices.map((idx) => idx + globalOffset),
       });
     }
-
     globalOffset = batchEnd;
   }
 
@@ -966,47 +946,22 @@ function sbdSentencesToMergedGroups(sentences: SBDSentence[]): MergedGroup[] {
   }));
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// ── [LEGACY] Fragment merging (SBD fallback) ──────────────────────────────────
-// ═══════════════════════════════════════════════════════════════════════════════
+// ── [LEGACY] Fragment merging ─────────────────────────────────────────────────
 
-// ── [수정] isShortIndependent: "I do / I don't / I did / I will" 등 단답 응답 보호 강화
-// 기존 함수에서 누락됐던 케이스들을 명확히 포함
 function isShortIndependent(t: string): boolean {
   const trimmed = t.trim();
   const words = trimmed.split(/\s+/).filter(Boolean);
   const wc = words.length;
-
   if (wc === 0 || wc > 3) return false;
-
   const word = words[0];
-
-  // 물음표로 끝나는 단일 단어
   if (wc === 1 && word.endsWith("?")) return true;
-
-  // 전형적인 단답 응답
   if (/^(no|yes|yeah|nope|yep|nah|not\s+really|okay\s+yes|alright|sure|right)$/i.test(trimmed)) return true;
-
-  // 감탄사/추임새
   if (wc === 1 && /^(hmm|hm|uh|um|oh|wow|okay|ok|hey|right|sure|fine|well|whoa|ow|ugh|yikes|oops)$/i.test(word)) return true;
-
-  // ── [수정 핵심] "I do / I don't / I did / I will / I won't / I am / I was / I can / I can't"
-  // 2단어 이하의 1인칭 단답 응답은 항상 독립 세그먼트
-  // "I do i" (다음 세그먼트에서 소문자 i가 붙어있는 경우도 포함하기 위해 wc <= 3까지 허용)
   if (/^i\s+(do|did|don'?t|will|won'?t|am|was|can|can'?t)(\s+\w+)?$/i.test(trimmed) && wc <= 3) return true;
-
-  // 단일 고유명사 (대문자 시작 3~12자)
   if (wc === 1 && /^[A-Z][a-zA-Z]{1,11}$/.test(word)) return true;
-
-  // 2~3단어 1인칭/2인칭 단답
   if (wc <= 3 && /^(i|you|we|they)\s+(do|did|will|won't|can|can't|get|got|know|see|am|was)(\s+\w+)?$/i.test(trimmed)) return true;
-
-  // 문장 종결부호로 끝나는 2~3단어
   if (wc >= 2 && wc <= 3 && /[.!]$/.test(trimmed)) return true;
-
-  // "that's X" 형태
   if (wc === 2 && /^that's\s+\w+$/i.test(trimmed)) return true;
-
   return false;
 }
 
@@ -1021,63 +976,41 @@ function mergeFragments(segments: TranslationSegment[]): MergedGroup[] {
 
   while (i < segments.length) {
     const seg = segments[i];
-
     if (isFiller(seg.text)) {
       groups.push({ start: seg.start, end: seg.end, text: seg.text, originalIndices: [i] });
-      i++;
-      continue;
+      i++; continue;
     }
-
-    // ── [수정] isShortIndependent 체크를 루프 진입 시 먼저 수행
-    // 기존: while 루프 내부에서 next 세그먼트를 isShortIndependent로만 체크
-    // 수정: 현재 세그먼트(seg) 자체가 isShortIndependent이면 즉시 독립 그룹으로 출력
-    // → "I do i" 처럼 앞 문장의 "who gets up at 8:00" 뒤에 흡수되는 문제 방지
     if (isShortIndependent(seg.text)) {
       groups.push({ start: seg.start, end: seg.end, text: seg.text, originalIndices: [i] });
-      i++;
-      continue;
+      i++; continue;
     }
-
-    let group: MergedGroup = {
-      start: seg.start,
-      end: seg.end,
-      text: seg.text.trim(),
-      originalIndices: [i],
-    };
+    let group: MergedGroup = { start: seg.start, end: seg.end, text: seg.text.trim(), originalIndices: [i] };
     let j = i + 1;
-
     while (j < segments.length) {
       const next = segments[j];
       if (isFiller(next.text)) break;
       if (isShortIndependent(next.text)) break;
-
       const gap = next.start - group.end;
       const wc = group.text.split(/\s+/).length;
-
       const speakerChange = likelySpeakerChange(group.text, next.text, gap);
       const effectiveLimit = speakerChange ? MERGE_GAP_SPEAKER_CHANGE_S : MERGE_GAP_HARD_LIMIT_S;
-
       if (gap >= effectiveLimit) break;
       if (wc >= MAX_MERGE_WORDS) break;
-
       if (!isSentenceEnd(group.text)) {
         group.text += " " + next.text.trim();
         group.end = next.end;
         group.originalIndices.push(j);
-        j++;
-        continue;
+        j++; continue;
       }
       if (wc < 6 && gap < 0.4 && !speakerChange) {
         group.text += " " + next.text.trim();
         group.end = next.end;
         group.originalIndices.push(j);
-        j++;
-        continue;
+        j++; continue;
       }
       if (isBackchannel(group.text) && wc <= 3) break;
       break;
     }
-
     groups.push(group);
     i = j;
   }
@@ -1087,32 +1020,22 @@ function mergeFragments(segments: TranslationSegment[]): MergedGroup[] {
 function enforceSentence(groups: MergedGroup[]): MergedGroup[] {
   const result: MergedGroup[] = [];
   let buffer: MergedGroup | null = null;
-
   for (const g of groups) {
     if (!buffer) { buffer = { ...g }; continue; }
-
     if (isShortIndependent(buffer.text) || isShortIndependent(g.text)) {
-      result.push(buffer);
-      buffer = { ...g };
-      continue;
+      result.push(buffer); buffer = { ...g }; continue;
     }
-
     const gap = g.start - buffer.end;
-
     const speakerChange = likelySpeakerChange(buffer.text, g.text, gap);
     if (speakerChange || gap >= MERGE_GAP_HARD_LIMIT_S) {
-      result.push(buffer);
-      buffer = { ...g };
-      continue;
+      result.push(buffer); buffer = { ...g }; continue;
     }
-
     if (buffer.text.split(/\s+/).length < 2) {
       buffer.text += " " + g.text;
       buffer.end = g.end;
       buffer.originalIndices = [...buffer.originalIndices, ...g.originalIndices];
     } else {
-      result.push(buffer);
-      buffer = { ...g };
+      result.push(buffer); buffer = { ...g };
     }
   }
   if (buffer) result.push(buffer);
@@ -1135,19 +1058,16 @@ export function formatNetflixSubtitle(text: string): string {
   if (t.length <= NETFLIX_MAX_CHARS_PER_LINE) return t;
 
   const midPoint = Math.floor(t.length / 2);
-
   const sentenceMatch = t.match(/^(.+?[.!?])\s+(.+)$/);
   if (sentenceMatch) {
     const l1 = sentenceMatch[1].trim(), l2 = sentenceMatch[2].trim();
     if (isBalancedSplit(l1, l2)) return `${l1}\n${l2}`;
   }
-
   const commaMatch = t.match(/^(.+?,)\s+(.+)$/);
   if (commaMatch) {
     const l1 = commaMatch[1].trim(), l2 = commaMatch[2].trim();
     if (isBalancedSplit(l1, l2)) return `${l1}\n${l2}`;
   }
-
   const koPattern = /(은|는|이|가|을|를|에서|에게|으로|로|하고|이고|지만|는데|인데|그리고|그래서|하지만|그런데)\s/g;
   let bestPos = -1, bestDist = Infinity;
   let m: RegExpExecArray | null;
@@ -1163,7 +1083,6 @@ export function formatNetflixSubtitle(text: string): string {
     const l1 = t.slice(0, bestPos).trim(), l2 = t.slice(bestPos).trim();
     if (isBalancedSplit(l1, l2)) return `${l1}\n${l2}`;
   }
-
   const spaces: number[] = [];
   for (let i = 0; i < t.length; i++) { if (t[i] === " ") spaces.push(i); }
   if (spaces.length > 0) {
@@ -1173,7 +1092,6 @@ export function formatNetflixSubtitle(text: string): string {
       if (isBalancedSplit(l1, l2)) return `${l1}\n${l2}`;
     }
   }
-
   return t;
 }
 
@@ -1181,25 +1099,18 @@ export function formatNetflixSubtitle(text: string): string {
 function splitIntoMeaningChunks(text: string): string[] {
   const t = text.trim();
   if (!t) return [t];
-
   const sentParts = t.split(/(?<=[.!?])\s+/).map(s => s.trim()).filter(Boolean);
   if (sentParts.length > 1) return healDanglingParticles(sentParts);
-
   const commaParts = t.split(/,\s+/).map(s => s.trim()).filter(Boolean);
   if (commaParts.length > 1) return healDanglingParticles(commaParts);
-
   const koSplit = t
     .split(/(?<=은|는|이|가|을|를|에서|에게|으로|로|하고|이고|지만|는데|인데|그리고|그래서|하지만|그런데)\s+/)
-    .map(s => s.trim())
-    .filter(Boolean);
+    .map(s => s.trim()).filter(Boolean);
   if (koSplit.length > 1) return healDanglingParticles(koSplit);
-
   const enPhraseSplit = t
     .split(/(?<=\b(?:and|but|so|because|that|when|if|although|while|after|before|since|until|though|or)\b)\s+/i)
-    .map(s => s.trim())
-    .filter(Boolean);
+    .map(s => s.trim()).filter(Boolean);
   if (enPhraseSplit.length > 1) return enPhraseSplit;
-
   const wordParts = t.split(/\s+/).filter(Boolean);
   return wordParts.length > 0 ? wordParts : [t];
 }
@@ -1211,12 +1122,8 @@ function healDanglingParticles(chunks: string[]): string[] {
   while (i < chunks.length) {
     const curr = chunks[i];
     if (RE_DANGLING.test(curr) && i + 1 < chunks.length) {
-      result.push(curr + " " + chunks[i + 1]);
-      i += 2;
-    } else {
-      result.push(curr);
-      i++;
-    }
+      result.push(curr + " " + chunks[i + 1]); i += 2;
+    } else { result.push(curr); i++; }
   }
   return result.filter(Boolean);
 }
@@ -1225,7 +1132,6 @@ function distributeChunksToSlots(chunks: string[], slotCount: number): string[] 
   if (slotCount <= 0) return [];
   if (chunks.length === 0) return new Array(slotCount).fill("");
   if (slotCount === 1) return [chunks.join(" ")];
-
   if (chunks.length < slotCount) {
     const words = chunks.join(" ").split(/\s+/).filter(Boolean);
     if (words.length >= slotCount) {
@@ -1243,7 +1149,6 @@ function distributeChunksToSlots(chunks: string[], slotCount: number): string[] 
     for (let i = 0; i < words.length; i++) result[i] = words[i];
     return result;
   }
-
   const result: string[] = [];
   let offset = 0;
   for (let s = 0; s < slotCount; s++) {
@@ -1262,17 +1167,14 @@ function expandGroupTranslations(
   originalSegments: TranslationSegment[]
 ): string[] {
   const result: string[] = new Array(originalSegments.length).fill("");
-
   for (let gi = 0; gi < groups.length; gi++) {
     const group = groups[gi];
     const { originalIndices } = group;
     let translation = (groupTranslations[gi] ?? "").trim();
-
     if (!translation) {
       for (const idx of originalIndices) result[idx] = originalSegments[idx].text;
       continue;
     }
-
     const groupSrc = originalIndices.map(idx => originalSegments[idx].text).join(" ");
     if (!RE_HALLUCINATION_GUARD.test(groupSrc)) {
       translation = translation.replace(RE_HALLUCINATED_TERMS_KO, "").trim();
@@ -1281,25 +1183,12 @@ function expandGroupTranslations(
       for (const idx of originalIndices) result[idx] = originalSegments[idx].text;
       continue;
     }
-
-    if (originalIndices.length === 1) {
-      result[originalIndices[0]] = translation;
-      continue;
-    }
-
+    if (originalIndices.length === 1) { result[originalIndices[0]] = translation; continue; }
     if (originalIndices.length === 2) {
-      const [p1, p2] = splitTranslationInTwo(
-        translation,
-        originalSegments[originalIndices[0]],
-        originalSegments[originalIndices[1]]
-      );
-      result[originalIndices[0]] = p1;
-      result[originalIndices[1]] = p2;
-      continue;
+      const [p1, p2] = splitTranslationInTwo(translation, originalSegments[originalIndices[0]], originalSegments[originalIndices[1]]);
+      result[originalIndices[0]] = p1; result[originalIndices[1]] = p2; continue;
     }
-
     const breakPoints = findNaturalBreakPoints(originalIndices, originalSegments);
-
     if (breakPoints.length === 0) {
       const distributed = distributeByTimingRatio(translation, originalIndices, originalSegments);
       for (let k = 0; k < originalIndices.length; k++) result[originalIndices[k]] = distributed[k] ?? "";
@@ -1307,79 +1196,52 @@ function expandGroupTranslations(
       distributeByBreakPoints(translation, originalIndices, breakPoints, originalSegments, result);
     }
   }
-
   return result;
 }
 
-function distributeByTimingRatio(
-  translation: string,
-  originalIndices: number[],
-  originalSegments: TranslationSegment[]
-): string[] {
+function distributeByTimingRatio(translation: string, originalIndices: number[], originalSegments: TranslationSegment[]): string[] {
   const segs = originalIndices.map(idx => originalSegments[idx]);
   const durations = segs.map(s => Math.max(s.end - s.start, 0.1));
   const totalDuration = durations.reduce((a, b) => a + b, 0);
-
   const chars = translation.replace(/\s/g, "");
   const totalChars = chars.length;
   const words = translation.trim().split(/\s+/).filter(Boolean);
-
   if (words.length === 0) return new Array(originalIndices.length).fill("");
   if (words.length <= originalIndices.length) {
     const result = new Array(originalIndices.length).fill("");
     words.forEach((w, i) => { result[i] = w; });
     return result;
   }
-
   const result: string[] = [];
   let wordOffset = 0;
   let charOffset = 0;
-
   for (let i = 0; i < originalIndices.length; i++) {
-    if (i === originalIndices.length - 1) {
-      result.push(words.slice(wordOffset).join(" "));
-      break;
-    }
-
+    if (i === originalIndices.length - 1) { result.push(words.slice(wordOffset).join(" ")); break; }
     const targetCharCount = (durations[i] / totalDuration) * totalChars;
     let accumulated = 0;
     let bestWord = wordOffset + 1;
-
     for (let w = wordOffset; w < words.length - (originalIndices.length - 1 - i); w++) {
       accumulated += words[w].length;
-      if (accumulated >= targetCharCount) {
-        bestWord = w + 1;
-        break;
-      }
+      if (accumulated >= targetCharCount) { bestWord = w + 1; break; }
       bestWord = w + 1;
     }
-
     result.push(words.slice(wordOffset, bestWord).join(" "));
     charOffset += words.slice(wordOffset, bestWord).join("").length;
     wordOffset = bestWord;
   }
-
   return result;
 }
 
-function splitTranslationInTwo(
-  translation: string,
-  seg1: TranslationSegment,
-  seg2: TranslationSegment
-): [string, string] {
+function splitTranslationInTwo(translation: string, seg1: TranslationSegment, seg2: TranslationSegment): [string, string] {
   const t = translation.trim();
-
   const sentenceBreak = t.match(/^(.+?[.!?])\s+(.+)$/);
   if (sentenceBreak) return [sentenceBreak[1].trim(), sentenceBreak[2].trim()];
-
   const commaBreak = t.match(/^(.+?,)\s+(.+)$/);
   if (commaBreak) return [commaBreak[1].trim(), commaBreak[2].trim()];
-
   const dur1 = Math.max(seg1.end - seg1.start, 0.1);
   const dur2 = Math.max(seg2.end - seg2.start, 0.1);
   const targetRatio = dur1 / (dur1 + dur2);
   const targetPos = Math.floor(t.length * targetRatio);
-
   const koPattern = /(은|는|이|가|을|를|에서|에게|으로|로|하고|이고|지만|는데|인데|그리고|그래서|하지만|그런데)\s/g;
   let bestPos = -1, bestDist = Infinity;
   let m: RegExpExecArray | null;
@@ -1389,26 +1251,16 @@ function splitTranslationInTwo(
     const dist = Math.abs(pos - targetPos);
     if (dist < bestDist) { bestDist = dist; bestPos = pos; }
   }
-  if (bestPos > 0 && bestPos < t.length - 2) {
-    return [t.slice(0, bestPos).trim(), t.slice(bestPos).trim()];
-  }
-
+  if (bestPos > 0 && bestPos < t.length - 2) return [t.slice(0, bestPos).trim(), t.slice(bestPos).trim()];
   const chunks = splitIntoMeaningChunks(t);
   if (chunks.length >= 2) {
     const splitIdx = Math.max(1, Math.round(chunks.length * targetRatio));
-    return [
-      chunks.slice(0, splitIdx).join(" "),
-      chunks.slice(splitIdx).join(" "),
-    ];
+    return [chunks.slice(0, splitIdx).join(" "), chunks.slice(splitIdx).join(" ")];
   }
-
   return [t, ""];
 }
 
-function findNaturalBreakPoints(
-  originalIndices: number[],
-  originalSegments: TranslationSegment[]
-): number[] {
+function findNaturalBreakPoints(originalIndices: number[], originalSegments: TranslationSegment[]): number[] {
   const breaks: number[] = [];
   for (let k = 0; k < originalIndices.length - 1; k++) {
     const curr = originalSegments[originalIndices[k]];
@@ -1419,53 +1271,34 @@ function findNaturalBreakPoints(
 }
 
 function distributeByBreakPoints(
-  translation: string,
-  originalIndices: number[],
-  breakPoints: number[],
-  originalSegments: TranslationSegment[],
-  result: string[]
+  translation: string, originalIndices: number[], breakPoints: number[],
+  originalSegments: TranslationSegment[], result: string[]
 ): void {
   const slotGroups: number[][] = [];
   let start = 0;
-  for (const bp of breakPoints) {
-    slotGroups.push(originalIndices.slice(start, bp + 1));
-    start = bp + 1;
-  }
+  for (const bp of breakPoints) { slotGroups.push(originalIndices.slice(start, bp + 1)); start = bp + 1; }
   slotGroups.push(originalIndices.slice(start));
-
   const durations = slotGroups.map(grp =>
-    grp.reduce((sum, idx) =>
-      sum + Math.max(originalSegments[idx].end - originalSegments[idx].start, 0.1), 0)
+    grp.reduce((sum, idx) => sum + Math.max(originalSegments[idx].end - originalSegments[idx].start, 0.1), 0)
   );
   const totalDuration = durations.reduce((a, b) => a + b, 0);
-
   const chunks = splitIntoMeaningChunks(translation);
   const totalChunks = chunks.length;
   let chunkOffset = 0;
-
   for (let si = 0; si < slotGroups.length; si++) {
     const grp = slotGroups[si];
     let assignedText: string;
-
     if (si === slotGroups.length - 1) {
       assignedText = chunks.slice(chunkOffset).join(" ");
     } else {
-      const chunkCount = Math.max(
-        1,
-        Math.round((durations[si] / totalDuration) * totalChunks)
-      );
+      const chunkCount = Math.max(1, Math.round((durations[si] / totalDuration) * totalChunks));
       assignedText = chunks.slice(chunkOffset, chunkOffset + chunkCount).join(" ");
       chunkOffset += chunkCount;
     }
-
     if (grp.length === 1) {
       result[grp[0]] = assignedText.trim();
     } else {
-      const distributed = distributeByTimingRatio(
-        assignedText.trim(),
-        grp,
-        originalSegments
-      );
+      const distributed = distributeByTimingRatio(assignedText.trim(), grp, originalSegments);
       for (let k = 0; k < grp.length; k++) result[grp[k]] = distributed[k] ?? "";
     }
   }
@@ -1486,7 +1319,7 @@ export function adjustTimingsForReadability(segments: TranslationSegment[]): Tra
   return result;
 }
 
-// ── 고유명사 추출 / 음역 ──────────────────────────────────────────────────────
+// ── 고유명사 ─────────────────────────────────────────────────────────────────
 function extractProperNounCandidates(segments: TranslationSegment[]): string[] {
   const stats = new Map<string, { mid: number; first: number }>();
   const spPat = /(?:^|[.!?]\s+)([A-Z][a-zA-Z]{2,})/g;
@@ -1499,9 +1332,7 @@ function extractProperNounCandidates(segments: TranslationSegment[]): string[] {
     allPat.lastIndex = 0;
     while ((m = allPat.exec(seg.text)) !== null) {
       const w = m[1];
-      if (COMMON_WORDS.has(w)) continue;
-      if (PROTECTED_PROPER_NOUNS.has(w)) continue;
-      if (PROTECTED_ACRONYMS.has(w)) continue;
+      if (COMMON_WORDS.has(w) || PROTECTED_PROPER_NOUNS.has(w) || PROTECTED_ACRONYMS.has(w)) continue;
       const e = stats.get(w) ?? { mid: 0, first: 0 };
       if (firstWords.has(w)) e.first++; else e.mid++;
       stats.set(w, e);
@@ -1513,14 +1344,17 @@ function extractProperNounCandidates(segments: TranslationSegment[]): string[] {
   return result;
 }
 
-async function transliterateProperNouns(nouns: string[], targetLanguage: string): Promise<Record<string, string>> {
-  if (!llamaContext || nouns.length === 0) return {};
+async function transliterateProperNouns(
+  nouns: string[],
+  targetLanguage: string,
+  isCancelled: () => boolean
+): Promise<Record<string, string>> {
+  if (!llamaContext || nouns.length === 0 || isCancelled()) return {};
+  // [FIX] completion 직전 이중 체크
+  if (!llamaContext || isCancelled()) return {};
   const r = await llamaContext.completion({
     messages: [
-      {
-        role: "system",
-        content: `Transliterate each proper noun into ${targetLanguage} phonetically.\nOutput ONLY 'English=Transliteration' lines.`,
-      },
+      { role: "system", content: `Transliterate each proper noun into ${targetLanguage} phonetically.\nOutput ONLY 'English=Transliteration' lines.` },
       { role: "user", content: nouns.join("\n") },
     ],
     n_predict: nouns.length * 20,
@@ -1528,6 +1362,7 @@ async function transliterateProperNouns(nouns: string[], targetLanguage: string)
     top_p: 0.9,
     stop: ["</s>", "<end_of_turn>", "<|end|>"],
   });
+  if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
   const dict: Record<string, string> = {};
   for (const line of r.text.split("\n")) {
     const eq = line.indexOf("=");
@@ -1541,7 +1376,8 @@ async function transliterateProperNouns(nouns: string[], targetLanguage: string)
 async function buildProperNounDict(
   segments: TranslationSegment[],
   videoHash: string,
-  targetLanguage: string
+  targetLanguage: string,
+  isCancelled: () => boolean
 ): Promise<Record<string, string>> {
   const stored = await AsyncStorage.getItem(properNounKey(videoHash));
   const existing: Record<string, string> = stored ? JSON.parse(stored) : {};
@@ -1550,7 +1386,7 @@ async function buildProperNounDict(
   for (const n of candidates) if (!(n in merged)) merged[n] = "";
   const unmapped = Object.entries(merged).filter(([, v]) => !v).map(([k]) => k);
   if (unmapped.length > 0) {
-    const fresh = await transliterateProperNouns(unmapped, targetLanguage);
+    const fresh = await transliterateProperNouns(unmapped, targetLanguage, isCancelled);
     for (const [s, t] of Object.entries(fresh)) merged[s] = t;
   }
   await AsyncStorage.setItem(properNounKey(videoHash), JSON.stringify(merged));
@@ -1596,55 +1432,37 @@ function cleanWhisperText(text: string): string {
     .trim();
 }
 
-// ── buildBatchMessage ─────────────────────────────────────────────────────────
-function buildBatchMessage(batch: MergedGroup[]): {
-  message: string;
-  tokenMaps: MaskedToken[][];
-} {
+function buildBatchMessage(batch: MergedGroup[]): { message: string; tokenMaps: MaskedToken[][]; } {
   const tokenMaps: MaskedToken[][] = [];
   const lines: string[] = [];
-
   for (let i = 0; i < batch.length; i++) {
     const c = normalizeSocialMediaNames(cleanWhisperText(batch[i].text));
     const { masked, tokens } = maskNumericTokens(c);
     tokenMaps.push(tokens);
     lines.push(`${i + 1}. ${masked}`);
   }
-
   return { message: lines.join("\n"), tokenMaps };
 }
 
-// ── postProcessTranslation ────────────────────────────────────────────────────
 function postProcessTranslation(translated: string, sourceText: string, targetLanguage: string): string {
   let out = translated;
-
   if (RE_PLACEHOLDER_LEAK.test(out)) {
     console.warn(`[POST] Placeholder leak detected: "${out}" (src: "${sourceText}")`);
     out = stripLeakedPlaceholders(out);
   }
-
   if (targetLanguage === "Korean" || targetLanguage === "ko") {
     out = convertTimeExpressionKo(out);
     out = deduplicateTimeUnits(out);
     out = applyDawnTimeCorrection(out, sourceText);
     out = applyThatKindOfFix(out, sourceText);
-
     const srcHasSurprise = /surprised|amazing|incredible|unbelievable|wow|astonish/i.test(sourceText);
-    if (!srcHasSurprise) {
-      out = out.replace(RE_HALLUCINATED_ADDITION_KO, "").trim();
-    }
-
+    if (!srcHasSurprise) { out = out.replace(RE_HALLUCINATED_ADDITION_KO, "").trim(); }
     if (/\bHR\b/i.test(sourceText) && /감독/.test(out)) {
       out = out.replace(/인사\s*감독/g, "인사 담당자").replace(/감독님/g, "인사 책임자").trim();
     }
-
     if (/no\s+(guidance|validation|encouragement|supervision)/i.test(sourceText)) {
-      out = out
-        .replace(/감독\s*없이\s*격려/g, "격려도, 감독도 없이")
-        .replace(/감독합니다/g, "감독도 없어요")
-        .trim();
+      out = out.replace(/감독\s*없이\s*격려/g, "격려도, 감독도 없이").replace(/감독합니다/g, "감독도 없어요").trim();
     }
-
     if (/you\s+don'?t\s+work\s+here/i.test(sourceText)) {
       out = out
         .replace(/여기는\s+당신이\s+일하지\s+않아요/, "당신은 여기서 일하지 않아요")
@@ -1652,11 +1470,9 @@ function postProcessTranslation(translated: string, sourceText: string, targetLa
         .replace(/여기는\s+([^\s]+이|[^\s]+가)\s+일\s+안\s+해/, "너 여기서 일 안 해");
     }
   }
-
   return out.replace(/\s{2,}/g, " ").trim();
 }
 
-// ── Sanitize ──────────────────────────────────────────────────────────────────
 export function sanitizeTranslationOutput(text: string, sourceText: string): string {
   let out = text
     .replace(RE_OUTPUT_CORRUPTION, "")
@@ -1665,20 +1481,15 @@ export function sanitizeTranslationOutput(text: string, sourceText: string): str
     .replace(RE_NUMBERED_PREFIX, "")
     .replace(RE_AWKWARD_DEMONSTRATIVE, "그건 ")
     .replace(RE_AWKWARD_DEMONSTRATIVE_I, "그게 ");
-
   if (!RE_HALLUCINATION_GUARD.test(sourceText)) out = out.replace(RE_HALLUCINATED_TERMS_KO, "");
   if (!sourceText.includes("(") && !sourceText.includes(")")) out = out.replace(RE_PARENS_ANY, "");
-
   out = stripLeakedPlaceholders(out);
-
   return out.replace(/\s{2,}/g, " ").trim();
 }
 
 export function hasLeftoverEnglish(
-  translated: string,
-  sourceText: string,
-  patterns: CompiledNounPattern[],
-  targetLanguage: string
+  translated: string, sourceText: string,
+  patterns: CompiledNounPattern[], targetLanguage: string
 ): boolean {
   const profile = getLanguageProfile(targetLanguage);
   if (profile.isLatinScript) return false;
@@ -1692,12 +1503,7 @@ export function hasLeftoverEnglish(
   let m: RegExpExecArray | null;
   while ((m = RE_ENGLISH_WORD.exec(translated)) !== null) {
     const w = m[1];
-    if (
-      RE_NUMERIC_TOKEN.test(w) ||
-      knownEn.has(w.toLowerCase()) ||
-      knownTr.has(w.toLowerCase()) ||
-      knownProtected.has(w.toLowerCase())
-    ) continue;
+    if (RE_NUMERIC_TOKEN.test(w) || knownEn.has(w.toLowerCase()) || knownTr.has(w.toLowerCase()) || knownProtected.has(w.toLowerCase())) continue;
     return true;
   }
   return false;
@@ -1705,12 +1511,8 @@ export function hasLeftoverEnglish(
 
 function isCorruptedOutput(text: string): boolean {
   return (
-    /^##/.test(text) ||
-    /^Translation:/i.test(text) ||
-    /^\[미번역\]/.test(text) ||
-    /^---/.test(text) ||
-    text.includes("\n\n") ||
-    RE_PLACEHOLDER_LEAK.test(text)
+    /^##/.test(text) || /^Translation:/i.test(text) || /^\[미번역\]/.test(text) ||
+    /^---/.test(text) || text.includes("\n\n") || RE_PLACEHOLDER_LEAK.test(text)
   );
 }
 
@@ -1724,23 +1526,15 @@ function isOvergenerated(input: string, output: string, targetLanguage = "Korean
 
 function detectFragment(src: string): boolean {
   const wordCount = src.split(/\s+/).filter(Boolean).length;
-  return (
-    wordCount <= 4 &&
-    !/[.!?]$/.test(src.trim()) &&
-    RE_DANGLING_FRAGMENT.test(src)
-  );
+  return wordCount <= 4 && !/[.!?]$/.test(src.trim()) && RE_DANGLING_FRAGMENT.test(src);
 }
 
-// ── 배치 응답 파싱 ────────────────────────────────────────────────────────────
 function parseBatchResponse(
-  response: string,
-  batch: MergedGroup[],
-  patterns: CompiledNounPattern[],
-  tokenMaps: MaskedToken[][]
+  response: string, batch: MergedGroup[],
+  patterns: CompiledNounPattern[], tokenMaps: MaskedToken[][]
 ): string[] {
   const tmap = new Map<number, string>();
   const lines = response.split("\n").map(l => l.trim()).filter(Boolean);
-
   for (const line of lines) {
     const m = line.match(/^(\d+)[.)]\s*(.+)$/);
     if (m) {
@@ -1757,7 +1551,6 @@ function parseBatchResponse(
       }
     }
   }
-
   const restoreAndClean = (raw: string, batchIdx: number, srcText: string): string => {
     if (!raw) return srcText;
     const tokens = tokenMaps[batchIdx] ?? [];
@@ -1766,30 +1559,21 @@ function parseBatchResponse(
     const sanitized = sanitizeTranslationOutput(applyProperNounFixes(deLeaked, patterns), srcText);
     return sanitized;
   };
-
   if (tmap.size === batch.length) {
     return batch.map((seg, i) => restoreAndClean(tmap.get(i + 1) ?? "", i, seg.text));
   }
-
-  const contentLines = lines
-    .map(l => l.replace(/^[\d]+[.):\-\s]+/, "").trim())
-    .filter(Boolean);
+  const contentLines = lines.map(l => l.replace(/^[\d]+[.):\-\s]+/, "").trim()).filter(Boolean);
   if (contentLines.length === batch.length) {
     console.warn(`[TRANSLATE] positional fallback: parsed=${tmap.size} expected=${batch.length}`);
     return batch.map((seg, i) => restoreAndClean(contentLines[i], i, seg.text));
   }
-
   return batch.map((seg, i) => {
     const raw = tmap.get(i + 1);
-    if (!raw) {
-      console.warn(`[TRANSLATE] missing #${i + 1}, keeping source`);
-      return seg.text;
-    }
+    if (!raw) { console.warn(`[TRANSLATE] missing #${i + 1}, keeping source`); return seg.text; }
     return restoreAndClean(raw, i, seg.text);
   });
 }
 
-// ── 유효성 검사 + 재시도 ──────────────────────────────────────────────────────
 function isLikelyUntranslated(translated: string, targetLanguage: string): boolean {
   const profile = getLanguageProfile(targetLanguage);
   const t = translated.trim();
@@ -1805,13 +1589,11 @@ async function validateTranslations(
   systemPrompt: string,
   targetLanguage: string,
   patterns: CompiledNounPattern[],
-  isCancelled: () => boolean = () => false
+  isCancelled: () => boolean
 ): Promise<string[]> {
+  if (!llamaContext || isCancelled()) return translatedTexts;
 
-  if (!llamaContext) return translatedTexts;
   const result = [...translatedTexts];
-
-  // ── Step 0: Local helpers ────────────────────────────────────────────────
 
   type AttemptState = { batchedTried: boolean; individualTried: boolean };
   const attemptMap = new Map<number, AttemptState>();
@@ -1843,8 +1625,7 @@ async function validateTranslations(
     return result;
   }
 
-  // ── Step 1: Initial sanitize pass and failure collection ─────────────────
-
+  // Step 1: Initial sanitize pass
   for (let i = 0; i < segments.length; i++) {
     const src = segments[i].text.trim();
     if (isFillerText(src)) continue;
@@ -1858,54 +1639,33 @@ async function validateTranslations(
     if (isFillerText(src)) continue;
     if (!passedSet.has(i)) failedIndices.push(i);
   }
-
   if (failedIndices.length === 0) return result;
 
-  // ── Step 2: Stage 1 — Batched retry ──────────────────────────────────────
-
+  // Step 2: Stage 1 — Batched retry
   const fragmentIndices = failedIndices.filter(i => detectFragment(segments[i].text));
   const normalIndices   = failedIndices.filter(i => !detectFragment(segments[i].text));
-
-  const allBatches: number[][] = [
-    ...chunk(fragmentIndices, BATCH_SIZE),
-    ...chunk(normalIndices, BATCH_SIZE),
-  ];
-
+  const allBatches: number[][] = [...chunk(fragmentIndices, BATCH_SIZE), ...chunk(normalIndices, BATCH_SIZE)];
   for (const i of failedIndices) getState(i).batchedTried = true;
 
   for (const batch of allBatches) {
     if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
+    if (!llamaContext) {
+      console.warn('[VALIDATE] llamaContext became null during Stage 1 — aborting validation');
+      break;
+    }
 
     const isFragmentBatch = batch.every(i => detectFragment(segments[i].text));
-
-    const isolationBlock =
-      'CRITICAL ISOLATION RULE:\n' +
-      'Each numbered line is a completely separate input from a different speaker\n' +
-      'and a different context. Do NOT reference, infer from, or use information\n' +
-      'from any other numbered line. Treat each line as if it were the only input.\n\n';
-
+    const isolationBlock = 'CRITICAL ISOLATION RULE:\nEach numbered line is a completely separate input from a different speaker\nand a different context. Do NOT reference, infer from, or use information\nfrom any other numbered line. Treat each line as if it were the only input.\n\n';
     const fragmentNote = isFragmentBatch
-      ? 'NOTE: All inputs in this batch are incomplete ASR fragments cut mid-sentence.\n' +
-        'For each one, translate ONLY what is literally present.\n' +
-        'Do NOT reconstruct or complete the surrounding sentence.\n' +
-        'Keep output SHORT (typically 2-5 words), but allow slightly longer output\n' +
-        'if required for natural Korean grammar. Do NOT expand into a full sentence.\n'
-      : 'These are retry translations. Be concise and accurate.\n' +
-        'Do NOT add explanations or content not present in the source.\n';
-
+      ? 'NOTE: All inputs in this batch are incomplete ASR fragments cut mid-sentence.\nFor each one, translate ONLY what is literally present.\nDo NOT reconstruct or complete the surrounding sentence.\nKeep output SHORT (typically 2-5 words).\n'
+      : 'These are retry translations. Be concise and accurate.\nDo NOT add explanations or content not present in the source.\n';
     const stage1SystemPrompt = isolationBlock + systemPrompt + '\n\n' + fragmentNote;
-
-    const batchGroups: MergedGroup[] = batch.map(i => ({
-      start: segments[i].start,
-      end: segments[i].end,
-      text: segments[i].text,
-      originalIndices: [i],
-    }));
-
+    const batchGroups: MergedGroup[] = batch.map(i => ({ start: segments[i].start, end: segments[i].end, text: segments[i].text, originalIndices: [i] }));
     const { message: batchMsg, tokenMaps } = buildBatchMessage(batchGroups);
-
     let parsed: string[] = [];
     try {
+      // [FIX] completion 직전 이중 체크
+      if (!llamaContext || isCancelled()) break;
       const r = await llamaContext.completion({
         messages: [
           { role: 'system', content: stage1SystemPrompt },
@@ -1916,134 +1676,91 @@ async function validateTranslations(
         top_p: 0.9,
         stop: ['</s>', '<end_of_turn>', '<|end|>'],
       });
+      if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
       parsed = parseBatchResponse(r.text, batchGroups, patterns, tokenMaps);
     } catch (e: any) {
       if (e?.message === 'INFERENCE_CANCELLED') throw e;
+      if (e?.message?.includes('Context') && e?.message?.includes('not found')) {
+        console.warn('[VALIDATE] Stage 1: Context released — stopping validation');
+        break;
+      }
       console.warn('[VALIDATE] Stage 1 batch error:', e);
       continue;
     }
 
     const validCount = parsed.filter(p => p && p.trim().length > 0).length;
     const threshold = Math.ceil(batch.length * 0.5);
-
-    if (validCount < threshold) {
-      console.warn(`[VALIDATE] Stage 1 batch discarded: validCount=${validCount} < threshold=${threshold}`);
-      continue;
-    }
+    if (validCount < threshold) { console.warn(`[VALIDATE] Stage 1 batch discarded`); continue; }
 
     for (let bi = 0; bi < batch.length; bi++) {
       const idx = batch[bi];
       const rawOutput = parsed[bi];
       if (!rawOutput || !rawOutput.trim()) continue;
-
       const src = segments[idx].text;
       const batchTokens = tokenMaps[bi] ?? maskNumericTokens(src).tokens;
-
       let processed = restoreNumericTokens(rawOutput, batchTokens);
       processed = stripLeakedPlaceholders(processed);
       processed = sanitizeTranslationOutput(applyProperNounFixes(processed, patterns), src);
       processed = postProcessTranslation(processed, src, targetLanguage);
-
       if (!passesValidation(src, processed)) continue;
-
       const oldLen = result[idx]?.length ?? 0;
       const newLen = processed.length;
-      if (
-        newLen > oldLen * 1.5 &&
-        !detectFragment(src) &&
-        passesValidation(src, result[idx])
-      ) continue;
-
+      if (newLen > oldLen * 1.5 && !detectFragment(src) && passesValidation(src, result[idx])) continue;
       result[idx] = processed;
       passedSet.add(idx);
     }
   }
 
-  // ── Step 3: Stage 2 — Individual retry ───────────────────────────────────
-
+  // Step 3: Stage 2 — Individual retry
   if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
 
   const stage2Targets = failedIndices.filter(i => {
     const state = getState(i);
     if (passedSet.has(i)) return false;
-    if (!state.batchedTried) return false;   // must have gone through Stage 1
-    if (state.individualTried) return false; // must not have been tried individually
+    if (!state.batchedTried) return false;
+    if (state.individualTried) return false;
     const src = segments[i].text;
     const output = result[i];
     return (
-      isCorruptedOutput(output) ||
-      isLikelyUntranslated(output, targetLanguage) ||
+      isCorruptedOutput(output) || isLikelyUntranslated(output, targetLanguage) ||
       hasLeftoverEnglish(output, src, patterns, targetLanguage) ||
-      isOvergenerated(src, output, targetLanguage) ||
-      RE_PLACEHOLDER_LEAK.test(output) ||
-      (
-        /\bdon't think\b|\bnot a\b|\bdoesn't work\b|\bdon't work\b|\bcan't\b|\bwon't\b|\bnot going to\b|\bnot gonna\b/i.test(src) &&
-        !/않|안|못|없|아니|모르/.test(output)
-      )
+      isOvergenerated(src, output, targetLanguage) || RE_PLACEHOLDER_LEAK.test(output) ||
+      (/\bdon't think\b|\bnot a\b|\bdoesn't work\b|\bdon't work\b|\bcan't\b|\bwon't\b|\bnot going to\b|\bnot gonna\b/i.test(src) && !/않|안|못|없|아니|모르/.test(output))
     );
   });
-
   for (const i of stage2Targets) getState(i).individualTried = true;
 
   for (const index of stage2Targets) {
     if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
+    if (!llamaContext) {
+      console.warn('[VALIDATE] Stage 2: Context released — stopping individual retry');
+      break;
+    }
 
     const src = segments[index].text;
     const wordCount = src.split(/\s+/).filter(Boolean).length;
     const isFragment = detectFragment(src);
     const currentOutput = result[index];
-
     const isOvergenerated_flag = isOvergenerated(src, currentOutput, targetLanguage);
-    const negDropped_flag =
-      /\bdon't think\b|\bnot a\b|\bdoesn't work\b|\bdon't work\b|\bcan't\b|\bwon't\b|\bnot going to\b|\bnot gonna\b/i.test(src) &&
-      !/않|안|못|없|아니|모르/.test(currentOutput);
+    const negDropped_flag = /\bdon't think\b|\bnot a\b|\bdoesn't work\b|\bdon't work\b|\bcan't\b|\bwon't\b|\bnot going to\b|\bnot gonna\b/i.test(src) && !/않|안|못|없|아니|모르/.test(currentOutput);
     const leftoverEn_flag = hasLeftoverEnglish(currentOutput, src, patterns, targetLanguage);
     const untranslated_flag = isLikelyUntranslated(currentOutput, targetLanguage);
     const corrupted_flag = isCorruptedOutput(currentOutput);
     const goodFitBad_flag = /good\s+fit/i.test(src) && /몸|체형|체격|사이즈/.test(currentOutput);
 
     let userPrompt = `Translate to ${targetLanguage}. Output ONLY the translation, nothing else.`;
-
-    if (negDropped_flag) {
-      userPrompt +=
-        '\nCRITICAL: Preserve NEGATIVE meaning. The source contains explicit negation ' +
-        "(don't/can't/never/not). The output MUST reflect this negation clearly.";
-    }
-    if (leftoverEn_flag) {
-      userPrompt +=
-        `\nCRITICAL: Output must contain NO untranslated English words except proper nouns. ` +
-        `Every English word must be transliterated or translated into ${targetLanguage}.`;
-    }
-    if (isOvergenerated_flag && isFragment) {
-      userPrompt +=
-        `\nCRITICAL: Input is a short ASR fragment (${wordCount} words), cut mid-sentence. ` +
-        `Translate ONLY what is literally present. Do NOT reconstruct or complete the sentence. ` +
-        `Target output: ${wordCount} to ${Math.min(wordCount + 2, 6)} words.`;
-    } else if (isOvergenerated_flag) {
-      userPrompt +=
-        '\nCRITICAL: Keep translation concise. Do not add explanations, context, ' +
-        'or content not present in the source text.';
-    }
-    if (untranslated_flag) {
-      userPrompt +=
-        `\nCRITICAL: Output must be entirely in ${targetLanguage}. ` +
-        'Do not output any English or romanized text.';
-    }
-    if (goodFitBad_flag) {
-      userPrompt +=
-        "\nCRITICAL: 'good fit' means suitability for a role or job, NOT physical " +
-        'body shape. Translate as compatibility or suitability.';
-    }
-    if (corrupted_flag) {
-      userPrompt +=
-        '\nCRITICAL: The previous output was structurally corrupted (contained labels, ' +
-        'prefixes, or invalid characters). Return ONLY a clean translation with no ' +
-        'formatting, no labels, no special characters.';
-    }
+    if (negDropped_flag) userPrompt += '\nCRITICAL: Preserve NEGATIVE meaning.';
+    if (leftoverEn_flag) userPrompt += `\nCRITICAL: Output must contain NO untranslated English words.`;
+    if (isOvergenerated_flag && isFragment) userPrompt += `\nCRITICAL: Input is a short fragment. Translate ONLY what is present. Target: ${wordCount} to ${Math.min(wordCount + 2, 6)} words.`;
+    else if (isOvergenerated_flag) userPrompt += '\nCRITICAL: Keep translation concise.';
+    if (untranslated_flag) userPrompt += `\nCRITICAL: Output must be entirely in ${targetLanguage}.`;
+    if (goodFitBad_flag) userPrompt += "\nCRITICAL: 'good fit' means suitability for a role, NOT physical body shape.";
+    if (corrupted_flag) userPrompt += '\nCRITICAL: Return ONLY a clean translation with no formatting.';
 
     const { masked: maskedSrc, tokens } = maskNumericTokens(src);
-
     try {
+      // [FIX] completion 직전 이중 체크
+      if (!llamaContext || isCancelled()) break;
       const r = await llamaContext.completion({
         messages: [
           { role: 'system', content: systemPrompt },
@@ -2054,40 +1771,30 @@ async function validateTranslations(
         top_p: 0.9,
         stop: ['</s>', '<end_of_turn>', '<|end|>', '\n'],
       });
-
+      if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
       const restored = restoreNumericTokens(r.text.trim(), tokens);
-      const processed = postProcessTranslation(
-        sanitizeTranslationOutput(
-          applyProperNounFixes(stripLeakedPlaceholders(restored), patterns),
-          src
-        ),
-        src,
-        targetLanguage
-      );
-
+      const processed = postProcessTranslation(sanitizeTranslationOutput(applyProperNounFixes(stripLeakedPlaceholders(restored), patterns), src), src, targetLanguage);
       if (passesValidation(src, processed)) {
-        result[index] = processed;
-        passedSet.add(index);
+        result[index] = processed; passedSet.add(index);
       } else {
         if (!isCorruptedOutput(currentOutput) && !isLikelyUntranslated(currentOutput, targetLanguage)) {
           result[index] = currentOutput;
-        } else {
-          result[index] = src;
-        }
+        } else { result[index] = src; }
       }
     } catch (e: any) {
       if (e?.message === 'INFERENCE_CANCELLED') throw e;
+      if (e?.message?.includes('Context') && e?.message?.includes('not found')) {
+        console.warn('[VALIDATE] Stage 2: Context released — stopping');
+        break;
+      }
       if (!isCorruptedOutput(currentOutput) && !isLikelyUntranslated(currentOutput, targetLanguage)) {
         result[index] = currentOutput;
-      } else {
-        result[index] = src;
-      }
+      } else { result[index] = src; }
       console.warn(`[VALIDATE] Stage 2 error at ${index}:`, e);
     }
   }
 
-  // ── Step 4: Final fallback ────────────────────────────────────────────────
-
+  // Step 4: Final fallback
   for (const i of failedIndices) {
     if (!passedSet.has(i)) {
       const current = result[i];
@@ -2096,7 +1803,6 @@ async function validateTranslations(
       }
     }
   }
-
   return result;
 }
 
@@ -2117,86 +1823,32 @@ async function loadCheckpoint(videoHash: string): Promise<Checkpoint | null> {
 async function saveCheckpoint(videoHash: string, cp: Omit<Checkpoint, "timestamp">): Promise<void> {
   try {
     await AsyncStorage.setItem(checkpointKey(videoHash), JSON.stringify({ ...cp, timestamp: Date.now() }));
-  } catch (e) {
-    console.warn("[Gemma] Checkpoint save failed:", e);
-  }
+  } catch (e) { console.warn("[Gemma] Checkpoint save failed:", e); }
 }
 
 async function deleteCheckpoint(videoHash: string): Promise<void> {
   await AsyncStorage.removeItem(checkpointKey(videoHash));
 }
 
-function mergeWithTranslations(
-  segments: TranslationSegment[],
-  translatedTexts: string[]
-): TranslationSegment[] {
+function mergeWithTranslations(segments: TranslationSegment[], translatedTexts: string[]): TranslationSegment[] {
   return segments.map((seg, i) => ({ ...seg, translated: translatedTexts[i] || seg.text }));
 }
 
-// ── 시스템 프롬프트 빌더 ──────────────────────────────────────────────────────
-function buildSystemPrompt(
-  targetLanguage: string,
-  langRules: string,
-  genrePersona: string,
-  nounHint: string,
-  batchSize: number
-): string {
-  const protectedNounList = [
-    ...[...PROTECTED_PROPER_NOUNS],
-    ...[...PROTECTED_ACRONYMS],
-  ].join(", ");
-
+function buildSystemPrompt(targetLanguage: string, langRules: string, genrePersona: string, nounHint: string, batchSize: number): string {
+  const protectedNounList = [...[...PROTECTED_PROPER_NOUNS], ...[...PROTECTED_ACRONYMS]].join(", ");
   const timeRuleKo = (targetLanguage === "Korean" || targetLanguage === "ko")
-    ? `- Time format: NEVER output "HH:MM" clock notation (e.g. 8:00, 3:00, 10:00). ` +
-      `Instead use Korean spoken form WITHOUT colon: "8시", "3시", "10시 30분". ` +
-      `With AM/PM context: "오전 8시", "새벽 3시", "오후 2시".\n` +
-      `- "X in the morning" where X is 1–6: ALWAYS use "새벽 X시" (deep night), NOT "아침 X시".\n` +
-      `- "until like X:00" as an arrival/action time (no "in the morning"): just "X시", no 새벽/아침 prefix.\n`
+    ? `- Time format: NEVER output "HH:MM" clock notation. Use Korean spoken form: "8시", "3시", "10시 30분".\n` +
+      `- "X in the morning" where X is 1–6: ALWAYS use "새벽 X시".\n` +
+      `- "until like X:00" as arrival time: just "X시", no 새벽/아침 prefix.\n`
     : "";
-
   return (
     `You are a professional subtitle translator. Translate English subtitles to ${targetLanguage}.\n\n` +
-    `[GLOBAL RULES]\n` +
-    `- Do not hallucinate or add information not present in the source\n` +
-    `- Preserve original meaning and speaker intent exactly\n` +
-    `- Keep subtitles concise — under 15 words per line if possible\n` +
-    `- Never merge, split, skip, or reorder the numbered lines\n\n` +
+    `[GLOBAL RULES]\n- Do not hallucinate or add information not present in the source\n- Preserve original meaning and speaker intent exactly\n- Keep subtitles concise — under 15 words per line if possible\n- Never merge, split, skip, or reorder the numbered lines\n\n` +
     (genrePersona ? genrePersona + "\n\n" : "") +
-    `STRICT OUTPUT FORMAT:\n` +
-    `- Input has exactly ${batchSize} numbered lines\n` +
-    `- Output MUST have exactly ${batchSize} numbered lines: "1. translation", "2. translation", ...\n` +
-    `- ONE output line per input line. Never merge. Never split. Never skip.\n` +
-    `- NEVER output headers like "## Translation:", "[미번역]", "---", or any non-translation text.\n\n` +
-    `TRANSLATION RULES:\n` +
-    `- Translate exact meaning only. Do NOT add, infer, or embellish content not in the source.\n` +
-    `- Preserve negation: "don't/can't/never/not" → must reflect negation in translation.\n` +
-    `- Fragment lines (no complete verb) → translate as fragment, do NOT complete the sentence.\n` +
-    `- Short responses (Yes/No/Hmm/I do) → translate naturally as single words or short phrases.\n` +
-    `- "I do" as a standalone affirmative response (2 words only) → translate as "저도요" or "그러게요". NOT a full sentence.\n` +
-    `- "baby" as an informal address (non-romantic) → use the person's name or omit. NEVER translate as 자기야.\n` +
-    `- NEVER add 자기야/여보/honey/darling unless that exact term is in the source.\n` +
-    `- "HR" always means Human Resources. "HR director" → 인사 담당자 or 인사 책임자. NEVER 감독님.\n` +
-    `- "no guidance", "no validation", "no encouragement", "no supervision" → each is a SEPARATE lack of support. Translate each phrase independently with negation.\n` +
-    `- Tokens like __NUM0__, __NUM1__ are number/time placeholders. Copy them EXACTLY as-is. Do not translate or remove.\n` +
-    `- These proper nouns must NOT be translated — keep or phonetically transliterate only: ${protectedNounList}\n` +
-    `- "not really" → translate as mild negation in context\n` +
-    `- "good fit" in work/interview context → compatibility match, NOT physical fitness\n` +
-    `- "mental health day" → a day off for mental wellbeing\n` +
-    `- "you don't work here" → factual: this person is NOT an employee here\n` +
-    `- "didn't say X" / "didn't mention X" → someone failed to verbally state X, NOT about saving/storing\n` +
-    `- "the big ones" in listing context (apps, brands) → "유명한 것들" or "큰 것들", NOT "큰 회사들"\n` +
-    `- "until like X:00" as arrival/action time → time the person arrives or does something, NOT a staying-up time\n` +
-    `- Conversational "That's/That is" → use proximal pronoun (그건/그게), never distal (저것은/저것이)\n` +
-    `- Time expressions: "until X in the morning" — if X is 1–6, it is the middle of the night (새벽), not 아침\n` +
-    `- "like X in the morning" or "until like X in the morning" follows same rule as above\n` +
-    `- "that kind of thing" → always "그런 거" or "그런 식". NEVER "그런 종류의 것".\n` +
-    `- "that kind of + verb/adj" (e.g. "that kind of doesn't work") → softening expression: "그게 좀 안 맞아요". NEVER "그런 종류는".\n` +
-    `- "that kind of + noun" (e.g. "that kind of research") → noun reference: "그런 종류의 연구". This is the ONLY case where "그런 종류의" is correct.\n` +
-    `- "kind of" alone (without "that") → softening adverb: "좀" or "약간". Not a noun reference.\n` +
+    `STRICT OUTPUT FORMAT:\n- Input has exactly ${batchSize} numbered lines\n- Output MUST have exactly ${batchSize} numbered lines: "1. translation", "2. translation", ...\n- ONE output line per input line. Never merge. Never split. Never skip.\n- NEVER output headers like "## Translation:", "[미번역]", "---".\n\n` +
+    `TRANSLATION RULES:\n- Translate exact meaning only.\n- Preserve negation: "don't/can't/never/not" → must reflect negation in translation.\n- Fragment lines → translate as fragment, do NOT complete the sentence.\n- "baby" as informal address → use name or omit. NEVER translate as 자기야.\n- "HR" always means Human Resources. "HR director" → 인사 담당자.\n- Tokens like __NUM0__ are placeholders. Copy them EXACTLY as-is.\n- These proper nouns must NOT be translated: ${protectedNounList}\n- "good fit" in work context → compatibility match, NOT physical fitness\n- "that kind of thing" → always "그런 거". NEVER "그런 종류의 것".\n` +
     timeRuleKo +
-    `\n` +
-    langRules +
-    nounHint
+    `\n` + langRules + nounHint
   ).trim();
 }
 
@@ -2212,350 +1864,287 @@ export async function translateSegments(
 ): Promise<TranslationSegment[]> {
   console.log("[TRANSLATE]", segments.length, "segs |", targetLanguage, "|", videoGenre);
 
-  // NOTE: llamaContext is checked INSIDE enqueueInference (not here) so the check
-  // happens at execution time — by then, any FG job that was running has finished
-  // (and could have changed llamaContext).  Checking before entering the queue would
-  // pass even if FG is mid-inference and then unloads the model before BG runs.
-
-  // ── EMA inter-batch sleep estimation (BG mode) ─────────────────────────────
   let emaBatchDurationMs = 0;
 
   const updateEmaAndGetBgSleepMs = (batchDurationMs: number, batchIndex: number): number => {
-    if (emaBatchDurationMs === 0) {
-      // Path A: first batch — initialize and return conservative default
-      emaBatchDurationMs = batchDurationMs;
-      return 300;
-    } else if (batchIndex !== 0 && batchIndex % 20 === 0) {
-      // Path B: re-anchor — partial blend to correct drift without hard reset
-      emaBatchDurationMs =
-        EMA_REANCHOR_WEIGHT * batchDurationMs +
-        (1 - EMA_REANCHOR_WEIGHT) * emaBatchDurationMs;
-      // falls through to sleep ladder — does NOT return early
+    if (emaBatchDurationMs === 0) { emaBatchDurationMs = batchDurationMs; return 300; }
+    else if (batchIndex !== 0 && batchIndex % 20 === 0) {
+      emaBatchDurationMs = EMA_REANCHOR_WEIGHT * batchDurationMs + (1 - EMA_REANCHOR_WEIGHT) * emaBatchDurationMs;
     } else {
-      // Path C: normal batch — standard EMA update
-      emaBatchDurationMs =
-        EMA_ALPHA_BG * batchDurationMs + (1 - EMA_ALPHA_BG) * emaBatchDurationMs;
-    }
-    // Sleep ladder — reached by Path B and C only
-    // Floor at 300ms: high EMA may mean heavy workload, not a cool device
-    if (__DEV__ && _isAppBackgrounded) {
-      console.log(
-        `[EMA] batch=${batchIndex} duration=${batchDurationMs}ms ` +
-        `ema=${Math.round(emaBatchDurationMs)}ms sleep=${
-          emaBatchDurationMs < 800 ? 600 : emaBatchDurationMs < 1500 ? 400 : 300
-        }ms`
-      );
+      emaBatchDurationMs = EMA_ALPHA_BG * batchDurationMs + (1 - EMA_ALPHA_BG) * emaBatchDurationMs;
     }
     if (emaBatchDurationMs < 800)  return 600;
     if (emaBatchDurationMs < 1500) return 400;
     return 300;
   };
 
-  const yieldToEventLoop = (): Promise<void> =>
-    new Promise<void>(r => setImmediate(r));
+  const yieldToEventLoop = (): Promise<void> => new Promise<void>(r => setImmediate(r));
 
   return enqueueInference(async (isCancelled) => {
-  if (!llamaContext) throw new Error("모델이 로드되지 않았습니다. loadModel()을 먼저 호출하세요.");
-  // ── Step 0: 중복 제거 + ASR 정리 ────────────────────────────────────────────
-  const deduped = deduplicateOverlappingSegments(segments);
-  const cleaned = deduped.map(seg => ({
-    ...seg,
-    text: normalizeSocialMediaNames(cleanWhisperText(seg.text)),
-  }));
+    if (!llamaContext) throw new Error("모델이 로드되지 않았습니다. loadModel()을 먼저 호출하세요.");
 
-  // ── Step A: 고유명사 + 프롬프트 구성 ────────────────────────────────────────
-  const profile = getLanguageProfile(targetLanguage);
-  const properNouns = await buildProperNounDict(deduped, videoHash, targetLanguage);
-  if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
-  const nounHint = formatNounHint(properNouns);
-  const patterns = buildPatterns(properNouns);
-  const genrePersona = GENRE_PERSONA[videoGenre] || GENRE_PERSONA["general"] || "";
-  const langRules = profile.systemPromptRules.join(" ");
-
-  // ── Step B: SBD — 문장 경계 탐지 ────────────────────────────────────────────
-  let merged: MergedGroup[];
-  let usedSBD = false;
-
-  const sbdSentences = await detectSentenceBoundaries(cleaned);
-  if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
-
-  if (sbdSentences.length > 0) {
-    merged = sbdSentencesToMergedGroups(sbdSentences);
-    usedSBD = true;
-    console.log(`[TRANSLATE] SBD success: ${cleaned.length} segs → ${merged.length} sentences`);
-  } else {
-    console.log(`[TRANSLATE] SBD fallback: using mergeFragments`);
-    let fallbackMerged = mergeFragments(cleaned);
-    fallbackMerged = enforceSentence(fallbackMerged);
-    merged = fallbackMerged;
-  }
-
-  const total = merged.length;
-  const totalBatches = Math.ceil(total / BATCH_SIZE);
-  console.log(`[TRANSLATE] ${usedSBD ? "SBD" : "fallback"} → ${total} groups (${totalBatches} batches)`);
-
-  const segmentCountUpToGroup: number[] = new Array(merged.length).fill(0);
-  let cumulativeSegs = 0;
-  for (let i = 0; i < merged.length; i++) {
-    cumulativeSegs += merged[i].originalIndices.length;
-    segmentCountUpToGroup[i] = cumulativeSegs;
-  }
-  if (cumulativeSegs !== cleaned.length) {
-    console.warn('[TRANSLATE] segment count mismatch', cumulativeSegs, cleaned.length);
-  }
-
-  // ── Step C: 체크포인트 복원 ──────────────────────────────────────────────────
-  const checkpoint = await loadCheckpoint(videoHash);
-  if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
-  let startBatch = 0;
-  const mergedTranslations: string[] = new Array(total).fill("");
-
-  if (checkpoint && checkpoint.translatedTexts.length === total) {
-    startBatch = checkpoint.lastBatchIndex + 1;
-    for (let i = 0; i < checkpoint.translatedTexts.length; i++) {
-      mergedTranslations[i] = checkpoint.translatedTexts[i];
-    }
-    console.log(`[Gemma] Resuming from batch ${startBatch}/${totalBatches}`);
-  }
-
-  if (startBatch === 0) {
-    emaBatchDurationMs      = 0;
-    _thermalLevel           = 0;
-    _thermalConsecutiveHigh = 0;
-    _thermalConsecutiveLow  = 0;
-  }
-
-  // ── Step D: 배치 번역 ────────────────────────────────────────────────────────
-  try {
-    let lastSaveTime = 0;
-    for (let bi = startBatch; bi < totalBatches; bi++) {
-      const batchStartTime = Date.now();
-      if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
-      const offset = bi * BATCH_SIZE;
-      const batch = merged.slice(offset, offset + BATCH_SIZE);
-      console.log(`[TRANSLATE] batch ${bi + 1}/${totalBatches} (${batch.length})`);
-
-      if (batch.length === 0) continue;
-      const sysPrompt = buildSystemPrompt(targetLanguage, langRules, genrePersona, nounHint, batch.length);
-      const { message: batchMessage, tokenMaps } = buildBatchMessage(batch);
-
-      // [YIELD 1] — always, before completion
-      if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
-      await yieldToEventLoop();
-
-      const r = await llamaContext.completion({
-        messages: [
-          { role: "system", content: sysPrompt },
-          { role: "user", content: batchMessage },
-        ],
-        n_predict: applyThermalNPredict(batch.length * 80),
-        temperature: 0.1,
-        top_p: 0.9,
-        stop: ["</s>", "<end_of_turn>", "<|end|>"],
-      } as any);
-
-      // [YIELD 2] — background only, after completion
-      if (_isAppBackgrounded) {
-        if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
-        await yieldToEventLoop();
-      }
-
-      // cancel check before parse — no yield here
-      if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
-
-      const translations = parseBatchResponse(r.text, batch, patterns, tokenMaps);
-
-      // [YIELD 3] — always, after parse
-      if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
-      await yieldToEventLoop();
-
-      for (let i = 0; i < batch.length; i++) {
-        mergedTranslations[offset + i] = translations[i];
-      }
-
-      const partial = expandGroupTranslations(merged, mergedTranslations, cleaned);
-      // [FIX ISSUE2] Await onProgress so that AsyncStorage status writes (BG mode)
-      // and React state updates (FG mode) complete BEFORE the next batch begins.
-      // Without await, the last batch's saveStatus(translating, X%) races with
-      // backgroundTranslationTask's saveStatus(done, 100%) — the poll only sees 'done'.
-      if (onProgress) {
-        const lastGroupInBatch = Math.min(offset + batch.length - 1, merged.length - 1);
-        const segmentsCompletedSoFar = segmentCountUpToGroup[lastGroupInBatch];
-        await onProgress(segmentsCompletedSoFar, cleaned.length, mergeWithTranslations(cleaned, partial));
-      }
-
-      const now = Date.now();
-      if (now - lastSaveTime >= SAVE_INTERVAL_MS) {
-        lastSaveTime = now;
-        await saveCheckpoint(videoHash, {
-          translatedTexts: mergedTranslations,
-          lastBatchIndex: bi,
-          properNouns,
-          totalBatches,
-        });
-      }
-      if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
-
-      if (bi < totalBatches - 1) {
-        const batchDuration = Date.now() - batchStartTime;
-        checkThermalPressure(batchDuration, emaBatchDurationMs);
-
-        const thermalSleep = getThermalSleepMs();
-        const bgEmaSleep   = _isAppBackgrounded
-          ? updateEmaAndGetBgSleepMs(batchDuration, bi)
-          : 0;
-        const fgAdaptiveSleep = !_isAppBackgrounded
-          ? (bi === startBatch ? 200 : Math.min(400, Math.max(200, Math.round(batchDuration * 0.18))))
-          : 0;
-
-        const sleepMs = Math.max(thermalSleep, bgEmaSleep, fgAdaptiveSleep);
-        if (sleepMs > 0) await sleep(sleepMs);
-        if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
-      }
-    }
-    await saveCheckpoint(videoHash, {
-      translatedTexts: mergedTranslations,
-      lastBatchIndex: totalBatches - 1,
-      properNouns,
-      totalBatches,
-    });
-  } catch (e: any) {
-    if (e?.message === 'INFERENCE_CANCELLED') throw e;
-    if (e?.message === 'APP_BACKGROUNDED') throw e;
-    console.error("[Gemma] Inference error:", e);
-    return mergeWithTranslations(cleaned, expandGroupTranslations(merged, mergedTranslations, cleaned));
-  }
-
-  await deleteCheckpoint(videoHash);
-
-  // ── Step E: 재분배 ───────────────────────────────────────────────────────────
-  const translatedTexts = expandGroupTranslations(merged, mergedTranslations, cleaned);
-
-  // Step E.1: 호칭어 환각 제거
-  for (let i = 0; i < cleaned.length; i++) {
-    if (!RE_HALLUCINATION_GUARD.test(cleaned[i].text) && translatedTexts[i]) {
-      translatedTexts[i] = translatedTexts[i].replace(RE_HALLUCINATED_TERMS_KO, "").trim();
-    }
-  }
-
-  // Step E.2: 후처리
-  for (let i = 0; i < cleaned.length; i++) {
-    if (translatedTexts[i]) {
-      translatedTexts[i] = postProcessTranslation(translatedTexts[i], cleaned[i].text, targetLanguage);
-    }
-  }
-
-  // ── Step F: 실패 세그먼트 재시도 ─────────────────────────────────────────────
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const failed = cleaned.reduce<number[]>((acc, seg, i) => {
-      const t = translatedTexts[i];
-      const src = seg.text.trim();
-      if (
-        !t ||
-        !t.trim() ||
-        (t.trim() === src && src.length > 10) ||
-        /^\d+\.?$/.test(t.trim()) ||
-        isCorruptedOutput(t) ||
-        RE_PLACEHOLDER_LEAK.test(t)
-      ) {
-        return [...acc, i];
-      }
-      return acc;
-    }, []);
-
-    if (failed.length === 0) break;
-    console.log(`[Gemma] Retry ${attempt + 1}: ${failed.length} segs`);
-
-    const retryGroups: MergedGroup[] = failed.map(i => ({
-      start: cleaned[i].start,
-      end: cleaned[i].end,
-      text: cleaned[i].text,
-      originalIndices: [i],
+    // ── Step 0 ───────────────────────────────────────────────────────────────
+    const deduped = deduplicateOverlappingSegments(segments);
+    const cleaned = deduped.map(seg => ({
+      ...seg,
+      text: normalizeSocialMediaNames(cleanWhisperText(seg.text)),
     }));
 
+    // ── Step A: 고유명사 + 프롬프트 구성 ─────────────────────────────────────
+    const profile = getLanguageProfile(targetLanguage);
+    const properNouns = await buildProperNounDict(deduped, videoHash, targetLanguage, isCancelled);
     if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
-    const retryPrompt = buildSystemPrompt(targetLanguage, langRules, genrePersona, nounHint, retryGroups.length);
-    const { message: retryMessage, tokenMaps: retryTokenMaps } = buildBatchMessage(retryGroups);
+    const nounHint = formatNounHint(properNouns);
+    const patterns = buildPatterns(properNouns);
+    const genrePersona = GENRE_PERSONA[videoGenre] || GENRE_PERSONA["general"] || "";
+    const langRules = profile.systemPromptRules.join(" ");
 
+    // ── Step B: SBD ───────────────────────────────────────────────────────────
+    let merged: MergedGroup[];
+    let usedSBD = false;
+
+    if (!llamaContext || isCancelled()) throw new Error('INFERENCE_CANCELLED');
+
+    const sbdSentences = await detectSentenceBoundaries(cleaned, isCancelled);
+    if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
+
+    if (sbdSentences.length > 0) {
+      merged = sbdSentencesToMergedGroups(sbdSentences);
+      usedSBD = true;
+      console.log(`[TRANSLATE] SBD success: ${cleaned.length} segs → ${merged.length} sentences`);
+    } else {
+      console.log(`[TRANSLATE] SBD fallback: using mergeFragments`);
+      let fallbackMerged = mergeFragments(cleaned);
+      fallbackMerged = enforceSentence(fallbackMerged);
+      merged = fallbackMerged;
+    }
+
+    const total = merged.length;
+    const totalBatches = Math.ceil(total / BATCH_SIZE);
+    console.log(`[TRANSLATE] ${usedSBD ? "SBD" : "fallback"} → ${total} groups (${totalBatches} batches)`);
+
+    const segmentCountUpToGroup: number[] = new Array(merged.length).fill(0);
+    let cumulativeSegs = 0;
+    for (let i = 0; i < merged.length; i++) {
+      cumulativeSegs += merged[i].originalIndices.length;
+      segmentCountUpToGroup[i] = cumulativeSegs;
+    }
+
+    // ── Step C: 체크포인트 복원 ───────────────────────────────────────────────
+    const checkpoint = await loadCheckpoint(videoHash);
+    if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
+    let startBatch = 0;
+    const mergedTranslations: string[] = new Array(total).fill("");
+    if (checkpoint && checkpoint.translatedTexts.length === total) {
+      startBatch = checkpoint.lastBatchIndex + 1;
+      for (let i = 0; i < checkpoint.translatedTexts.length; i++) {
+        mergedTranslations[i] = checkpoint.translatedTexts[i];
+      }
+      console.log(`[Gemma] Resuming from batch ${startBatch}/${totalBatches}`);
+    }
+    if (startBatch === 0) {
+      emaBatchDurationMs = 0; _thermalLevel = 0;
+      _thermalConsecutiveHigh = 0; _thermalConsecutiveLow = 0;
+    }
+
+    // ── Step D: 배치 번역 ─────────────────────────────────────────────────────
     try {
-      const rr = await llamaContext.completion({
-        messages: [
-          { role: "system", content: retryPrompt },
-          { role: "user", content: retryMessage },
-        ],
-        n_predict: applyThermalNPredict(retryGroups.length * 80),
-        temperature: 0.1,
-        top_p: 0.9,
-        stop: ["</s>", "<end_of_turn>", "<|end|>"],
-      } as any);
-      if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
+      let lastSaveTime = 0;
+      for (let bi = startBatch; bi < totalBatches; bi++) {
+        const batchStartTime = Date.now();
+        if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
+        if (!llamaContext) throw new Error('INFERENCE_CANCELLED');
 
-      const rt = parseBatchResponse(rr.text, retryGroups, patterns, retryTokenMaps);
+        const offset = bi * BATCH_SIZE;
+        const batch = merged.slice(offset, offset + BATCH_SIZE);
+        console.log(`[TRANSLATE] batch ${bi + 1}/${totalBatches} (${batch.length})`);
+        if (batch.length === 0) continue;
 
-      for (let j = 0; j < failed.length; j++) {
-        if (rt[j] && rt[j].trim() && !isCorruptedOutput(rt[j])) {
-          translatedTexts[failed[j]] = postProcessTranslation(rt[j], retryGroups[j].text, targetLanguage);
+        const sysPrompt = buildSystemPrompt(targetLanguage, langRules, genrePersona, nounHint, batch.length);
+        const { message: batchMessage, tokenMaps } = buildBatchMessage(batch);
+
+        if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
+        await yieldToEventLoop();
+
+        // [FIX] completion 직전 최종 이중 체크 — yield 이후 상태 재확인
+        if (!llamaContext || isCancelled()) throw new Error('INFERENCE_CANCELLED');
+
+        const r = await llamaContext.completion({
+          messages: [
+            { role: "system", content: sysPrompt },
+            { role: "user", content: batchMessage },
+          ],
+          n_predict: applyThermalNPredict(batch.length * 80),
+          temperature: 0.1,
+          top_p: 0.9,
+          stop: ["</s>", "<end_of_turn>", "<|end|>"],
+        } as any);
+
+        if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
+        if (_isAppBackgrounded) await yieldToEventLoop();
+        if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
+
+        const translations = parseBatchResponse(r.text, batch, patterns, tokenMaps);
+
+        if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
+        await yieldToEventLoop();
+
+        for (let i = 0; i < batch.length; i++) {
+          mergedTranslations[offset + i] = translations[i];
+        }
+
+        const partial = expandGroupTranslations(merged, mergedTranslations, cleaned);
+        if (onProgress) {
+          const lastGroupInBatch = Math.min(offset + batch.length - 1, merged.length - 1);
+          const segmentsCompletedSoFar = segmentCountUpToGroup[lastGroupInBatch];
+          await onProgress(segmentsCompletedSoFar, cleaned.length, mergeWithTranslations(cleaned, partial));
+        }
+
+        const now = Date.now();
+        if (now - lastSaveTime >= SAVE_INTERVAL_MS) {
+          lastSaveTime = now;
+          await saveCheckpoint(videoHash, { translatedTexts: mergedTranslations, lastBatchIndex: bi, properNouns, totalBatches });
+        }
+        if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
+
+        if (bi < totalBatches - 1) {
+          const batchDuration = Date.now() - batchStartTime;
+          checkThermalPressure(batchDuration, emaBatchDurationMs);
+          const thermalSleep = getThermalSleepMs();
+          const bgEmaSleep   = _isAppBackgrounded ? updateEmaAndGetBgSleepMs(batchDuration, bi) : 0;
+          const fgAdaptiveSleep = !_isAppBackgrounded ? (bi === startBatch ? 200 : Math.min(400, Math.max(200, Math.round(batchDuration * 0.18)))) : 0;
+          const sleepMs = Math.max(thermalSleep, bgEmaSleep, fgAdaptiveSleep);
+          if (sleepMs > 0) await sleep(sleepMs);
+          if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
         }
       }
+      await saveCheckpoint(videoHash, { translatedTexts: mergedTranslations, lastBatchIndex: totalBatches - 1, properNouns, totalBatches });
     } catch (e: any) {
       if (e?.message === 'INFERENCE_CANCELLED') throw e;
-      console.warn(`[Gemma] Retry ${attempt + 1} error:`, e);
-      break;
+      if (e?.message === 'APP_BACKGROUNDED') throw e;
+      if (e?.message?.includes('Context') && e?.message?.includes('not found')) {
+        console.warn('[TRANSLATE] Context released mid-batch — returning partial results');
+        return mergeWithTranslations(cleaned, expandGroupTranslations(merged, mergedTranslations, cleaned));
+      }
+      console.error("[Gemma] Inference error:", e);
+      return mergeWithTranslations(cleaned, expandGroupTranslations(merged, mergedTranslations, cleaned));
     }
 
-    if (attempt < 1) {
-      await sleep(_thermalLevel >= 1 ? 500 : 200);
+    await deleteCheckpoint(videoHash);
+
+    // ── Step E: 재분배 ────────────────────────────────────────────────────────
+    const translatedTexts = expandGroupTranslations(merged, mergedTranslations, cleaned);
+    for (let i = 0; i < cleaned.length; i++) {
+      if (!RE_HALLUCINATION_GUARD.test(cleaned[i].text) && translatedTexts[i]) {
+        translatedTexts[i] = translatedTexts[i].replace(RE_HALLUCINATED_TERMS_KO, "").trim();
+      }
+    }
+    for (let i = 0; i < cleaned.length; i++) {
+      if (translatedTexts[i]) {
+        translatedTexts[i] = postProcessTranslation(translatedTexts[i], cleaned[i].text, targetLanguage);
+      }
+    }
+
+    // ── Step F: 실패 세그먼트 재시도 ─────────────────────────────────────────
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const failed = cleaned.reduce<number[]>((acc, seg, i) => {
+        const t = translatedTexts[i];
+        const src = seg.text.trim();
+        if (!t || !t.trim() || (t.trim() === src && src.length > 10) || /^\d+\.?$/.test(t.trim()) || isCorruptedOutput(t) || RE_PLACEHOLDER_LEAK.test(t)) {
+          return [...acc, i];
+        }
+        return acc;
+      }, []);
+      if (failed.length === 0) break;
+      console.log(`[Gemma] Retry ${attempt + 1}: ${failed.length} segs`);
+
+      if (!llamaContext || isCancelled()) {
+        console.warn('[TRANSLATE] Step F: Context null or cancelled — skipping retry');
+        break;
+      }
+
+      const retryGroups: MergedGroup[] = failed.map(i => ({ start: cleaned[i].start, end: cleaned[i].end, text: cleaned[i].text, originalIndices: [i] }));
+      if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
+      const retryPrompt = buildSystemPrompt(targetLanguage, langRules, genrePersona, nounHint, retryGroups.length);
+      const { message: retryMessage, tokenMaps: retryTokenMaps } = buildBatchMessage(retryGroups);
+
+      try {
+        // [FIX] completion 직전 이중 체크
+        if (!llamaContext || isCancelled()) break;
+        const rr = await llamaContext.completion({
+          messages: [
+            { role: "system", content: retryPrompt },
+            { role: "user", content: retryMessage },
+          ],
+          n_predict: applyThermalNPredict(retryGroups.length * 80),
+          temperature: 0.1,
+          top_p: 0.9,
+          stop: ["</s>", "<end_of_turn>", "<|end|>"],
+        } as any);
+        if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
+        const rt = parseBatchResponse(rr.text, retryGroups, patterns, retryTokenMaps);
+        for (let j = 0; j < failed.length; j++) {
+          if (rt[j] && rt[j].trim() && !isCorruptedOutput(rt[j])) {
+            translatedTexts[failed[j]] = postProcessTranslation(rt[j], retryGroups[j].text, targetLanguage);
+          }
+        }
+      } catch (e: any) {
+        if (e?.message === 'INFERENCE_CANCELLED') throw e;
+        if (e?.message?.includes('Context') && e?.message?.includes('not found')) {
+          console.warn('[TRANSLATE] Step F retry: Context released — stopping retry');
+          break;
+        }
+        console.warn(`[Gemma] Retry ${attempt + 1} error:`, e);
+        break;
+      }
+
+      if (attempt < 1) {
+        await sleep(_thermalLevel >= 1 ? 500 : 200);
+        if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
+      }
+    }
+
+    // ── Cooling pause before validation ──────────────────────────────────────
+    if (_thermalLevel >= 1 && totalBatches >= 5 && emaBatchDurationMs > 1200) {
+      const coolingMs = _thermalLevel >= 2 ? 2500 : 1200;
+      console.log(`[THERMAL] Pre-validation cooling: ${coolingMs}ms`);
+      await sleep(coolingMs);
       if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
     }
-  }
 
-  // ── Cooling pause before validation: only when device is genuinely hot ────────
-  if (_thermalLevel >= 1 && totalBatches >= 5 && emaBatchDurationMs > 1200) {
-    const coolingMs = _thermalLevel >= 2 ? 2500 : 1200;
-    console.log(`[THERMAL] Pre-validation cooling: ${coolingMs}ms (level=${_thermalLevel}, batches=${totalBatches}, ema=${Math.round(emaBatchDurationMs)}ms)`);
-    await sleep(coolingMs);
-    if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
-  }
-
-  // ── Step G: 검증 ─────────────────────────────────────────────────────────────
-  const finalPrompt = buildSystemPrompt(targetLanguage, langRules, genrePersona, nounHint, BATCH_SIZE);
-
-  const mergedForValidation: MergedGroup[] = merged.map((g, i) => ({
-    ...g,
-    text: g.text,
-  }));
-
-  const groupTranslationsForValidation = merged.map((g) => {
-    const texts = g.originalIndices
-      .map((idx) => translatedTexts[idx])
-      .filter(Boolean);
-    return texts.join(" ").trim();
-  });
-
-  const validatedGroupTexts = await validateTranslations(
-    mergedForValidation,
-    groupTranslationsForValidation,
-    finalPrompt,
-    targetLanguage,
-    patterns,
-    isCancelled
-  );
-  if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
-
-  const revalidatedTexts = expandGroupTranslations(merged, validatedGroupTexts, cleaned);
-
-  for (let i = 0; i < cleaned.length; i++) {
-    if (revalidatedTexts[i]) {
-      revalidatedTexts[i] = postProcessTranslation(revalidatedTexts[i], cleaned[i].text, targetLanguage);
+    // ── Step G: 검증 ──────────────────────────────────────────────────────────
+    if (!llamaContext || isCancelled()) {
+      console.warn('[TRANSLATE] Step G: Context null or cancelled — skipping validation');
+      const formatted = translatedTexts.map(t => formatNetflixSubtitle(t));
+      return adjustTimingsForReadability(mergeWithTranslations(cleaned, formatted));
     }
-  }
 
-  // ── Step H: Netflix 포맷팅 ───────────────────────────────────────────────────
-  const formatted = revalidatedTexts.map(t => formatNetflixSubtitle(t));
+    const finalPrompt = buildSystemPrompt(targetLanguage, langRules, genrePersona, nounHint, BATCH_SIZE);
+    const mergedForValidation: MergedGroup[] = merged.map((g) => ({ ...g }));
+    const groupTranslationsForValidation = merged.map((g) => {
+      const texts = g.originalIndices.map((idx) => translatedTexts[idx]).filter(Boolean);
+      return texts.join(" ").trim();
+    });
 
-  // ── Step I: 타이밍 조정 + 최종 조립 ─────────────────────────────────────────
-  const completed = adjustTimingsForReadability(mergeWithTranslations(cleaned, formatted));
-  console.log(`[Gemma] Done: ${completed.length} segments.`);
-  return completed;
-  }); // ── end enqueueInference ──────────────────────────────────────────────
+    const validatedGroupTexts = await validateTranslations(
+      mergedForValidation, groupTranslationsForValidation,
+      finalPrompt, targetLanguage, patterns, isCancelled
+    );
+    if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
+
+    const revalidatedTexts = expandGroupTranslations(merged, validatedGroupTexts, cleaned);
+    for (let i = 0; i < cleaned.length; i++) {
+      if (revalidatedTexts[i]) {
+        revalidatedTexts[i] = postProcessTranslation(revalidatedTexts[i], cleaned[i].text, targetLanguage);
+      }
+    }
+
+    // ── Step H: Netflix 포맷팅 ─────────────────────────────────────────────────
+    const formatted = revalidatedTexts.map(t => formatNetflixSubtitle(t));
+
+    // ── Step I: 타이밍 조정 + 최종 조립 ──────────────────────────────────────
+    const completed = adjustTimingsForReadability(mergeWithTranslations(cleaned, formatted));
+    console.log(`[Gemma] Done: ${completed.length} segments.`);
+    return completed;
+  });
 }

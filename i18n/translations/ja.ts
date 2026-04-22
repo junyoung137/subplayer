@@ -126,7 +126,7 @@
     noTranslationModelMsg: "翻訳モデルなし — 原文のみ表示\n\nモデル管理画面からGemmaモデルをダウンロードすると翻訳が可能です。",
     continueWithOriginal: "原文で続ける",
     resumeBanner: "前回の作業が見つかりました: {{count}}セグメント完了。再開します…",
-    whisperLoading: "Whisperモデルを読み込み中…",
+    whisperLoading: "モデルを読み込み中…",
     processFailed: "処理失敗",
     totalProgress: "全体の進捗",
     translationModelReady: "翻訳モデルを準備中… しばらくお待ちください",

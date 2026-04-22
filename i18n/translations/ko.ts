@@ -126,7 +126,7 @@
     noTranslationModelMsg: "번역 모델 없음 — 원문만 표시\n\n모델 관리 화면에서 Gemma 모델을 다운로드하면 한국어 번역이 가능합니다.",
     continueWithOriginal: "원문으로 계속",
     resumeBanner: "이전 작업 발견: {{count}}개 세그먼트 완료됨. 이어서 번역합니다…",
-    whisperLoading: "Whisper 모델 로드 중…",
+    whisperLoading: "로딩 중…",
     processFailed: "처리 실패",
     totalProgress: "전체 진행률",
     translationModelReady: "번역 모델 준비 중… 잠시만 기다려 주세요",

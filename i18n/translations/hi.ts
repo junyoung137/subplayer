@@ -126,7 +126,7 @@
     noTranslationModelMsg: "कोई मॉडल नहीं — केवल मूल दिखाया जाता है\n\nअनुवाद सक्षम करने के लिए Gemma मॉडल डाउनलोड करें।",
     continueWithOriginal: "मूल के साथ जारी रखें",
     resumeBanner: "पिछला सत्र: {{count}} खंड पूर्ण। फिर से शुरू हो रहा है…",
-    whisperLoading: "Whisper लोड हो रहा है…",
+    whisperLoading: "लोड हो रहा है…",
     processFailed: "प्रसंस्करण विफल",
     totalProgress: "कुल प्रगति",
     translationModelReady: "मॉडल तैयार हो रहा है… कृपया प्रतीक्षा करें",

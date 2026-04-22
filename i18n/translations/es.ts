@@ -126,7 +126,7 @@
     noTranslationModelMsg: "Sin modelo — solo se muestra el original\n\nDescarga el modelo Gemma para activar la traducción.",
     continueWithOriginal: "Continuar con original",
     resumeBanner: "Sesión anterior: {{count}} segmentos completados. Reanudando…",
-    whisperLoading: "Cargando Whisper…",
+    whisperLoading: "Cargando…",
     processFailed: "Procesamiento fallido",
     totalProgress: "Progreso total",
     translationModelReady: "Preparando modelo… Por favor espera",

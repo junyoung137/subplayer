@@ -126,7 +126,7 @@
     noTranslationModelMsg: "ไม่มีโมเดล — แสดงเฉพาะต้นฉบับ\n\nดาวน์โหลดโมเดล Gemma เพื่อเปิดใช้การแปล",
     continueWithOriginal: "ดำเนินการต่อด้วยต้นฉบับ",
     resumeBanner: "เซสชันก่อนหน้า: เสร็จแล้ว {{count}} ส่วน กำลังดำเนินการต่อ…",
-    whisperLoading: "กำลังโหลด Whisper…",
+    whisperLoading: "กำลังโหลด…",
     processFailed: "การประมวลผลล้มเหลว",
     totalProgress: "ความคืบหน้าทั้งหมด",
     translationModelReady: "กำลังเตรียมโมเดล… กรุณารอ",

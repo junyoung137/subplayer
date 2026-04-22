@@ -126,7 +126,7 @@
     noTranslationModelMsg: "Нет модели — отображается только оригинал\n\nСкачайте модель Gemma для включения перевода.",
     continueWithOriginal: "Продолжить с оригиналом",
     resumeBanner: "Предыдущая сессия: завершено {{count}} сегментов. Возобновление…",
-    whisperLoading: "Загрузка Whisper…",
+    whisperLoading: "Загрузка…",
     processFailed: "Ошибка обработки",
     totalProgress: "Общий прогресс",
     translationModelReady: "Подготовка модели… Пожалуйста, подождите",

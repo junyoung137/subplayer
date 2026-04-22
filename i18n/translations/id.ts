@@ -126,7 +126,7 @@
     noTranslationModelMsg: "Tidak ada model — hanya asli yang ditampilkan\n\nUnduh model Gemma untuk mengaktifkan terjemahan.",
     continueWithOriginal: "Lanjutkan dengan asli",
     resumeBanner: "Sesi sebelumnya: {{count}} segmen selesai. Melanjutkan…",
-    whisperLoading: "Memuat Whisper…",
+    whisperLoading: "Memuat…",
     processFailed: "Pemrosesan gagal",
     totalProgress: "Kemajuan total",
     translationModelReady: "Menyiapkan model… Harap tunggu",
