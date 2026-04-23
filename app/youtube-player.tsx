@@ -64,11 +64,12 @@ import { TimedTextSegment } from "../services/youtubeTimedText";
 import { SubtitleOverlay } from "../components/SubtitleOverlay";
 import { SubtitleQuickPanel } from "../components/SubtitleQuickPanel";
 import { SubtitleSaveModal } from "../components/SubtitleSaveModal";
+import { VideoSearchModal } from "../components/VideoSearchModal";
 import { useMediaProjectionProcessor } from "../hooks/useMediaProjectionProcessor";
 import { useWhisperModel } from "../hooks/useWhisperModel";
 import { LANGUAGES, getLanguageByCode } from "../constants/languages";
 import { useRetranslate } from "../hooks/useRetranslate";
-import { Settings, Check, CheckCircle2, XCircle, AlertTriangle, Mic } from 'lucide-react-native';
+import { Settings, Check, CheckCircle2, XCircle, AlertTriangle, Mic, Search } from 'lucide-react-native';
 import { useBackgroundTranslation } from '../hooks/useBackgroundTranslation';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
@@ -321,6 +322,7 @@ export default function YoutubePlayerScreen() {
   const [subtitlePanelVisible, setSubtitlePanelVisible] = useState(false);
   const [genreModalVisible,    setGenreModalVisible]    = useState(false);
   const [saveModalVisible,     setSaveModalVisible]     = useState(false);
+  const [searchModalVisible,   setSearchModalVisible]   = useState(false);
   const [speedIdx,             setSpeedIdx]             = useState(2);
   const [selectedGenre,        setSelectedGenre]        = useState(_initialGenre);
   const isLandscape = screenWidth > screenHeight;
@@ -401,19 +403,11 @@ export default function YoutubePlayerScreen() {
       animProgressRef.current = 0;
       animTargetRef.current   = 0;
       // [BUG 5] Do NOT unload the model if BG is actively translating.
-      // Two guards in combination:
-      //   • isBgRunningRef.current  — set synchronously in startBgTranslation,
-      //     so it's already true even before the state update commits.
-      //   • bgStatusRef.current     — covers the brief window between
-      //     enqueueTranslation resolving and the isBgRunning state effect firing.
-      //     If bgStatus is 'fetching' or 'translating', BG owns llamaContext.
       if (gemmaLoadedRef.current && !bgActive) {
         unloadGemma().catch(() => {});
         gemmaLoadedRef.current = false;
       }
       ScreenOrientation.unlockAsync().catch(() => {});
-      // Clean up any FG-fetched subtitle cache key to prevent AsyncStorage leaks
-      // (consumed by backgroundTranslationTask if BG was started, otherwise orphaned)
       if (youtubeVideoId) {
         AsyncStorage.removeItem(`fg_fetched_subtitles_${youtubeVideoId}`).catch(() => {});
       }
@@ -421,7 +415,6 @@ export default function YoutubePlayerScreen() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Reset high-water mark when the translation job identity changes.
-  // Keyed on video + language + genre so retranslation starts fresh.
   useEffect(() => {
     highWaterProgressRef.current = 0;
     secsPerSegmentRef.current = 0;
@@ -520,9 +513,6 @@ export default function YoutubePlayerScreen() {
     const interval = setInterval(() => {
       const activePhase =
         subtitlePhase === 'translating' || subtitlePhase === 'resuming' || isBgRunning;
-      // Do not arm staleness while a loading-stage label is showing.
-      // SBD / mergeFragments / model restore can legitimately take 10–20 s
-      // with zero onProgress ticks — this is not a stall.
       const stillInLoadingStage = loadingSubLabelRef.current !== '';
       if (!activePhase || lastProgressTimestampRef.current === 0) return;
       if (stillInLoadingStage) return;
@@ -698,9 +688,7 @@ export default function YoutubePlayerScreen() {
     };
   }, []);
 
-  // ── Genre restore from player store (set by HomeScreen before navigation) ───
-  // Fully synchronous — pendingGenre is already in the store before this
-  // component mounts or before youtubeVideoId changes, so no async wait needed.
+  // ── Genre restore from player store ──────────────────────────────────────
   useEffect(() => {
     const g = usePlayerStore.getState().pendingGenre ?? "general";
     currentVideoIdRef.current  = youtubeVideoId;
@@ -712,16 +700,11 @@ export default function YoutubePlayerScreen() {
   }, [youtubeVideoId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── BUG 4: bgResultApplied reset on videoId change ─────────────────────────
-  // Must run BEFORE handlePlayerReady fires and BEFORE the restore effect below.
-  // React runs effects in definition order for the same dep, so place this first.
   useEffect(() => {
     bgResultApplied.current      = false;
     autoFetchCompletedRef.current = false;
-    allSegmentsRef.current    = null;   // allow handleSubtitlesLoaded to run on re-entry
+    allSegmentsRef.current    = null;
 
-    // [FIX ISSUE1] If there is a stale BG task for a DIFFERENT video (e.g. the
-    // user navigated from one video to another while BG was running), cancel it
-    // so the new screen starts in FG mode instead of showing the BG banner.
     if (
       isBgRunning &&
       bgStatus?.videoId &&
@@ -737,9 +720,7 @@ export default function YoutubePlayerScreen() {
     (async () => {
       const result = await loadBgResult(youtubeVideoId);
       if (!result) return;
-      // BG still running: the bgStatus 'done' watcher will handle it
       if (isBgRunningRef.current) return;
-      // bgStatus watcher already handled it on this mount
       if (bgStatus?.status === 'done') return;
       if (Date.now() - result.completedAt > 86400000) {
         await clearBgResult(youtubeVideoId);
@@ -764,9 +745,7 @@ export default function YoutubePlayerScreen() {
     })();
   }, [youtubeVideoId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── BG 번역 완료 시 자동 자막 적용 (화면이 열려 있는 동안 완료된 경우) ────────
-  // Watch for BG status → 'done' while the screen is open.
-  // (The youtubeVideoId mount effect handles the case where BG finished BEFORE the screen opened.)
+  // ── BG 번역 완료 시 자동 자막 적용 ──────────────────────────────────────────
   useEffect(() => {
     if (bgStatus?.status !== 'done' || !youtubeVideoId) return;
     if (bgResultApplied.current) return;
@@ -781,11 +760,9 @@ export default function YoutubePlayerScreen() {
         original:   seg.original,
         translated: seg.translated,
       }));
-      // Cancel any in-flight FG job before applying BG result
       bgResultApplied.current = true;
       jobIdRef.current++;
       cancelledRef.current = true;
-      // BUG 3: reset FG refs so subsequent genre/language changes work correctly
       const bgFetchResult: SubtitleFetchResult = {
         segments: restored.map(s => ({ startTime: s.startTime, endTime: s.endTime, text: s.original })),
         language: result.language,
@@ -798,7 +775,7 @@ export default function YoutubePlayerScreen() {
       setSubtitleProgress(1);
       setTotalSegments(restored.length);
       setTranslatedCount(restored.length);
-      setTranslationEverCompleted(true); // [FIX BUG2] BG result fully applied
+      setTranslationEverCompleted(true);
       saveSubtitles(youtubeVideoId, result.language, selectedGenre, restored).catch(() => {});
       await clearBgResult(youtubeVideoId);
       console.log(`[YT_SCREEN] BG result auto-applied while screen open: ${restored.length} segs`);
@@ -819,15 +796,13 @@ export default function YoutubePlayerScreen() {
   };
 
   // ── throttled setSubtitles
-  // [Improvement 5] Accept the caller's jobId and re-check it when the RAF
-  // fires — the job may have been cancelled during the frame delay.
   const scheduleSetSubtitles = useCallback((subs: SubtitleSegment[], callerJobId: number) => {
     if (rafHandleRef.current !== null) {
       cancelAnimationFrame(rafHandleRef.current);
     }
     rafHandleRef.current = requestAnimationFrame(() => {
       rafHandleRef.current = null;
-      if (callerJobId !== jobIdRef.current) return; // stale — job was superseded
+      if (callerJobId !== jobIdRef.current) return;
       setSubtitles(subs);
     });
   }, [setSubtitles]);
@@ -835,9 +810,6 @@ export default function YoutubePlayerScreen() {
   // ── Smooth progress bar animation ─────────────────────────────────────
   const animateTo = useCallback((target: number) => {
     animTargetRef.current = target;
-    // If an animation loop is already running, only update the target.
-    // The running frame() closure reads animTargetRef.current on every tick
-    // so it will naturally converge to the new target without restarting.
     if (animFrameRef.current !== null) return;
 
     const duration  = 400;
@@ -863,10 +835,6 @@ export default function YoutubePlayerScreen() {
   }, []);
 
   // ── Segmented progress crawl ───────────────────────────────────────────
-  // Crawls animProgressRef from fromVal to toVal over duration ms.
-  // Throttled to one setState per 200ms to prevent update-depth loops.
-  // Guards: job identity → toVal ceiling → duration elapsed (in that order).
-  // onComplete fires only when duration elapses naturally (not on early exit).
   const startCrawl = useCallback((
     fromVal: number,
     toVal: number,
@@ -876,8 +844,6 @@ export default function YoutubePlayerScreen() {
   ) => {
     const crawlStart = performance.now();
     let crawlLastRender = 0;
-    // Ensure the effective start never falls below fromVal even if the ref
-    // hasn't committed its first frame yet (RAF timing race on slow devices).
     const effectiveStart = Math.max(fromVal, animProgressRef.current);
 
     const crawlFrame = () => {
@@ -885,10 +851,9 @@ export default function YoutubePlayerScreen() {
       const elapsed = now - crawlStart;
       const t       = Math.min(elapsed / duration, 1);
 
-      // Guards — in this exact order, no code before them
-      if (jobId !== jobIdRef.current)             return; // job superseded
-      if (animProgressRef.current > toVal)        return; // real progress took over
-      if (t >= 1)                                 { onComplete?.(); return; } // elapsed
+      if (jobId !== jobIdRef.current)             return;
+      if (animProgressRef.current > toVal)        return;
+      if (t >= 1)                                 { onComplete?.(); return; }
 
       const value = effectiveStart + (toVal - effectiveStart) * t;
 
@@ -960,8 +925,6 @@ export default function YoutubePlayerScreen() {
     lastCompletedRef.current   = 0;
     secsPerSegmentRef.current  = 0;
     setRemainingSecs(null);
-    // Only clear for fresh jobs — resume jobs keep their
-    // "⏳ 이전 번역 이어서 준비 중..." label visible through model load.
     if (!isResume) setLoadingLabel('');
 
     setLoadingLabel('🔄 모델 로딩 중...');
@@ -971,48 +934,31 @@ export default function YoutubePlayerScreen() {
     if (isResume) {
       setLoadingLabel('⏳ 이전 번역 복원 중...');
     } else {
-      // Show analysis label immediately — no await, UI must respond instantly.
       setLoadingLabel('🧠 문장 분석 중...');
 
-      // Non-blocking probe: a gemma checkpoint may exist even when
-      // existingTranslations is empty (checkpoint survived but DB partial cache
-      // was cleared). The engine will resume internally — show the correct label.
       const jobIdAtProbe = myJobId;
       AsyncStorage.getItem(`gemma_checkpoint_v4_${youtubeVideoId ?? ''}`)
         .then(v => {
           if (!v) return;
-          // Verify job is still valid before touching UI.
           if (jobIdAtProbe !== jobIdRef.current) return;
           setLoadingLabel('⏳ 이전 번역 복원 중...');
         })
         .catch(() => {});
     }
 
-    // 10% visual anchor — model loaded, translation imminent.
-    // Placed BEFORE hasGemma check: if model failed to load, this must NOT fire.
     if (!isResume) {
-      // Step 1: start smooth 0 → 12% animation.
-      // animateTo is async (RAF-based) and owns the visual progress update.
       animateTo(0.12);
 
       const crawlStartJobId = myJobId;
 
       requestAnimationFrame(() => {
-        // Guard: job may have been cancelled between animateTo() and this frame.
         if (crawlStartJobId !== jobIdRef.current) return;
 
-        // Compute a single authoritative startFrom that both the ref and
-        // startCrawl's fromVal argument agree on.
-        // Math.max ensures we never start the crawl below 0.12 even if
-        // animateTo hasn't committed its first frame yet (RAF timing race).
         const startFrom = Math.max(animProgressRef.current, 0.12);
         if (animProgressRef.current < startFrom) {
           animProgressRef.current = startFrom;
-          // Do NOT call setSubtitleProgress here — animateTo owns the render.
         }
 
-        // Phase 2: startFrom → 15% over 8 s (SBD batches)
-        // Phase 3: 15%      → 20% over 5 s (mergeFragments / group confirmation)
         startCrawl(startFrom, 0.15, 8_000, myJobId, () => {
           startCrawl(0.15, 0.20, 5_000, myJobId);
         });
@@ -1023,7 +969,7 @@ export default function YoutubePlayerScreen() {
       setPhase("done");
       setRemainingSecs(null);
       animateTo(1);
-      setTranslationEverCompleted(true); // [FIX BUG2]
+      setTranslationEverCompleted(true);
       saveSubtitles(youtubeVideoId ?? "default", useLang, useGenre, originalOnly).catch(() => {});
       return;
     }
@@ -1049,7 +995,7 @@ export default function YoutubePlayerScreen() {
       setRemainingSecs(null);
       animateTo(1);
       setTranslatedCount(result.segments.length);
-      setTranslationEverCompleted(true); // [FIX BUG2]
+      setTranslationEverCompleted(true);
       saveSubtitles(youtubeVideoId ?? "default", useLang, useGenre, originalOnly).catch(() => {});
       return;
     }
@@ -1070,15 +1016,14 @@ export default function YoutubePlayerScreen() {
             setLoadingLabel('');
           }
           if (myJobId !== jobIdRef.current) return;
-          if (isBgRunningRef.current) return; // BG started mid-translation — stop updating UI
+          if (isBgRunningRef.current) return;
 
           const totalDone = alreadyDoneCount + completed;
-          const totalAll  = total;   // authoritative value from translateSegments
+          const totalAll  = total;
           setTranslatedCount(totalDone);
           const newProgress = totalAll > 0 ? totalDone / totalAll : 0;
           if (newProgress > animProgressRef.current) animateTo(newProgress);
 
-          // Update rolling rate (exponential moving average, α = 0.3)
           const now = performance.now();
           if (lastCompletedRef.current > 0 && completed > lastCompletedRef.current) {
             const delta   = completed - lastCompletedRef.current;
@@ -1174,13 +1119,13 @@ export default function YoutubePlayerScreen() {
       setRemainingSecs(null);
       animateTo(1);
       setTranslatedCount(result.segments.length);
-      setTranslationEverCompleted(true); // [FIX BUG2] FG translation fully finished
+      setTranslationEverCompleted(true);
 
       console.log(`[TRANSLATE] ✓ job=${myJobId} complete: ${finalSubs.length} segs`);
       saveSubtitles(youtubeVideoId ?? "default", useLang, useGenre, finalSubs).catch(() => {});
 
     } catch (e: any) {
-      if (e?.message === 'INFERENCE_CANCELLED') return; // clean exit — not an error
+      if (e?.message === 'INFERENCE_CANCELLED') return;
       if (myJobId !== jobIdRef.current) return;
       console.error("[YT_SCREEN] 번역 오류:", e);
       setPhase("error");
@@ -1195,7 +1140,6 @@ export default function YoutubePlayerScreen() {
     segments: TimedTextSegment[],
     language: string,
   ) => {
-    // [BUG FIX 4] allSegmentsRef에 sentinel('done') 세팅된 경우: 캐시 히트로 이미 완료
     if (allSegmentsRef.current !== null) return;
 
     if (bgResultApplied.current) {
@@ -1224,14 +1168,9 @@ export default function YoutubePlayerScreen() {
 
     console.log(`[YT_SCREEN] 전체 세그먼트 수신: ${segments.length}개, lang=${language}`);
 
-    // Always store segments — needed by language/genre change handlers and BG
-    // result merge even when BG is running.  Must happen before any early return.
     allSegmentsRef.current  = result;
     lastFetchResult.current = result;
 
-    // [FIX] If BG is translating: show the raw (original-language) segments so
-    // the user sees something in the subtitle overlay while BG works.
-    // Do NOT start FG translation — BG will auto-apply when it finishes.
     if (isBgRunningRef.current) {
       console.log('[YT_SCREEN] BG translation running — segments stored, showing raw subtitles');
       const rawSubs: SubtitleSegment[] = result.segments.map((seg) => ({
@@ -1239,7 +1178,7 @@ export default function YoutubePlayerScreen() {
         startTime:  seg.startTime,
         endTime:    seg.endTime,
         original:   seg.text,
-        translated: seg.text, // display original-language text while BG translates
+        translated: seg.text,
       }));
       setSubtitles(rawSubs);
       return;
@@ -1258,14 +1197,11 @@ export default function YoutubePlayerScreen() {
   const handlePlayerReady = useCallback(async () => {
     if (!youtubeVideoId) return;
 
-    // ── Step 1: capture videoId before any await ──────────────────────────
     const videoIdAtStart = youtubeVideoId;
 
-    // ── Step 2: dedup guard — only the first call per video should proceed ─
     if (playerReadyOnceRef.current) return;
     playerReadyOnceRef.current = true;
 
-    // ── Step 3: wait for genre to be restored from AsyncStorage ───────────
     if (!genreReadyRef.current) {
       await new Promise<void>((resolve) => {
         const CHECK_INTERVAL_MS = 20;
@@ -1284,21 +1220,12 @@ export default function YoutubePlayerScreen() {
       });
     }
 
-    // ── Step 4: stale check after genre await ─────────────────────────────
     if (currentVideoIdRef.current !== videoIdAtStart) return;
 
-    // ── Step 5: alias the resolved genre value ────────────────────────────
     const genre = genreValueRef.current;
 
-    // Probe gemma checkpoint so user sees a resume hint within
-    // milliseconds of returning to the screen — before any network
-    // request or model load begins.
     AsyncStorage.getItem(`gemma_checkpoint_v4_${youtubeVideoId}`)
       .then(raw => {
-        // Guard: only set if nothing has written a label yet.
-        // Prevents a race where the cache-miss fetch label (📡) has
-        // already been written before this async probe resolves,
-        // which would cause an incorrect ⏳ → 📡 → ⏳ overwrite sequence.
         if (raw && loadingSubLabelRef.current === '') {
           setLoadingLabel('⏳ 이전 번역 이어서 준비 중...');
           setPhase('resuming');
@@ -1307,8 +1234,6 @@ export default function YoutubePlayerScreen() {
       .catch(() => {});
 
     if (isBgRunningRef.current) {
-      // BG is running — try to grab a completed result immediately before the next poll.
-      // Handles the race: BG finishes at t=0, user returns at t=100ms, next poll at t=500ms.
       const earlyResult = await loadBgResult(youtubeVideoId);
       if (earlyResult && !bgResultApplied.current) {
         const restored: SubtitleSegment[] = earlyResult.segments.map((seg, i) => ({
@@ -1326,16 +1251,14 @@ export default function YoutubePlayerScreen() {
         setSubtitleProgress(1);
         setTotalSegments(restored.length);
         setTranslatedCount(restored.length);
-        setTranslationEverCompleted(true); // [FIX BUG2] BG result applied on ready
+        setTranslationEverCompleted(true);
         saveSubtitles(youtubeVideoId, earlyResult.language, genre, restored).catch(() => {});
         await clearBgResult(youtubeVideoId);
         if (currentVideoIdRef.current !== videoIdAtStart) return;
         return;
       }
-      // BG still in progress — trigger subtitle fetch so handleSubtitlesLoaded
-      // can store segments and show raw subtitles while BG translates.
       setPhase('idle');
-      ytPlayerRef.current?.fetchSubtitles(); // BG path — no label
+      ytPlayerRef.current?.fetchSubtitles();
       return;
     }
 
@@ -1343,7 +1266,6 @@ export default function YoutubePlayerScreen() {
 
     if (currentVideoIdRef.current !== videoIdAtStart) return;
 
-    // Re-check ref after the async gap — BG may have started while we awaited
     if (isBgRunningRef.current) {
       setPhase('idle');
       return;
@@ -1370,17 +1292,14 @@ export default function YoutubePlayerScreen() {
             .map((s) => [s.id, s.translated])
         );
 
-        // partial 캐시: allSegmentsRef를 null로 유지하여 fetchSubtitles 허용
         allSegmentsRef.current = null;
         if (!autoFetchCompletedRef.current) {
           setLoadingLabel('⏳ 이전 번역 이어서 준비 중...');
-          setPhase("resuming");                              // ref updated synchronously
-          ytPlayerRef.current?.fetchSubtitles();             // must come AFTER setPhase
+          setPhase("resuming");
+          ytPlayerRef.current?.fetchSubtitles();
         } else {
           setPhase("resuming");
         }
-        // else: auto-fetch already ran — handleSubtitlesLoaded will pick up
-        // partialTranslationsRef and resume translation on its own
       } else {
         if (isBgRunningRef.current) {
           setPhase('idle');
@@ -1392,9 +1311,6 @@ export default function YoutubePlayerScreen() {
         }
         console.log(`[CACHE] Full cache hit → auto-start FG translation (${cached.translatedCount}개)`);
 
-        // Pre-load all cached translations into partialTranslationsRef so
-        // translateFromResult can skip segments that are already done (fast path).
-        // Clear the sentinel so handleSubtitlesLoaded runs the normal translation flow.
         partialTranslationsRef.current = new Map(
           cached.segments
             .filter((s: any) => s.translated && s.translated.trim() !== "")
@@ -1409,8 +1325,8 @@ export default function YoutubePlayerScreen() {
         );
         if (!autoFetchCompletedRef.current) {
           setLoadingLabel('⏳ 이전 번역 이어서 준비 중...');
-          setPhase("resuming");                              // ref updated synchronously
-          ytPlayerRef.current?.fetchSubtitles();             // must come AFTER setPhase
+          setPhase("resuming");
+          ytPlayerRef.current?.fetchSubtitles();
         } else {
           setPhase("resuming");
         }
@@ -1426,15 +1342,10 @@ export default function YoutubePlayerScreen() {
     }
 
     if (autoFetchCompletedRef.current) {
-      // Auto-fetch already completed and handleSubtitlesLoaded has run.
-      // Translation is already in progress — do not overwrite the phase
-      // or issue a redundant fetch.
       console.log("[CACHE] Cache miss — auto-fetch already completed, skipping");
       return;
     }
     console.log("[CACHE] Cache miss → start fetch");
-    // Cache miss — fetch is actually starting, safe to show the label.
-    // FIX 2: guard against checkpoint probe having already set resuming phase.
     if (subtitlePhaseRef.current !== 'resuming') {
       setLoadingLabel('📡 자막 가져오는 중...');
     }
@@ -1444,7 +1355,6 @@ export default function YoutubePlayerScreen() {
 
   // ── 뒤로가기 ─────────────────────────────────────────────────────────────
   const handleBack = useCallback(async () => {
-    // [BUG 5] Same dual-guard as unmount — don't cancel FG inference if BG owns it.
     const bgStBack = bgStatusRef.current?.status;
     const bgActiveBack = isBgRunningRef.current
       || bgStBack === 'fetching'
@@ -1504,13 +1414,20 @@ export default function YoutubePlayerScreen() {
     ytPlayerRef.current?.seekTo(t);
   }, [setCurrentTime, bumpSeek]);
 
+  // ── 검색 모달용 seek 핸들러 ───────────────────────────────────────────────
+  const handleSearchSeek = useCallback((time: number) => {
+    setCurrentTime(time);
+    bumpSeek();
+    ytPlayerRef.current?.seekTo(time);
+  }, [setCurrentTime, bumpSeek]);
+
   // ── 수동 재시도 ───────────────────────────────────────────────────────────
   const handleRetrySubtitles = useCallback(() => {
     jobIdRef.current++;
     cancelledRef.current = true;
     bgResultApplied.current = false;
-    highWaterProgressRef.current = 0; // [BUG 6]
-    setTranslationEverCompleted(false); // [FIX BUG2]
+    highWaterProgressRef.current = 0;
+    setTranslationEverCompleted(false);
     if (rafHandleRef.current !== null) {
       cancelAnimationFrame(rafHandleRef.current);
       rafHandleRef.current = null;
@@ -1538,7 +1455,7 @@ export default function YoutubePlayerScreen() {
     }, 300);
   }, [clearSubtitles, setLoadingLabel]);
 
-  // ── 자막 불러오기 중지 (fetching 단계에서 취소, retry 없음) ─────────────────
+  // ── 자막 불러오기 중지 ────────────────────────────────────────────────────
   const handleCancelFetch = useCallback(() => {
     jobIdRef.current++;
     cancelledRef.current  = true;
@@ -1551,8 +1468,8 @@ export default function YoutubePlayerScreen() {
     setSelectedGenre(genre);
     setGenreModalVisible(false);
     bgResultApplied.current = false;
-    highWaterProgressRef.current = 0; // [BUG 6]
-    setTranslationEverCompleted(false); // [FIX BUG2]
+    highWaterProgressRef.current = 0;
+    setTranslationEverCompleted(false);
 
     if (lastFetchResult.current && lastFetchResult.current.segments.length > 0) {
       clearSubtitles();
@@ -1567,8 +1484,8 @@ export default function YoutubePlayerScreen() {
     update({ targetLanguage: langCode });
     setLangModalVisible(false);
     bgResultApplied.current = false;
-    highWaterProgressRef.current = 0; // [BUG 6]
-    setTranslationEverCompleted(false); // [FIX BUG2]
+    highWaterProgressRef.current = 0;
+    setTranslationEverCompleted(false);
 
     if (!youtubeVideoId) return;
 
@@ -1584,17 +1501,10 @@ export default function YoutubePlayerScreen() {
   const startBgTranslation = useCallback(async () => {
     if (!youtubeVideoId) return;
 
-    // [BUG 2] Set the ref synchronously — do NOT rely on the useEffect sync which
-    // runs after the next render commit.  Any async code already in-flight (e.g.
-    // handlePlayerReady awaiting loadSubtitles) will see the true value immediately.
     isBgRunningRef.current = true;
 
-    // Cancel FG synchronously BEFORE any await so no FG work slips through
     jobIdRef.current++;
     cancelledRef.current = true;
-    // [BUG A] Use cancelFgInference (not cancelCurrentInference) so the counter
-    // re-alignment guarantees the upcoming BG enqueueInference call is never
-    // treated as stale, regardless of how many prior cancels happened.
     cancelFgInference();
     if (rafHandleRef.current !== null) {
       cancelAnimationFrame(rafHandleRef.current);
@@ -1605,10 +1515,9 @@ export default function YoutubePlayerScreen() {
     setTranslatedCount(0);
     setTotalSegments(0);
     highWaterProgressRef.current = 0;
-    setTranslationEverCompleted(false); // [FIX BUG2] BG started — reset completed flag
+    setTranslationEverCompleted(false);
     clearSubtitles();
 
-    // Cache any already-fetched FG subtitles so BG can skip the network round-trip
     if (allSegmentsRef.current?.segments?.length) {
       try {
         await AsyncStorage.setItem(
@@ -1625,11 +1534,9 @@ export default function YoutubePlayerScreen() {
         language:   targetLanguage,
         genre:      selectedGenre,
       });
-      // Only clear phase after BG is confirmed started — prevents flicker when
-      // transitioning from phase='done' or phase='translating'.
       setPhase('idle');
     } catch (e: any) {
-      isBgRunningRef.current = false; // rollback — BG never started
+      isBgRunningRef.current = false;
       setPhase('error');
       Alert.alert('오류', e?.message ?? '백그라운드 서비스를 시작할 수 없습니다.');
     }
@@ -1649,11 +1556,6 @@ export default function YoutubePlayerScreen() {
       );
       if (granted !== PermissionsAndroid.RESULTS.GRANTED) return;
     }
-    // [FIX ISSUE2] Request battery optimization exemption so the OS does not
-    // suspend the foreground service on aggressive OEM ROMs. The native method
-    // opens the system dialog if the exemption is not already granted, and also
-    // schedules the WorkManager watchdog. We fire-and-forget (no await) so the
-    // user flow continues immediately.
     if (Platform.OS === 'android') {
       NativeModules.TranslationService?.checkAndRequestBatteryOptimization?.()
         .catch(() => {});
@@ -1706,23 +1608,15 @@ export default function YoutubePlayerScreen() {
     return '#3b82f6';
   };
 
-  // BUG 2: while BG is running, treat phase as 'idle' everywhere in the render
-  // so the chip/pill/save button never show a stale 'done' state.
   const displayPhase: SubtitlePhase = isBgRunning ? 'idle' : currentPhase;
 
-  // Unified progress — takes the higher of the raw value and the high-water mark
-  // so the bar never jumps backward mid-job.
   const rawProgress = isBgRunning
     ? (bgStatus?.progress ?? 0)
     : (displayPhase === 'done' ? 1 : subtitleProgress);
 
-  // Safe read during render — ref mutation happens in effect below
   const barProgress = Math.max(rawProgress, highWaterProgressRef.current);
-  // [FIX BUG3] Use < 0.02 threshold (not === 0) so intermediate progress saves
-  // (0.01 after lock, 0.04 after fetch) transition the shimmer to a real bar.
   const showShimmer = barProgress < 0.02 && (isBgRunning || (displayPhase !== 'idle' && displayPhase !== 'done'));
 
-  // Update high-water mark outside render path (render-phase mutation is unsafe in StrictMode)
   useEffect(() => {
     if (rawProgress > highWaterProgressRef.current) {
       highWaterProgressRef.current = rawProgress;
@@ -1801,7 +1695,7 @@ export default function YoutubePlayerScreen() {
         </View>
       </View>
 
-      {/* ── [FIX ISSUE2] 시간 표시 — 플레이어 바로 아래 ──────────────────────── */}
+      {/* ── 시간 표시 ────────────────────────────────────────────────────── */}
       {!isLandscape && (
         <View style={styles.timeSection}>
           <Text style={styles.timeText}>{fmt(currentTime)}</Text>
@@ -1809,9 +1703,7 @@ export default function YoutubePlayerScreen() {
         </View>
       )}
 
-      {/* ── [FIX ISSUE4] Unified progress card — FG active phases ────────── */}
-      {/* Replaces the old small pill for fetching/translating/resuming.      */}
-      {/* Matches the BG banner layout: large % · title · sub-text · cancel   */}
+      {/* ── FG 진행 카드 ──────────────────────────────────────────────────── */}
       {!isLandscape && !isBgRunning && (
         displayPhase === 'fetching' ||
         displayPhase === 'translating' ||
@@ -1851,7 +1743,7 @@ export default function YoutubePlayerScreen() {
         </View>
       )}
 
-      {/* Error / no-subtitles / fallback — keep compact pill for these states */}
+      {/* ── 에러/no-subtitles/whisper 컴팩트 pill ───────────────────────── */}
       {!isLandscape && !isBgRunning && (
         displayPhase === 'error' ||
         displayPhase === 'no_subtitles' ||
@@ -1883,7 +1775,7 @@ export default function YoutubePlayerScreen() {
         </View>
       )}
 
-      {/* ── [FIX ISSUE4] Background translation banner ───────────────────── */}
+      {/* ── BG 번역 진행 카드 ─────────────────────────────────────────────── */}
       {!isLandscape && isBgRunning && (
         <Animated.View style={[progressCard.card, { opacity: bannerOpacity }]}>
           <Text style={progressCard.pct}>
@@ -1942,7 +1834,7 @@ export default function YoutubePlayerScreen() {
         </View>
       )}
 
-      {/* ── [FIX ISSUE2] 시크바 — 번역 카드 바로 위, 컨트롤 버튼 바로 위 ──── */}
+      {/* ── 시크바 ────────────────────────────────────────────────────────── */}
       {!isLandscape && (
         <View style={styles.seekSection}>
           {(isBgRunning || (currentPhase !== 'idle' && currentPhase !== 'done')) && (
@@ -1979,7 +1871,7 @@ export default function YoutubePlayerScreen() {
         </View>
       )}
 
-      {/* ── 컨트롤 바 1행 ─────────────────────────────────────────────────── */}
+      {/* ── 컨트롤 바 ─────────────────────────────────────────────────────── */}
       {!isLandscape && <View style={styles.controlBar}>
         <TouchableOpacity
           style={styles.playBtn}
@@ -2021,6 +1913,15 @@ export default function YoutubePlayerScreen() {
           <Text style={styles.chipBtnText}>Aa</Text>
         </TouchableOpacity>
 
+        {/* 자막 검색 버튼 */}
+        <TouchableOpacity
+          style={styles.chipBtn}
+          onPress={() => setSearchModalVisible(true)}
+          activeOpacity={0.75}
+        >
+          <Search size={15} color="#ccc" />
+        </TouchableOpacity>
+
         {Platform.OS === 'android' && (
           <TouchableOpacity
             style={[
@@ -2041,8 +1942,6 @@ export default function YoutubePlayerScreen() {
           </TouchableOpacity>
         )}
 
-        {/* [FIX BUG2] Require translationEverCompleted so save button never appears
-            on a stale cache restore before BG state is confirmed. */}
         {displayPhase === "done" && !isBgRunning && subtitles.length > 0 && translationEverCompleted && (
           <TouchableOpacity
             style={[
@@ -2127,6 +2026,14 @@ export default function YoutubePlayerScreen() {
           translated: s.translated,
         }))}
       />
+
+      <VideoSearchModal
+        visible={searchModalVisible}
+        onClose={() => setSearchModalVisible(false)}
+        subtitles={subtitles}
+        currentTime={currentTime}
+        onSeek={handleSearchSeek}
+      />
     </Wrapper>
   );
 }
@@ -2153,7 +2060,6 @@ const styles = StyleSheet.create({
     zIndex: 10,
   },
 
-  // [FIX ISSUE2] Time labels stay directly under the video player
   timeSection: {
     flexDirection: 'row', justifyContent: 'space-between',
     backgroundColor: '#111',
@@ -2161,7 +2067,6 @@ const styles = StyleSheet.create({
   },
   timeText: { color: '#666', fontSize: 11, fontVariant: ['tabular-nums'] },
 
-  // [FIX ISSUE2] Seek bar moved above the control buttons (below translation card)
   seekSection: {
     backgroundColor: '#111',
     paddingHorizontal: 14,
@@ -2267,9 +2172,6 @@ const pillStyles = StyleSheet.create({
   retryBtnText: { color: '#60a5fa', fontSize: 11, fontWeight: '600' },
 });
 
-// [FIX ISSUE4] Unified progress card — same visual style for both FG and BG.
-// FG shows "번역 진행 중", BG shows "백그라운드 번역 진행 중".
-// Matches the layout: large % · title+sub · cancel button.
 const progressCard = StyleSheet.create({
   card: {
     flexDirection: 'row',

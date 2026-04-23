@@ -296,7 +296,7 @@ export default function SettingsScreen() {
       <Section title={t("settings.timingOffset", { offset: settings.timingOffset })}>
         <Slider
           minimumValue={-5}
-          maximumValue={0}
+          maximumValue={1.5}
           step={0.1}
           value={settings.timingOffset}
           onValueChange={(v) => update({ timingOffset: Math.round(v * 10) / 10 })}

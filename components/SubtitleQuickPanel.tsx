@@ -24,7 +24,16 @@ interface SubtitleQuickPanelProps {
 export function SubtitleQuickPanel({ visible, onClose }: SubtitleQuickPanelProps) {
   const subtitleStyle    = useSettingsStore((s) => s.subtitleStyle ?? "outline");
   const subtitleFontSize = useSettingsStore((s) => s.subtitleFontSize);
+  const timingOffset     = useSettingsStore((s) => s.timingOffset);
   const update           = useSettingsStore((s) => s.update);
+
+  const offsetLabel = timingOffset === 0
+    ? "0초"
+    : timingOffset > 0
+      ? `+${timingOffset.toFixed(1)}초`
+      : `${timingOffset.toFixed(1)}초`;
+
+  const offsetColor = timingOffset === 0 ? "#60a5fa" : timingOffset > 0 ? "#34d399" : "#f87171";
 
   return (
     <Modal
@@ -97,6 +106,41 @@ export function SubtitleQuickPanel({ visible, onClose }: SubtitleQuickPanelProps
               />
               <Text style={[styles.sliderHint, styles.sliderHintLg]}>A</Text>
             </View>
+          </View>
+
+          {/* 타이밍 오프셋 슬라이더 */}
+          <View style={styles.sliderSection}>
+            <View style={styles.sliderHeader}>
+              <View>
+                <Text style={styles.sliderLabel}>자막 타이밍 오프셋</Text>
+                <Text style={styles.sliderSubLabel}>자막이 늦으면 -, 빠르면 +</Text>
+              </View>
+              <Text style={[styles.sliderValue, { color: offsetColor }]}>{offsetLabel}</Text>
+            </View>
+            <View style={styles.sliderRow}>
+              <Text style={styles.sliderHint}>-5</Text>
+              <Slider
+                style={styles.slider}
+                minimumValue={-5}
+                maximumValue={2}
+                step={0.1}
+                value={timingOffset}
+                onValueChange={(v) => update({ timingOffset: Math.round(v * 10) / 10 })}
+                minimumTrackTintColor="#f87171"
+                maximumTrackTintColor="#333"
+                thumbTintColor="#fff"
+              />
+              <Text style={styles.sliderHint}>+2</Text>
+            </View>
+            {timingOffset !== 0 && (
+              <TouchableOpacity
+                style={styles.resetBtn}
+                onPress={() => update({ timingOffset: 0 })}
+                activeOpacity={0.75}
+              >
+                <Text style={styles.resetBtnText}>↺ 0초로 초기화</Text>
+              </TouchableOpacity>
+            )}
           </View>
 
           {/* 자막 편집 안내 */}
@@ -229,6 +273,11 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: "600",
   },
+  sliderSubLabel: {
+    color: "#555",
+    fontSize: 11,
+    marginTop: 2,
+  },
   sliderValue: {
     color: "#60a5fa",
     fontSize: 13,
@@ -250,6 +299,22 @@ const styles = StyleSheet.create({
   },
   sliderHintLg: {
     fontSize: 17,
+  },
+
+  // ── 초기화 버튼 ────────────────────────────────────────────────────────────
+  resetBtn: {
+    alignSelf: "center",
+    paddingHorizontal: 14,
+    paddingVertical: 5,
+    borderRadius: 8,
+    backgroundColor: "#2a2a2a",
+    borderWidth: 1,
+    borderColor: "#3a3a3a",
+  },
+  resetBtnText: {
+    color: "#888",
+    fontSize: 11,
+    fontWeight: "600",
   },
 
   editHint: {

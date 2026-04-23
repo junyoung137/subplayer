@@ -25,6 +25,7 @@ import { VideoPlayer } from "../components/VideoPlayer";
 import { SubtitleOverlay } from "../components/SubtitleOverlay";
 import { SubtitleQuickPanel } from "../components/SubtitleQuickPanel";
 import { SubtitleSaveModal } from "../components/SubtitleSaveModal";
+import { VideoSearchModal } from "../components/VideoSearchModal";
 import { useRetranslate } from "../hooks/useRetranslate";
 import { useBackgroundTranslation } from "../hooks/useBackgroundTranslation";
 import {
@@ -43,6 +44,7 @@ import {
   XCircle,
   Download,
   Layers,
+  Search,
 } from "lucide-react-native";
 
 // ── expo-video-thumbnails (optional) ─────────────────────────────────────────
@@ -103,6 +105,8 @@ export default function PlayerScreen() {
   const subtitles   = usePlayerStore((s) => s.subtitles);
   const setSubtitles   = usePlayerStore((s) => s.setSubtitles);
   const clearSubtitles = usePlayerStore((s) => s.clearSubtitles);
+  const setCurrentTime = usePlayerStore((s) => s.setCurrentTime);
+  const bumpSeek       = usePlayerStore((s) => s.bumpSeek);
 
   const subtitleMode   = useSettingsStore((s) => s.subtitleMode);
   const targetLanguage = useSettingsStore((s) => s.targetLanguage);
@@ -143,6 +147,7 @@ export default function PlayerScreen() {
 
   const [subtitlePanelVisible, setSubtitlePanelVisible] = useState(false);
   const [saveModalVisible,     setSaveModalVisible]     = useState(false);
+  const [searchModalVisible,   setSearchModalVisible]   = useState(false);
   const [speedIdx,   setSpeedIdx]   = useState(2);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isCapturing,  setIsCapturing]  = useState(false);
@@ -177,9 +182,6 @@ export default function PlayerScreen() {
   }, []);
 
   // ── [FIX 3-B] SQLite/BG 결과 로드 중복 실행 방지 ──────────────────────────
-  // 문제: useVideoProcessor가 SQLite에 저장 → PlayerScreen이 cacheKey effect에서
-  //       loadSubtitles()로 읽어 setSubtitles() → 재렌더 → effect 재실행 루프
-  // 해결: 이 cacheKey에 대해 이미 로드 완료한 경우 effect 내부에서 early return
   const subtitleLoadedRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -192,14 +194,11 @@ export default function PlayerScreen() {
     bgPrevProgressRef.current = 0; bgPrevTimestampRef.current = 0;
     bgSecsPerPctRef.current = 0; bgUpdateCountRef.current = 0;
     setBgRemainingSecs(null);
-    // cacheKey가 바뀌면 로드 완료 플래그도 초기화
     subtitleLoadedRef.current = null;
   }, [cacheKey]);
 
   useEffect(() => {
     if (!cacheKey) return;
-    // [FIX 3-B] 이미 이 cacheKey에 대해 로드 완료했으면 재실행 방지
-    // setSubtitles → 재렌더 → cacheKey effect 재실행 루프를 차단
     if (subtitleLoadedRef.current === cacheKey) return;
 
     (async () => {
@@ -214,7 +213,7 @@ export default function PlayerScreen() {
             original: seg.original, translated: seg.translated,
           }));
           bgResultApplied.current = true;
-          subtitleLoadedRef.current = cacheKey; // 로드 완료 표시
+          subtitleLoadedRef.current = cacheKey;
           setSubtitles(restored);
           setSubtitlePhase("done"); setSubtitleProgress(1); setTranslationEverCompleted(true);
           saveSubtitles(cacheKey, targetLanguage, "local", restored).catch(() => {});
@@ -224,7 +223,7 @@ export default function PlayerScreen() {
       }
       const cached = await loadSubtitles(cacheKey, targetLanguage, "local");
       if (!cached) return;
-      subtitleLoadedRef.current = cacheKey; // 로드 완료 표시
+      subtitleLoadedRef.current = cacheKey;
       setSubtitles(cached.segments);
       if (!cached.isPartial) {
         setSubtitlePhase("done"); setSubtitleProgress(1); setTranslationEverCompleted(true);
@@ -246,7 +245,7 @@ export default function PlayerScreen() {
         original: seg.original, translated: seg.translated,
       }));
       bgResultApplied.current = true;
-      subtitleLoadedRef.current = cacheKey; // 로드 완료 표시
+      subtitleLoadedRef.current = cacheKey;
       setSubtitles(restored);
       setSubtitlePhase("done"); setSubtitleProgress(1); setTranslationEverCompleted(true);
       saveSubtitles(cacheKey, targetLanguage, "local", restored).catch(() => {});
@@ -415,6 +414,12 @@ export default function PlayerScreen() {
     await startBgTranslation();
   }, [isBgRunning, cancelTranslation, startBgTranslation]);
 
+  // ── 검색 모달용 seek 핸들러 ───────────────────────────────────────────────
+  const handleSearchSeek = useCallback((time: number) => {
+    setCurrentTime(time);
+    bumpSeek();
+  }, [setCurrentTime, bumpSeek]);
+
   const captureFrame = useCallback(async () => {
     if (!videoUri || !getThumbnailAsync || isCapturing) return;
     setIsCapturing(true);
@@ -481,6 +486,14 @@ export default function PlayerScreen() {
       <TouchableOpacity style={styles.chipBtn} onPress={() => setSubtitlePanelVisible(true)} activeOpacity={0.75}>
         <Text style={styles.chipBtnText}>Aa</Text>
       </TouchableOpacity>
+      {/* 자막 검색 버튼 (가로 모드) */}
+      <TouchableOpacity
+        style={styles.chipBtn}
+        onPress={() => setSearchModalVisible(true)}
+        activeOpacity={0.75}
+      >
+        <Search size={15} color="#ccc" />
+      </TouchableOpacity>
       {getThumbnailAsync && (
         <TouchableOpacity
           style={[styles.chipBtn, isCapturing && styles.chipBtnDisabled]}
@@ -518,6 +531,13 @@ export default function PlayerScreen() {
           visible={saveModalVisible} onClose={() => setSaveModalVisible(false)}
           videoId={cacheKey ?? "local"} videoTitle={videoName ?? "video"}
           subtitles={subtitles.map((s) => ({ startTime: s.startTime, endTime: s.endTime, original: s.original, translated: s.translated }))}
+        />
+        <VideoSearchModal
+          visible={searchModalVisible}
+          onClose={() => setSearchModalVisible(false)}
+          subtitles={subtitles}
+          currentTime={currentTime}
+          onSeek={handleSearchSeek}
         />
       </View>
     );
@@ -638,6 +658,14 @@ export default function PlayerScreen() {
           <TouchableOpacity style={styles.chipBtn} onPress={() => setSubtitlePanelVisible(true)} activeOpacity={0.75}>
             <Text style={styles.chipBtnText}>Aa</Text>
           </TouchableOpacity>
+          {/* 자막 검색 버튼 (세로 모드) */}
+          <TouchableOpacity
+            style={styles.chipBtn}
+            onPress={() => setSearchModalVisible(true)}
+            activeOpacity={0.75}
+          >
+            <Search size={15} color="#ccc" />
+          </TouchableOpacity>
           <TouchableOpacity style={styles.chipBtn} onPress={toggleFullscreen} activeOpacity={0.75}>
             {isFullscreen ? <Minimize2 size={15} color="#ccc" /> : <Maximize2 size={15} color="#ccc" />}
           </TouchableOpacity>
@@ -694,6 +722,13 @@ export default function PlayerScreen() {
         visible={saveModalVisible} onClose={() => setSaveModalVisible(false)}
         videoId={cacheKey ?? "local"} videoTitle={videoName ?? "video"}
         subtitles={subtitles.map((s) => ({ startTime: s.startTime, endTime: s.endTime, original: s.original, translated: s.translated }))}
+      />
+      <VideoSearchModal
+        visible={searchModalVisible}
+        onClose={() => setSearchModalVisible(false)}
+        subtitles={subtitles}
+        currentTime={currentTime}
+        onSeek={handleSearchSeek}
       />
     </SafeAreaView>
   );
