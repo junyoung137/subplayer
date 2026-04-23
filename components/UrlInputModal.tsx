@@ -1,12 +1,11 @@
 /**
- * UrlInputModal (v2-fix-2)
+ * UrlInputModal (v2-fix-3)
  *
- * [FIX] ensureFileUri:
- *   DocumentPicker가 file:///...cache/DocumentPicker/... URI를 주는 경우,
- *   file://로 시작해도 앱 소유 디렉토리가 아니므로 Android가 언제든 삭제할 수 있음.
- *   → cache/DocumentPicker/ 경로는 반드시 앱 소유 cacheDirectory/videos/ 로 복사.
- *   → content:// 도 동일하게 복사.
- *   → FileSystem.cacheDirectory 나 documentDirectory 소속 파일만 그대로 사용.
+ * [FIX] 키보드 가림 문제
+ *   - Modal 안을 KeyboardAvoidingView로 감쌈
+ *   - iOS: behavior="padding", Android: behavior="height"
+ *   - 기존 Pressable(backdrop) 구조를 유지하면서 시트만 위로 밀려남
+ *   - URL 탭에서 TextInput 포커스 시 "재생" 버튼 + 입력창이 항상 보임
  */
 
 import React, { useState, useCallback } from "react";
@@ -21,6 +20,8 @@ import {
   Alert,
   ActivityIndicator,
   ScrollView,
+  KeyboardAvoidingView,
+  Platform,
 } from "react-native";
 import { useTranslation } from "react-i18next";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -30,15 +31,10 @@ import { parseYoutubeId } from "../utils/youtubeUtils";
 import { FolderOpen, X, Check } from 'lucide-react-native';
 
 // ── 파일 URI 안정화 ───────────────────────────────────────────────────────────
-// [FIX] 기존: file:// 이면 무조건 그대로 반환 → DocumentPicker 임시 파일 삭제 버그
-// [FIX] 수정: 앱 소유 디렉토리(cacheDirectory / documentDirectory) 소속인지 확인,
-//             아니면 반드시 cacheDirectory/videos/ 로 복사
 async function ensureStableFileUri(uri: string, filename: string): Promise<string | null> {
   const cacheDir = FileSystem.cacheDirectory ?? "";
   const docDir   = FileSystem.documentDirectory ?? "";
 
-  // 이미 앱 소유 안정 경로에 있으면 그대로 사용
-  // (단, DocumentPicker 임시 경로는 cacheDirectory 하위라도 불안정하므로 제외)
   const isStable =
     (cacheDir && uri.startsWith(cacheDir) && !uri.includes("/DocumentPicker/")) ||
     (docDir   && uri.startsWith(docDir));
@@ -48,22 +44,15 @@ async function ensureStableFileUri(uri: string, filename: string): Promise<strin
     return uri;
   }
 
-  // content:// 또는 cache/DocumentPicker/ 등 불안정 경로 → 안정 경로로 복사
   try {
     const videosDir = cacheDir + "videos/";
     await FileSystem.makeDirectoryAsync(videosDir, { intermediates: true });
-
-    // 파일명 충돌 방지: timestamp prefix
     const safeName = Date.now() + "_" + filename.replace(/[^a-zA-Z0-9._\-]/g, "_");
     const dest = videosDir + safeName;
-
     console.log("[FILE] Copying to stable path:", dest);
     await FileSystem.copyAsync({ from: uri, to: dest });
-
-    // 복사 성공 확인
     const info = await FileSystem.getInfoAsync(dest);
     if (!info.exists) throw new Error("Copy succeeded but dest not found: " + dest);
-
     console.log("[FILE] Copy complete:", dest);
     return dest;
   } catch (e) {
@@ -117,21 +106,12 @@ export function UrlInputModal({
         copyToCacheDirectory: true,
       });
       if (result.canceled) return;
-
       const file = result.assets[0];
-
-      console.log("[FILE] URI being passed to player:", file.uri);
-      console.log("[FILE] URI type:", file.uri.startsWith("file://") ? "file:// ✓" : file.uri.startsWith("content://") ? "content:// (needs copy)" : "other");
-
-      // [FIX] ensureStableFileUri: DocumentPicker 임시 경로도 반드시 복사
       const stableUri = await ensureStableFileUri(file.uri, file.name);
       if (!stableUri) {
         Alert.alert(t("url.error"), t("url.fileCopyError"));
         return;
       }
-
-      console.log("[FILE] Stable URI:", stableUri);
-
       onClose();
       onLocalFilePicked(stableUri, file.name, selectedGenre);
     } catch (e) {
@@ -145,11 +125,7 @@ export function UrlInputModal({
   const confirmUrl = useCallback(() => {
     setUrlError(null);
     const trimmed = urlInput.trim();
-    if (!trimmed) {
-      setUrlError(t("url.urlRequired"));
-      return;
-    }
-
+    if (!trimmed) { setUrlError(t("url.urlRequired")); return; }
     const ytId = parseYoutubeId(trimmed);
     if (ytId) {
       const genreSnapshot = selectedGenre;
@@ -158,12 +134,10 @@ export function UrlInputModal({
       setUrlInput("");
       return;
     }
-
     if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
       setUrlError(t("url.generalUrlNotSupported"));
       return;
     }
-
     setUrlError(t("url.invalidUrl"));
   }, [urlInput, selectedGenre, onClose, onUrlPicked, t]);
 
@@ -183,13 +157,35 @@ export function UrlInputModal({
       animationType="slide"
       onRequestClose={handleClose}
     >
-      <Pressable style={styles.backdrop} onPress={handleClose}>
-        <Pressable style={[styles.sheet, { paddingBottom: Math.max(insets.bottom + 16, 40) }]} onPress={() => {}}>
+      {/*
+        구조:
+        KeyboardAvoidingView (flex:1, justifyContent:"flex-end")
+          └─ Pressable backdrop (flex:1) — 터치 시 닫기
+          └─ Pressable sheet — 실제 콘텐츠
 
+        포인트:
+        - KAV가 전체를 감싸고, 키보드가 올라오면 KAV 높이가 줄어들면서
+          sheet가 자연스럽게 위로 밀려남
+        - backdrop Pressable은 flex:1로 남은 공간을 채워 터치 닫기 유지
+      */}
+      <KeyboardAvoidingView
+        style={styles.kavWrapper}
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
+        keyboardVerticalOffset={0}
+      >
+        {/* 반투명 배경 터치 영역 */}
+        <Pressable style={styles.backdropFlex} onPress={handleClose} />
+
+        {/* 바텀 시트 */}
+        <Pressable
+          style={[styles.sheet, { paddingBottom: Math.max(insets.bottom + 16, 40) }]}
+          onPress={() => {}}
+        >
           <View style={styles.handle} />
 
           <Text style={styles.title}>{t("url.title")}</Text>
 
+          {/* 탭 */}
           <View style={styles.tabRow}>
             <TouchableOpacity
               style={[styles.tab, activeTab === "local" && styles.tabActive]}
@@ -218,6 +214,7 @@ export function UrlInputModal({
                   horizontal
                   showsHorizontalScrollIndicator={false}
                   contentContainerStyle={styles.genreRow}
+                  keyboardShouldPersistTaps="handled"
                 >
                   {GENRE_OPTIONS.map((g) => (
                     <TouchableOpacity
@@ -261,6 +258,7 @@ export function UrlInputModal({
                   horizontal
                   showsHorizontalScrollIndicator={false}
                   contentContainerStyle={styles.genreRow}
+                  keyboardShouldPersistTaps="handled"
                 >
                   {GENRE_OPTIONS.map((g) => (
                     <TouchableOpacity
@@ -326,20 +324,25 @@ export function UrlInputModal({
               </TouchableOpacity>
             </View>
           )}
-
         </Pressable>
-      </Pressable>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }
 
 // ── 스타일 ────────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
-  backdrop: {
+  // KAV가 전체를 flex:1로 채우고 하단 정렬
+  kavWrapper: {
     flex: 1,
     backgroundColor: "rgba(0,0,0,0.75)",
     justifyContent: "flex-end",
   },
+  // 반투명 배경 — flex:1로 나머지 공간 채워 터치 닫기 유지
+  backdropFlex: {
+    flex: 1,
+  },
+
   sheet: {
     backgroundColor: "#111",
     borderTopLeftRadius: 24,
@@ -395,7 +398,7 @@ const styles = StyleSheet.create({
   bigPickText: { color: "#fff", fontSize: 16, fontWeight: "600" },
   bigPickSub:  { color: "#555", fontSize: 12 },
 
-  inputWrap: { gap: 6 },
+  inputWrap:  { gap: 6 },
   inputLabel: { color: "#666", fontSize: 12, fontWeight: "600" },
   inputRow: {
     flexDirection: "row",

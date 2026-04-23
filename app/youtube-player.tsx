@@ -132,7 +132,7 @@ function getSubtitleStatusLabel(phase: SubtitlePhase, progress: number): string 
     case "translating":      return `🌐 번역 중... ${Math.round(progress * 100)}%`;
     case "done":             return "✓ 자막 준비 완료";
     case "no_subtitles":     return "⚠️ 자막 없음 → Whisper 모드";
-    case "fallback_whisper": return "🎙 Whisper 캡처 모드";
+    case "fallback_whisper": return "🎙 음성 모델 캡처 모드";
     case "error":            return "❌ 자막 오류";
     default:                 return "";
   }
