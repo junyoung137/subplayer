@@ -66,8 +66,14 @@ const MERGE_GAP_HARD_LIMIT_S = 0.6;
 const MERGE_GAP_SPEAKER_CHANGE_S = 0.35;
 const MAX_WORDS_PER_GROUP = 35;
 
-const SBD_BATCH_SIZE = 30;
-const SBD_FALLBACK_RATIO = 0.9;
+// [FIX-SBD-1] SBD가 너무 많이 묶는 문제 해결:
+// 배치 크기를 15로 줄여 30세그 → 2배치로 나눔, 각 배치에서 더 정밀하게 경계 검출
+const SBD_BATCH_SIZE = 15;
+// [FIX-SBD-2] fallback ratio를 낮춰 SBD 결과를 더 쉽게 수용
+const SBD_FALLBACK_RATIO = 0.7;
+
+// [FIX-SBD-3] 그룹당 최대 세그먼트 수 제한: 이를 초과하면 강제 분리
+const SBD_MAX_SEGS_PER_GROUP = 8;
 
 const RE_DANGLING_FRAGMENT = /\b(with|for|and|but|or|to|in|at|on|of|by|a|an|the|is|are|was|were|be|been|being|have|has|had|will|would|could|should|may|might|must|do|does|did|not|no|i|you|we|they|he|she|it)\s*$/i;
 
@@ -278,42 +284,10 @@ export function setAppBackgroundedHint(val: boolean): void {
 }
 
 // ── Inference serialization ───────────────────────────────────────────────────
-//
-// [ACTIVE JOBS — Race Condition 완전 제거]
-//
-// 기존 문제:
-//   enqueueId/activeJobId 단조증가 방식은 "이미 실행 중인 job을 취소" 하지만
-//   새 job이 enqueue되기 *전* 구간에서 stale job이 계속 실행될 수 있었음.
-//   또한 isCancelled()를 받지 않는 내부 함수(SBD, validate 등)에서
-//   llamaContext null 체크만으로는 취소 신호가 전달되지 않는 구간 존재.
-//
-// 해결 방식 — activeJobs Set:
-//   - 모든 enqueue 시점에 고유 jobId를 Set에 등록
-//   - 취소 시 해당 jobId를 Set에서 제거
-//   - isCancelled() = "내 jobId가 Set에 없으면 취소됨"
-//   - 이 방식은 enqueue 타이밍과 무관하게 즉시 동작하며
-//     내부 async 함수 어디서든 동일한 isCancelled() 클로저로 체크 가능
-//
-// cancelCurrentInference() → 모든 active job 취소 (unload 등 전체 중단 시)
-// cancelFgInference()      → BG job 보호 하에 FG job만 취소
-// setBgJobProtection(true) → BG job의 jobId를 보호 Set에 등록해 cancel 면제
-//
-// [FIX: stopCompletion + unload 동기화]
-//
-// 추가된 보호:
-//   - cancelCurrentInference() 시 llamaContext.stopCompletion() 즉시 호출
-//     → 네이티브 레이어에서 진행 중인 completion을 실제로 중단
-//   - unloadModel()에서 _activeJobs가 빌 때까지 최대 2초 대기 후 release()
-//     → completion() 진입 직후~완료 사이 구간의 Context not found 에러 차단
-//   - enqueueInference() 내부에서 completion 호출 직전 이중 체크
-//     → queue 대기 시간 동안 취소된 job이 completion 진입하는 경우 차단
-//
-// ─────────────────────────────────────────────────────────────────────────────
-
 let _inferenceQueue: Promise<void> = Promise.resolve();
 let _nextJobId      = 0;
-const _activeJobs   = new Set<number>(); // 현재 실행 허가된 job ID들
-const _bgProtected  = new Set<number>(); // cancelFgInference에서 보호할 BG job ID들
+const _activeJobs   = new Set<number>();
+const _bgProtected  = new Set<number>();
 
 let _isInferenceRunning = false;
 
@@ -333,9 +307,6 @@ export function isModelBusy(): boolean {
   return _isInferenceRunning;
 }
 
-// llama.rn 버전에 따라 stopCompletion()이 Promise를 반환하지 않을 수 있음.
-// .catch()를 직접 체이닝하면 "Cannot read property 'catch' of undefined" 크래시 발생.
-// 반환값을 먼저 받아서 Promise인 경우에만 .catch() 호출.
 function safeStopCompletion(ctx: LlamaContext): void {
   try {
     const result = (ctx as any).stopCompletion();
@@ -375,8 +346,6 @@ export function debugInferenceCounters(): {
   activeJobs: number[];
   bgProtected: number[];
 } {
-  // enqueueId / activeJobId: backgroundTranslationTask.ts 로그 호환용
-  // (Set 기반으로 바뀌었으므로 _nextJobId와 최신 activeJob으로 근사값 제공)
   const activeArr = [..._activeJobs];
   return {
     enqueueId:   _nextJobId,
@@ -395,7 +364,6 @@ function enqueueInference<T>(fn: (isCancelled: () => boolean) => Promise<T>): Pr
   const task = _inferenceQueue.then(async () => {
     if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
 
-    // [FIX] queue 대기 후 진입 직전 이중 체크 — unloadModel 완료 후 진입 방지
     if (!llamaContext) {
       _activeJobs.delete(myJobId);
       throw new Error('INFERENCE_CANCELLED');
@@ -646,22 +614,16 @@ export async function unloadModel(): Promise<void> {
   _thermalConsecutiveHigh = 0;
   _thermalConsecutiveLow  = 0;
 
-  // [FIX] stopCompletion + activeJobs 취소를 cancelCurrentInference() 한 번에 처리
-  // stopCompletion이 내부에서 호출되므로 진행 중인 네이티브 completion도 중단됨
   cancelCurrentInference();
 
   if (!llamaContext) return;
 
   const myGeneration = ++_unloadGeneration;
   const ctxToRelease = llamaContext;
-  llamaContext = null; // 새 completion 진입 차단 (enqueueInference에서 null 체크)
+  llamaContext = null;
 
   _unloadModelPromise = (async () => {
     try {
-      // [FIX] active job이 완전히 종료될 때까지 최대 2000ms 대기
-      // stopCompletion() 호출 후 네이티브 레이어가 실제로 완료될 시간 확보
-      // completion() 리턴 후 finally 블록에서 _activeJobs.delete()가 호출되므로
-      // _activeJobs가 비면 모든 job이 정리된 것으로 간주
       const UNLOAD_WAIT_MS = 2000;
       const POLL_INTERVAL_MS = 20;
       const deadline = Date.now() + UNLOAD_WAIT_MS;
@@ -743,8 +705,10 @@ RULES:
   * Response words at start: Yes/No/Yeah/Nope/Hmm/Oh/Okay/Right/Sure
   * "I do" / "I don't" / "I did" / "I will" as a SHORT standalone response (2 words or fewer) = always its own sentence
   * New independent clause with subject+verb
+  * Speaker label in brackets like [Name] indicates a new speaker = new sentence
 - Short responses (Yes, No, I do, Hmm, Oh wow) are ALWAYS their own sentence
-- When in doubt, keep fragments together
+- When in doubt, SPLIT rather than merge — prefer more boundaries over fewer
+- NEVER group more than 6 fragments together
 
 EXAMPLE:
 Input:
@@ -772,6 +736,33 @@ function parseSBDResponse(response: string, segCount: number): number[] | null {
   } catch {
     return null;
   }
+}
+
+// [FIX-SBD-4] 그룹당 최대 세그먼트 수 초과 시 강제 분리
+function enforceSBDGroupSizeLimit(
+  boundaries: number[],
+  segCount: number,
+  maxSegsPerGroup: number
+): number[] {
+  const result = new Set(boundaries);
+  // boundaries는 "새 문장 시작" 1-based 인덱스
+  const sortedBounds = [...result].sort((a, b) => a - b);
+
+  for (let i = 0; i < sortedBounds.length; i++) {
+    const groupStart = sortedBounds[i];
+    const groupEnd = i + 1 < sortedBounds.length ? sortedBounds[i + 1] - 1 : segCount;
+    const groupSize = groupEnd - groupStart + 1;
+
+    if (groupSize > maxSegsPerGroup) {
+      // 강제로 중간에 경계 삽입
+      const insertEvery = Math.ceil(groupSize / Math.ceil(groupSize / maxSegsPerGroup));
+      for (let k = groupStart + insertEvery; k <= groupEnd; k += insertEvery) {
+        result.add(k);
+      }
+    }
+  }
+
+  return [...result].sort((a, b) => a - b);
 }
 
 function groupSegmentsByBoundaries(
@@ -820,13 +811,8 @@ async function runSBDBatch(
     .join("\n");
 
   try {
-    // [FIX] completion 직전 이중 체크 — 대기 중 취소된 경우 방지
     if (!llamaContext || isCancelled()) return [1];
 
-    // [FIX] n_predict를 segments.length * 6 → segments.length * 12로 확대
-    // 근거: 25개 세그먼트 기준 [1,2,3,...,25] 형태 출력 시 최소 ~75토큰 필요
-    //       segments.length * 6 = 150이면 경계 정보가 많을 때 잘림 발생
-    //       segments.length * 12 = 300으로 여유 확보 (최소 64 보장)
     const sbdNPredict = Math.max(64, segments.length * 12);
 
     const result = await llamaContext.completion({
@@ -847,8 +833,11 @@ async function runSBDBatch(
       console.warn("[SBD] parse failed, treating all as one sentence");
       return [1];
     }
-    console.log(`[SBD] batch(${segments.length}) → boundaries: [${parsed.join(",")}]`);
-    return parsed;
+
+    // [FIX-SBD-4] 그룹 크기 제한 적용
+    const limited = enforceSBDGroupSizeLimit(parsed, segments.length, SBD_MAX_SEGS_PER_GROUP);
+    console.log(`[SBD] batch(${segments.length}) → boundaries: [${limited.join(",")}]`);
+    return limited;
   } catch (e: any) {
     if (e?.message === 'INFERENCE_CANCELLED') throw e;
     if (e?.message?.includes('Context') && e?.message?.includes('not found')) {
@@ -927,6 +916,7 @@ async function detectSentenceBoundaries(
     globalOffset = batchEnd;
   }
 
+  // [FIX-SBD-2] fallback ratio 낮춤: 0.9 → 0.7
   const sentenceRatio = allSentences.length / segments.length;
   if (sentenceRatio >= SBD_FALLBACK_RATIO && segments.length > 5) {
     console.warn(`[SBD] Low grouping rate (${allSentences.length}/${segments.length} = ${sentenceRatio.toFixed(2)}), falling back to mergeFragments`);
@@ -1161,20 +1151,44 @@ function distributeChunksToSlots(chunks: string[], slotCount: number): string[] 
 }
 
 // ── expandGroupTranslations ───────────────────────────────────────────────────
+// [FIX-EXPAND-1] 핵심 수정: 그룹 번역을 원본 세그먼트에 분배할 때
+// 단일 세그먼트 그룹이더라도 반드시 해당 인덱스에 올바르게 배치
 function expandGroupTranslations(
   groups: MergedGroup[],
   groupTranslations: string[],
   originalSegments: TranslationSegment[]
 ): string[] {
   const result: string[] = new Array(originalSegments.length).fill("");
+
+  // [FIX-EXPAND-2] 먼저 모든 인덱스가 어떤 그룹에 속하는지 검증
+  const assignedIndices = new Set<number>();
+  for (const group of groups) {
+    for (const idx of group.originalIndices) {
+      if (assignedIndices.has(idx)) {
+        console.warn(`[EXPAND] Duplicate index ${idx} across groups!`);
+      }
+      assignedIndices.add(idx);
+    }
+  }
+
+  // 할당되지 않은 인덱스가 있으면 경고
+  for (let i = 0; i < originalSegments.length; i++) {
+    if (!assignedIndices.has(i)) {
+      console.warn(`[EXPAND] Index ${i} not covered by any group! text="${originalSegments[i].text}"`);
+    }
+  }
+
   for (let gi = 0; gi < groups.length; gi++) {
     const group = groups[gi];
     const { originalIndices } = group;
     let translation = (groupTranslations[gi] ?? "").trim();
+
     if (!translation) {
+      // 번역이 없으면 원문 유지
       for (const idx of originalIndices) result[idx] = originalSegments[idx].text;
       continue;
     }
+
     const groupSrc = originalIndices.map(idx => originalSegments[idx].text).join(" ");
     if (!RE_HALLUCINATION_GUARD.test(groupSrc)) {
       translation = translation.replace(RE_HALLUCINATED_TERMS_KO, "").trim();
@@ -1183,19 +1197,48 @@ function expandGroupTranslations(
       for (const idx of originalIndices) result[idx] = originalSegments[idx].text;
       continue;
     }
-    if (originalIndices.length === 1) { result[originalIndices[0]] = translation; continue; }
+
+    // [FIX-EXPAND-3] 단일 인덱스: 직접 할당
+    if (originalIndices.length === 1) {
+      result[originalIndices[0]] = translation;
+      continue;
+    }
+
+    // [FIX-EXPAND-4] 2개 인덱스: 2분할
     if (originalIndices.length === 2) {
       const [p1, p2] = splitTranslationInTwo(translation, originalSegments[originalIndices[0]], originalSegments[originalIndices[1]]);
-      result[originalIndices[0]] = p1; result[originalIndices[1]] = p2; continue;
+      result[originalIndices[0]] = p1;
+      result[originalIndices[1]] = p2 || translation; // p2가 비면 전체 번역 사용
+      continue;
     }
+
+    // [FIX-EXPAND-5] 3개 이상: 타이밍 비율 기반 분배
     const breakPoints = findNaturalBreakPoints(originalIndices, originalSegments);
     if (breakPoints.length === 0) {
       const distributed = distributeByTimingRatio(translation, originalIndices, originalSegments);
-      for (let k = 0; k < originalIndices.length; k++) result[originalIndices[k]] = distributed[k] ?? "";
+      for (let k = 0; k < originalIndices.length; k++) {
+        result[originalIndices[k]] = distributed[k] || translation;
+      }
     } else {
       distributeByBreakPoints(translation, originalIndices, breakPoints, originalSegments, result);
     }
+
+    // [FIX-EXPAND-6] 분배 후 빈 슬롯 보호: 빈 항목은 인접 번역 또는 전체 번역으로 채움
+    for (const idx of originalIndices) {
+      if (!result[idx] || !result[idx].trim()) {
+        result[idx] = translation;
+      }
+    }
   }
+
+  // [FIX-EXPAND-7] 최종 안전망: 여전히 빈 항목은 원문으로
+  for (let i = 0; i < originalSegments.length; i++) {
+    if (!result[i] || !result[i].trim()) {
+      console.warn(`[EXPAND] Slot ${i} still empty after expand, using source text`);
+      result[i] = originalSegments[i].text;
+    }
+  }
+
   return result;
 }
 
@@ -1257,7 +1300,8 @@ function splitTranslationInTwo(translation: string, seg1: TranslationSegment, se
     const splitIdx = Math.max(1, Math.round(chunks.length * targetRatio));
     return [chunks.slice(0, splitIdx).join(" "), chunks.slice(splitIdx).join(" ")];
   }
-  return [t, ""];
+  // [FIX-SPLIT] 분할 불가능하면 앞에 전체, 뒤에 빈 문자열 대신 동일 텍스트
+  return [t, t];
 }
 
 function findNaturalBreakPoints(originalIndices: number[], originalSegments: TranslationSegment[]): number[] {
@@ -1296,10 +1340,10 @@ function distributeByBreakPoints(
       chunkOffset += chunkCount;
     }
     if (grp.length === 1) {
-      result[grp[0]] = assignedText.trim();
+      result[grp[0]] = assignedText.trim() || translation;
     } else {
       const distributed = distributeByTimingRatio(assignedText.trim(), grp, originalSegments);
-      for (let k = 0; k < grp.length; k++) result[grp[k]] = distributed[k] ?? "";
+      for (let k = 0; k < grp.length; k++) result[grp[k]] = distributed[k] || translation;
     }
   }
 }
@@ -1350,7 +1394,6 @@ async function transliterateProperNouns(
   isCancelled: () => boolean
 ): Promise<Record<string, string>> {
   if (!llamaContext || nouns.length === 0 || isCancelled()) return {};
-  // [FIX] completion 직전 이중 체크
   if (!llamaContext || isCancelled()) return {};
   const r = await llamaContext.completion({
     messages: [
@@ -1529,9 +1572,13 @@ function detectFragment(src: string): boolean {
   return wordCount <= 4 && !/[.!?]$/.test(src.trim()) && RE_DANGLING_FRAGMENT.test(src);
 }
 
+// ── parseBatchResponse ────────────────────────────────────────────────────────
 function parseBatchResponse(
-  response: string, batch: MergedGroup[],
-  patterns: CompiledNounPattern[], tokenMaps: MaskedToken[][]
+  response: string,
+  batch: MergedGroup[],
+  patterns: CompiledNounPattern[],
+  tokenMaps: MaskedToken[][],
+  prevTranslations?: string[]
 ): string[] {
   const tmap = new Map<number, string>();
   const lines = response.split("\n").map(l => l.trim()).filter(Boolean);
@@ -1552,7 +1599,7 @@ function parseBatchResponse(
     }
   }
   const restoreAndClean = (raw: string, batchIdx: number, srcText: string): string => {
-    if (!raw) return srcText;
+    if (!raw) return "";
     const tokens = tokenMaps[batchIdx] ?? [];
     const restored = tokens.length > 0 ? restoreNumericTokens(raw, tokens) : raw;
     const deLeaked = stripLeakedPlaceholders(restored);
@@ -1562,15 +1609,29 @@ function parseBatchResponse(
   if (tmap.size === batch.length) {
     return batch.map((seg, i) => restoreAndClean(tmap.get(i + 1) ?? "", i, seg.text));
   }
-  const contentLines = lines.map(l => l.replace(/^[\d]+[.):\-\s]+/, "").trim()).filter(Boolean);
-  if (contentLines.length === batch.length) {
+
+  const contentLines = lines
+    .map(l => l.replace(/^[\d]+[.):\-\s]+/, "").trim())
+    .filter(Boolean);
+
+  if (contentLines.length >= batch.length) {
     console.warn(`[TRANSLATE] positional fallback: parsed=${tmap.size} expected=${batch.length}`);
-    return batch.map((seg, i) => restoreAndClean(contentLines[i], i, seg.text));
+    return batch.map((seg, i) => {
+      const fromMap = tmap.get(i + 1);
+      if (fromMap) return restoreAndClean(fromMap, i, seg.text);
+      return restoreAndClean(contentLines[i] ?? "", i, seg.text);
+    });
   }
+
+  console.warn(`[TRANSLATE] parse failed: tmap=${tmap.size}, contentLines=${contentLines.length}, expected=${batch.length} — keeping prev or empty`);
   return batch.map((seg, i) => {
-    const raw = tmap.get(i + 1);
-    if (!raw) { console.warn(`[TRANSLATE] missing #${i + 1}, keeping source`); return seg.text; }
-    return restoreAndClean(raw, i, seg.text);
+    const fromMap = tmap.get(i + 1);
+    if (fromMap) return restoreAndClean(fromMap, i, seg.text);
+    const prev = prevTranslations?.[i];
+    if (prev && prev.trim() && !isCorruptedOutput(prev)) {
+      return prev;
+    }
+    return "";
   });
 }
 
@@ -1604,11 +1665,13 @@ async function validateTranslations(
 
   const passedSet = new Set<number>();
 
-  function passesValidation(src: string, output: string): boolean {
+  // [FIX-VALIDATE-1] 멀티-세그먼트 그룹의 segmentCount를 정확히 전달
+  function passesValidation(src: string, output: string, segmentCount = 1): boolean {
     if (!output || !output.trim()) return false;
     if (isLikelyUntranslated(output, targetLanguage)) return false;
     if (isCorruptedOutput(output)) return false;
-    if (isOvergenerated(src, output, targetLanguage)) return false;
+    // 그룹이 여러 세그먼트를 포함하면 overgenerated 체크 완화
+    if (segmentCount <= 1 && isOvergenerated(src, output, targetLanguage)) return false;
     if (RE_PLACEHOLDER_LEAK.test(output)) return false;
     const srcHasNeg = /\bdon't think\b|\bnot a\b|\bdoesn't work\b|\bdon't work\b|\bcan't\b|\bwon't\b|\bnot going to\b|\bnot gonna\b/i.test(src);
     if (srcHasNeg && !/않|안|못|없|아니|모르/.test(output)) return false;
@@ -1630,7 +1693,8 @@ async function validateTranslations(
     const src = segments[i].text.trim();
     if (isFillerText(src)) continue;
     result[i] = sanitizeTranslationOutput(result[i]?.trim() ?? '', src);
-    if (passesValidation(src, result[i])) passedSet.add(i);
+    const segCount = segments[i].originalIndices?.length ?? 1;
+    if (passesValidation(src, result[i], segCount)) passedSet.add(i);
   }
 
   const failedIndices: number[] = [];
@@ -1660,24 +1724,33 @@ async function validateTranslations(
       ? 'NOTE: All inputs in this batch are incomplete ASR fragments cut mid-sentence.\nFor each one, translate ONLY what is literally present.\nDo NOT reconstruct or complete the surrounding sentence.\nKeep output SHORT (typically 2-5 words).\n'
       : 'These are retry translations. Be concise and accurate.\nDo NOT add explanations or content not present in the source.\n';
     const stage1SystemPrompt = isolationBlock + systemPrompt + '\n\n' + fragmentNote;
-    const batchGroups: MergedGroup[] = batch.map(i => ({ start: segments[i].start, end: segments[i].end, text: segments[i].text, originalIndices: [i] }));
+    const batchGroups: MergedGroup[] = batch.map(i => ({
+      start: segments[i].start,
+      end: segments[i].end,
+      text: segments[i].text,
+      originalIndices: segments[i].originalIndices ?? [i],
+    }));
     const { message: batchMsg, tokenMaps } = buildBatchMessage(batchGroups);
+    const prevBatchTranslations = batch.map(i => result[i] ?? "");
     let parsed: string[] = [];
     try {
-      // [FIX] completion 직전 이중 체크
       if (!llamaContext || isCancelled()) break;
+
+      const totalSegmentsInBatch = batch.reduce(
+        (sum, i) => sum + (segments[i].originalIndices?.length ?? 1), 0
+      );
       const r = await llamaContext.completion({
         messages: [
           { role: 'system', content: stage1SystemPrompt },
           { role: 'user', content: batchMsg },
         ],
-        n_predict: batch.length * 48,
+        n_predict: applyThermalNPredict(Math.max(batch.length * 64, totalSegmentsInBatch * 48)),
         temperature: 0.05,
         top_p: 0.9,
         stop: ['</s>', '<end_of_turn>', '<|end|>'],
       });
       if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
-      parsed = parseBatchResponse(r.text, batchGroups, patterns, tokenMaps);
+      parsed = parseBatchResponse(r.text, batchGroups, patterns, tokenMaps, prevBatchTranslations);
     } catch (e: any) {
       if (e?.message === 'INFERENCE_CANCELLED') throw e;
       if (e?.message?.includes('Context') && e?.message?.includes('not found')) {
@@ -1702,10 +1775,11 @@ async function validateTranslations(
       processed = stripLeakedPlaceholders(processed);
       processed = sanitizeTranslationOutput(applyProperNounFixes(processed, patterns), src);
       processed = postProcessTranslation(processed, src, targetLanguage);
-      if (!passesValidation(src, processed)) continue;
+      const segCount = segments[idx].originalIndices?.length ?? 1;
+      if (!passesValidation(src, processed, segCount)) continue;
       const oldLen = result[idx]?.length ?? 0;
       const newLen = processed.length;
-      if (newLen > oldLen * 1.5 && !detectFragment(src) && passesValidation(src, result[idx])) continue;
+      if (newLen > oldLen * 1.5 && !detectFragment(src) && passesValidation(src, result[idx], segCount)) continue;
       result[idx] = processed;
       passedSet.add(idx);
     }
@@ -1759,7 +1833,6 @@ async function validateTranslations(
 
     const { masked: maskedSrc, tokens } = maskNumericTokens(src);
     try {
-      // [FIX] completion 직전 이중 체크
       if (!llamaContext || isCancelled()) break;
       const r = await llamaContext.completion({
         messages: [
@@ -1890,6 +1963,19 @@ export async function translateSegments(
       text: normalizeSocialMediaNames(cleanWhisperText(seg.text)),
     }));
 
+    // [FIX-STEP0] 빈 텍스트 세그먼트 필터링 후 인덱스 맵 구성
+    // 빈 세그먼트는 번역 건너뛰고 원문 유지
+    const nonEmptyIndices: number[] = [];
+    const nonEmptySegments: TranslationSegment[] = [];
+    for (let i = 0; i < cleaned.length; i++) {
+      if (!isFillerText(cleaned[i].text)) {
+        nonEmptyIndices.push(i);
+        nonEmptySegments.push(cleaned[i]);
+      }
+    }
+
+    console.log(`[TRANSLATE] Non-empty segments: ${nonEmptySegments.length}/${cleaned.length}`);
+
     // ── Step A: 고유명사 + 프롬프트 구성 ─────────────────────────────────────
     const profile = getLanguageProfile(targetLanguage);
     const properNouns = await buildProperNounDict(deduped, videoHash, targetLanguage, isCancelled);
@@ -1905,24 +1991,50 @@ export async function translateSegments(
 
     if (!llamaContext || isCancelled()) throw new Error('INFERENCE_CANCELLED');
 
-    const sbdSentences = await detectSentenceBoundaries(cleaned, isCancelled);
+    // [FIX-SBD-5] SBD를 비어있지 않은 세그먼트에만 적용
+    const sbdSentences = await detectSentenceBoundaries(nonEmptySegments, isCancelled);
     if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
 
     if (sbdSentences.length > 0) {
-      merged = sbdSentencesToMergedGroups(sbdSentences);
+      // [FIX-SBD-6] SBD 결과의 originalIndices를 실제 cleaned 배열 인덱스로 재매핑
+      const remappedSentences = sbdSentences.map(sent => ({
+        ...sent,
+        segmentIndices: sent.segmentIndices.map(localIdx => nonEmptyIndices[localIdx]),
+      }));
+      merged = sbdSentencesToMergedGroups(remappedSentences);
       usedSBD = true;
-      console.log(`[TRANSLATE] SBD success: ${cleaned.length} segs → ${merged.length} sentences`);
+      console.log(`[TRANSLATE] SBD success: ${nonEmptySegments.length} segs → ${merged.length} sentences`);
     } else {
       console.log(`[TRANSLATE] SBD fallback: using mergeFragments`);
-      let fallbackMerged = mergeFragments(cleaned);
+      let fallbackMerged = mergeFragments(nonEmptySegments);
       fallbackMerged = enforceSentence(fallbackMerged);
-      merged = fallbackMerged;
+      // [FIX-SBD-7] fallback merged groups도 nonEmptyIndices로 재매핑
+      merged = fallbackMerged.map(g => ({
+        ...g,
+        originalIndices: g.originalIndices.map(localIdx => nonEmptyIndices[localIdx]),
+      }));
     }
+
+    // [FIX-COVERAGE] 필터링된 빈 세그먼트들을 각각 단독 그룹으로 추가
+    const coveredIndices = new Set(merged.flatMap(g => g.originalIndices));
+    for (let i = 0; i < cleaned.length; i++) {
+      if (!coveredIndices.has(i)) {
+        merged.push({
+          start: cleaned[i].start,
+          end: cleaned[i].end,
+          text: cleaned[i].text,
+          originalIndices: [i],
+        });
+      }
+    }
+    // 시작 시간 순으로 정렬
+    merged.sort((a, b) => a.start - b.start);
 
     const total = merged.length;
     const totalBatches = Math.ceil(total / BATCH_SIZE);
     console.log(`[TRANSLATE] ${usedSBD ? "SBD" : "fallback"} → ${total} groups (${totalBatches} batches)`);
 
+    // [FIX-PROGRESS] 그룹별 누적 세그먼트 수 계산
     const segmentCountUpToGroup: number[] = new Array(merged.length).fill(0);
     let cumulativeSegs = 0;
     for (let i = 0; i < merged.length; i++) {
@@ -1962,19 +2074,27 @@ export async function translateSegments(
 
         const sysPrompt = buildSystemPrompt(targetLanguage, langRules, genrePersona, nounHint, batch.length);
         const { message: batchMessage, tokenMaps } = buildBatchMessage(batch);
+        const prevBatchTranslations = batch.map((_, i) => mergedTranslations[offset + i] ?? "");
 
         if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
         await yieldToEventLoop();
 
-        // [FIX] completion 직전 최종 이중 체크 — yield 이후 상태 재확인
         if (!llamaContext || isCancelled()) throw new Error('INFERENCE_CANCELLED');
+
+        // [FIX-NPREDICT] n_predict를 배치 내 총 원본 세그먼트 수 기준으로 산출
+        const totalOriginalSegsInBatch = batch.reduce(
+          (sum, g) => sum + g.originalIndices.length, 0
+        );
+        const nPredict = applyThermalNPredict(
+          Math.max(batch.length * 80, totalOriginalSegsInBatch * 60)
+        );
 
         const r = await llamaContext.completion({
           messages: [
             { role: "system", content: sysPrompt },
             { role: "user", content: batchMessage },
           ],
-          n_predict: applyThermalNPredict(batch.length * 80),
+          n_predict: nPredict,
           temperature: 0.1,
           top_p: 0.9,
           stop: ["</s>", "<end_of_turn>", "<|end|>"],
@@ -1984,7 +2104,7 @@ export async function translateSegments(
         if (_isAppBackgrounded) await yieldToEventLoop();
         if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
 
-        const translations = parseBatchResponse(r.text, batch, patterns, tokenMaps);
+        const translations = parseBatchResponse(r.text, batch, patterns, tokenMaps, prevBatchTranslations);
 
         if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
         await yieldToEventLoop();
@@ -2032,99 +2152,28 @@ export async function translateSegments(
 
     await deleteCheckpoint(videoHash);
 
-    // ── Step E: 재분배 ────────────────────────────────────────────────────────
-    const translatedTexts = expandGroupTranslations(merged, mergedTranslations, cleaned);
-    for (let i = 0; i < cleaned.length; i++) {
-      if (!RE_HALLUCINATION_GUARD.test(cleaned[i].text) && translatedTexts[i]) {
-        translatedTexts[i] = translatedTexts[i].replace(RE_HALLUCINATED_TERMS_KO, "").trim();
+    // ── Step E: postProcess (그룹 단위 번역에 직접 적용) ─────────────────────
+    for (let i = 0; i < merged.length; i++) {
+      const groupSrc = merged[i].text;
+      if (!RE_HALLUCINATION_GUARD.test(groupSrc) && mergedTranslations[i]) {
+        mergedTranslations[i] = mergedTranslations[i].replace(RE_HALLUCINATED_TERMS_KO, "").trim();
       }
-    }
-    for (let i = 0; i < cleaned.length; i++) {
-      if (translatedTexts[i]) {
-        translatedTexts[i] = postProcessTranslation(translatedTexts[i], cleaned[i].text, targetLanguage);
+      if (mergedTranslations[i]) {
+        mergedTranslations[i] = postProcessTranslation(mergedTranslations[i], groupSrc, targetLanguage);
       }
-    }
-
-    // ── Step F: 실패 세그먼트 재시도 ─────────────────────────────────────────
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const failed = cleaned.reduce<number[]>((acc, seg, i) => {
-        const t = translatedTexts[i];
-        const src = seg.text.trim();
-        if (!t || !t.trim() || (t.trim() === src && src.length > 10) || /^\d+\.?$/.test(t.trim()) || isCorruptedOutput(t) || RE_PLACEHOLDER_LEAK.test(t)) {
-          return [...acc, i];
-        }
-        return acc;
-      }, []);
-      if (failed.length === 0) break;
-      console.log(`[Gemma] Retry ${attempt + 1}: ${failed.length} segs`);
-
-      if (!llamaContext || isCancelled()) {
-        console.warn('[TRANSLATE] Step F: Context null or cancelled — skipping retry');
-        break;
-      }
-
-      const retryGroups: MergedGroup[] = failed.map(i => ({ start: cleaned[i].start, end: cleaned[i].end, text: cleaned[i].text, originalIndices: [i] }));
-      if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
-      const retryPrompt = buildSystemPrompt(targetLanguage, langRules, genrePersona, nounHint, retryGroups.length);
-      const { message: retryMessage, tokenMaps: retryTokenMaps } = buildBatchMessage(retryGroups);
-
-      try {
-        // [FIX] completion 직전 이중 체크
-        if (!llamaContext || isCancelled()) break;
-        const rr = await llamaContext.completion({
-          messages: [
-            { role: "system", content: retryPrompt },
-            { role: "user", content: retryMessage },
-          ],
-          n_predict: applyThermalNPredict(retryGroups.length * 80),
-          temperature: 0.1,
-          top_p: 0.9,
-          stop: ["</s>", "<end_of_turn>", "<|end|>"],
-        } as any);
-        if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
-        const rt = parseBatchResponse(rr.text, retryGroups, patterns, retryTokenMaps);
-        for (let j = 0; j < failed.length; j++) {
-          if (rt[j] && rt[j].trim() && !isCorruptedOutput(rt[j])) {
-            translatedTexts[failed[j]] = postProcessTranslation(rt[j], retryGroups[j].text, targetLanguage);
-          }
-        }
-      } catch (e: any) {
-        if (e?.message === 'INFERENCE_CANCELLED') throw e;
-        if (e?.message?.includes('Context') && e?.message?.includes('not found')) {
-          console.warn('[TRANSLATE] Step F retry: Context released — stopping retry');
-          break;
-        }
-        console.warn(`[Gemma] Retry ${attempt + 1} error:`, e);
-        break;
-      }
-
-      if (attempt < 1) {
-        await sleep(_thermalLevel >= 1 ? 500 : 200);
-        if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
-      }
-    }
-
-    // ── Cooling pause before validation ──────────────────────────────────────
-    if (_thermalLevel >= 1 && totalBatches >= 5 && emaBatchDurationMs > 1200) {
-      const coolingMs = _thermalLevel >= 2 ? 2500 : 1200;
-      console.log(`[THERMAL] Pre-validation cooling: ${coolingMs}ms`);
-      await sleep(coolingMs);
-      if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
     }
 
     // ── Step G: 검증 ──────────────────────────────────────────────────────────
     if (!llamaContext || isCancelled()) {
       console.warn('[TRANSLATE] Step G: Context null or cancelled — skipping validation');
-      const formatted = translatedTexts.map(t => formatNetflixSubtitle(t));
+      const formatted = expandGroupTranslations(merged, mergedTranslations, cleaned)
+        .map(t => formatNetflixSubtitle(t));
       return adjustTimingsForReadability(mergeWithTranslations(cleaned, formatted));
     }
 
     const finalPrompt = buildSystemPrompt(targetLanguage, langRules, genrePersona, nounHint, BATCH_SIZE);
     const mergedForValidation: MergedGroup[] = merged.map((g) => ({ ...g }));
-    const groupTranslationsForValidation = merged.map((g) => {
-      const texts = g.originalIndices.map((idx) => translatedTexts[idx]).filter(Boolean);
-      return texts.join(" ").trim();
-    });
+    const groupTranslationsForValidation = mergedTranslations.slice();
 
     const validatedGroupTexts = await validateTranslations(
       mergedForValidation, groupTranslationsForValidation,
@@ -2132,6 +2181,7 @@ export async function translateSegments(
     );
     if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
 
+    // ── Step H: expand (단 1회 실행) + postProcess ────────────────────────────
     const revalidatedTexts = expandGroupTranslations(merged, validatedGroupTexts, cleaned);
     for (let i = 0; i < cleaned.length; i++) {
       if (revalidatedTexts[i]) {
@@ -2139,10 +2189,10 @@ export async function translateSegments(
       }
     }
 
-    // ── Step H: Netflix 포맷팅 ─────────────────────────────────────────────────
+    // ── Step I: Netflix 포맷팅 ────────────────────────────────────────────────
     const formatted = revalidatedTexts.map(t => formatNetflixSubtitle(t));
 
-    // ── Step I: 타이밍 조정 + 최종 조립 ──────────────────────────────────────
+    // ── Step J: 타이밍 조정 + 최종 조립 ──────────────────────────────────────
     const completed = adjustTimingsForReadability(mergeWithTranslations(cleaned, formatted));
     console.log(`[Gemma] Done: ${completed.length} segments.`);
     return completed;
