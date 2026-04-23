@@ -1,33 +1,25 @@
 /**
- * subtitleDB.ts — v5
+ * subtitleDB.ts — v5 (patched)
  *
- * 변경사항 (v4 → v5):
+ * 변경사항 (v5 → v5-patched):
+ * ─────────────────────────────────────────────────────────────────────────────
+ * [FIX A] _batchUpsertSegments: 빈 translated로 기존 번역 덮어쓰기 방지
+ *   - DO UPDATE SET translated = excluded.translated
+ *     → CASE WHEN excluded.translated != '' THEN ... ELSE 기존값 유지
+ *   - partial 저장 중 translated='' 세그먼트가 이미 번역된 세그먼트를
+ *     덮어쓰던 버그 수정
+ *
+ * [FIX B] _doSave (full 저장): translated 없는 배열의 full 저장 차단
+ *   - segments 전체에 translated=''이면 DB 저장 자체를 skip
+ *   - patchSubtitles 렌더 사이클 타이밍 문제로 번역 없는 배열이
+ *     isPartial=false로 저장되던 버그 수정
+ *   - 기존 partial 캐시가 빈 full로 덮어써지는 현상 방지
+ *
+ * 원본 v5 변경사항 (유지):
  * ─────────────────────────────────────────────────────────────────────────────
  * [FIX 1] DELETE+INSERT → UPSERT diff 저장
- *   - subtitle_segments에 UNIQUE(cache_id, segment_id) 인덱스 추가
- *   - _doSave(isPartial=true): DELETE 제거 → UPSERT only
- *   - _doSave(isPartial=false): 최종 저장만 DELETE+INSERT (완전 교체 보장)
- *   - partial 저장 I/O 비용 대폭 감소 (변경된 segment만 update)
- *
  * [FIX 2] makeSegmentId: toFixed(3) → Math.round(* 1000) ms 기반
- *   - float rounding 오류 제거
- *   - 1.23456 → 1235, 1.23449 → 1234 (ms 정수)
- *   - YouTube timedtext / Whisper 모두 안전
- *   - YoutubePlayerScreen의 makeSegmentId와 완전 동일 규칙 유지
- *
  * [FIX 3] translated_count 컬럼 추가 — resume 고도화
- *   - subtitle_cache에 translated_count INTEGER 추가
- *   - savePartialSubtitles에서 translatedCount 저장
- *   - loadSubtitles 반환값에 translatedCount 포함
- *   - 호출자가 "이미 번역된 수" 알고 resume 시작 위치 최적화 가능
- *
- * [KEEP v4]
- *   - segment_id TEXT 컬럼 (DB/메모리 ID 통일)
- *   - partial overwrite 조건: full → partial 덮어쓰기 금지
- *   - translatedCount 기준 throttle (PARTIAL_THROTTLE_COUNT=10)
- *   - WAL 모드, batch INSERT, withTransactionAsync 원자성
- *   - in-memory lock (race condition 방지)
- *   - LRU 50개 제한 (IN ASC LIMIT 방식)
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -39,7 +31,6 @@ import { SubtitleSegment } from "../store/usePlayerStore";
 const DB_NAME                = "subtitles_v5.db";
 const CACHE_TTL_MS           = 7 * 24 * 60 * 60 * 1000;
 const LRU_MAX_ITEMS          = 50;
-// [FIX 1] partial UPSERT: 6컬럼 → UPSERT 구문 포함해도 안전한 chunk
 const BATCH_CHUNK_SIZE       = 166;
 const PARTIAL_THROTTLE_COUNT = 10;
 
@@ -58,7 +49,7 @@ export interface CacheInfo {
   cachedAt:         number;
   isPartial:        boolean;
   count:            number;
-  translatedCount:  number; // [FIX 3]
+  translatedCount:  number;
 }
 
 // ── DB 싱글톤 ─────────────────────────────────────────────────────────────────
@@ -195,8 +186,6 @@ async function _doSave(
   const db = getDB();
 
   await db.withTransactionAsync(async () => {
-    // [FIX 3] translated_count 포함 UPSERT
-    // [FIX 1+v4] partial overwrite 조건: full → partial 덮어쓰기 금지
     const row = await db.getFirstAsync<{ id: number }>(
       `INSERT INTO subtitle_cache
          (video_id, language, genre, cached_at, is_partial, translated_count)
@@ -225,9 +214,27 @@ async function _doSave(
 
     if (isPartial) {
       // [FIX 1] partial: DELETE 없이 UPSERT only (diff 저장)
-      // 변경된 segment만 update → I/O 최소화
       await _batchUpsertSegments(db, cacheId, segments);
     } else {
+      // ── [FIX B] full 저장: translated 없는 배열 차단 ──────────────────────
+      // patchSubtitles 렌더 타이밍으로 translated='' 배열이 full 저장되는 버그 방지
+      const actualTranslatedCount = segments.filter(
+        (s) => s.translated && s.translated.trim() !== ""
+      ).length;
+
+      if (actualTranslatedCount === 0) {
+        console.log(
+          `[DB] full 저장 차단 — translated 없음: ${videoId}/${language}/${genre} ` +
+          `(segments=${segments.length}, translated=0)`
+        );
+        return;
+      }
+
+      console.log(
+        `[DB] full 저장 진행: ${videoId}/${language}/${genre} ` +
+        `(translated=${actualTranslatedCount}/${segments.length})`
+      );
+
       // 최종 저장: 완전 교체 보장 (순서 정합성)
       await db.runAsync(
         `DELETE FROM subtitle_segments WHERE cache_id = ?`,
@@ -245,8 +252,10 @@ async function _doSave(
   );
 }
 
-// ── [FIX 1] batch UPSERT (partial 전용) ──────────────────────────────────────
-// UNIQUE(cache_id, segment_id) 충돌 시 translated만 업데이트
+// ── [FIX 1 + FIX A] batch UPSERT (partial 전용) ───────────────────────────────
+// [FIX A] UNIQUE(cache_id, segment_id) 충돌 시:
+//   - translated가 비어있지 않을 때만 업데이트 (빈 문자열로 기존 번역 덮어쓰기 방지)
+//   - translated=''인 경우 기존 DB 값을 그대로 유지
 
 async function _batchUpsertSegments(
   db: SQLite.SQLiteDatabase,
@@ -272,7 +281,10 @@ async function _batchUpsertSegments(
        VALUES ${placeholders}
        ON CONFLICT(cache_id, segment_id)
        DO UPDATE SET
-         translated = excluded.translated`,
+         translated = CASE
+           WHEN excluded.translated != '' THEN excluded.translated
+           ELSE subtitle_segments.translated
+         END`,
       values,
     );
   }
@@ -316,7 +328,7 @@ export async function loadSubtitles(
 ): Promise<{
   segments:         SubtitleSegment[];
   isPartial:        boolean;
-  translatedCount:  number; // [FIX 3]
+  translatedCount:  number;
 } | null> {
   const db = getDB();
 
