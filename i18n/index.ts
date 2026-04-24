@@ -46,6 +46,6 @@ i18n
       escapeValue: false,
     },
     initImmediate: false,
-  });
+  } as any);
 
 export default i18n;

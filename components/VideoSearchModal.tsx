@@ -37,6 +37,7 @@ import {
   useWindowDimensions,
 } from "react-native";
 import { Search, X, Clock, ChevronRight, Mic, Lock } from "lucide-react-native";
+import { useTranslation } from "react-i18next";
 import { SubtitleSegment } from "../store/usePlayerStore";
 
 // ── 타입 ──────────────────────────────────────────────────────────────────────
@@ -57,6 +58,8 @@ interface VideoSearchModalProps {
   onSeek: (time: number) => void;
   /** 번역 완료 여부 — false면 "번역 완료 후 사용 가능" 안내 표시 */
   isReady?: boolean;
+  /** Optional UI locale override (e.g. "en", "ja"). Auto-detected if omitted. */
+  uiLocale?: string;
 }
 
 // ── 시간 포맷 ─────────────────────────────────────────────────────────────────
@@ -333,12 +336,14 @@ function EmptyState({
   hasSubtitles: boolean;
   isReady: boolean;
 }) {
+  const { t } = useTranslation();
+
   if (!isReady) {
     return (
       <View style={styles.emptyContainer}>
         <Lock size={32} color="#334155" />
-        <Text style={styles.emptyTitle}>번역 완료 후 검색</Text>
-        <Text style={styles.emptyDesc}>자막 번역이 끝나고{"\n"}영상 탐색을 사용하세요</Text>
+        <Text style={styles.emptyTitle}>{t("videoSearch.notReadyTitle")}</Text>
+        <Text style={styles.emptyDesc}>{t("videoSearch.notReadyDesc")}</Text>
       </View>
     );
   }
@@ -346,8 +351,8 @@ function EmptyState({
     return (
       <View style={styles.emptyContainer}>
         <Mic size={32} color="#334155" />
-        <Text style={styles.emptyTitle}>자막 없음</Text>
-        <Text style={styles.emptyDesc}>영상 번역이 완료된 후 검색하세요</Text>
+        <Text style={styles.emptyTitle}>{t("videoSearch.noSubtitlesTitle")}</Text>
+        <Text style={styles.emptyDesc}>{t("videoSearch.noSubtitlesDesc")}</Text>
       </View>
     );
   }
@@ -355,21 +360,16 @@ function EmptyState({
     return (
       <View style={styles.emptyContainer}>
         <Search size={32} color="#334155" />
-        <Text style={styles.emptyTitle}>영상 탐색</Text>
-        <Text style={styles.emptyDesc}>
-          찾고 싶은 장면을 검색하세요{"\n"}
-        </Text>
+        <Text style={styles.emptyTitle}>{t("videoSearch.searchTitle")}</Text>
+        <Text style={styles.emptyDesc}>{t("videoSearch.searchDesc")}</Text>
       </View>
     );
   }
   return (
     <View style={styles.emptyContainer}>
       <Search size={32} color="#334155" />
-      <Text style={styles.emptyTitle}>결과 없음</Text>
-      <Text style={styles.emptyDesc}>
-        다른 키워드로 시도해보세요{"\n"}
-        더 짧은 단어나 영어로도 검색 가능해요
-      </Text>
+      <Text style={styles.emptyTitle}>{t("videoSearch.noResultsTitle")}</Text>
+      <Text style={styles.emptyDesc}>{t("videoSearch.noResultsDesc")}</Text>
     </View>
   );
 }
@@ -384,6 +384,7 @@ export function VideoSearchModal({
   onSeek,
   isReady = true,
 }: VideoSearchModalProps) {
+  const { t } = useTranslation();
   const { height: screenHeight } = useWindowDimensions();
   const [query,      setQuery]      = useState("");
   const [results,    setResults]    = useState<SearchResult[]>([]);
@@ -494,7 +495,7 @@ export function VideoSearchModal({
           <View style={styles.header}>
             <View style={styles.headerLeft}>
               <Search size={16} color="#6366f1" />
-              <Text style={styles.headerTitle}>영상 탐색</Text>
+              <Text style={styles.headerTitle}>{t("videoSearch.searchTitle")}</Text>
             </View>
             <TouchableOpacity
               onPress={handleClose}
@@ -517,7 +518,7 @@ export function VideoSearchModal({
               style={styles.input}
               value={query}
               onChangeText={handleSearch}
-              placeholder={isReady ? "검색..." : "번역 완료 후 검색하세요"}
+              placeholder={isReady ? t("videoSearch.searchPlaceholder") : t("videoSearch.notReadyPlaceholder")}
               placeholderTextColor="#475569"
               returnKeyType="search"
               selectionColor="#6366f1"
@@ -539,7 +540,7 @@ export function VideoSearchModal({
           {isSearching ? (
             <View style={styles.loadingContainer}>
               <ActivityIndicator size="small" color="#6366f1" />
-              <Text style={styles.loadingText}>탐색 중...</Text>
+              <Text style={styles.loadingText}>{t("videoSearch.searching")}</Text>
             </View>
           ) : results.length > 0 ? (
             <FlatList

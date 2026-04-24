@@ -253,8 +253,8 @@ export default function SettingsScreen() {
         <Row label={t("settings.fontSize", { size: settings.subtitleFontSize })}>
           <Slider
             style={{ flex: 1 }}
-            minimumValue={12}
-            maximumValue={36}
+            minimumValue={10}
+            maximumValue={25}
             step={1}
             value={settings.subtitleFontSize}
             onValueChange={(v) => update({ subtitleFontSize: v })}

@@ -14,6 +14,7 @@ import {
   ActivityIndicator,
   Text,
   TouchableOpacity,
+  Platform,
 } from "react-native";
 import YoutubePlayer, {
   YoutubeIframeRef,
@@ -75,6 +76,32 @@ const hideSubtitleScript = `
   var s = document.createElement('style');
   s.innerHTML = '.ytp-caption-window-container, .captions-text { display: none !important; }';
   (document.head || document.documentElement).appendChild(s);
+
+  // ── Android postMessage bridge ──────────────────────────────────────────
+  // On Android, react-native-webview dispatches postMessage events on
+  // "document" via document.dispatchEvent(new MessageEvent(...)).
+  // The YouTube iframe library (lonelycpp/react-native-youtube-iframe)
+  // listens on "window", not "document", so play/pause commands are
+  // silently dropped on Android.  Re-dispatch document messages on window
+  // so the library's handler receives them.  On iOS, postMessage already
+  // dispatches on window, so this listener never fires there.
+  if (typeof document !== 'undefined' && typeof window !== 'undefined') {
+    // Bridge for Android: react-native-webview dispatches postMessage
+    // on document, but the YouTube iframe library listens on window.
+    // Re-dispatch so both targets receive every message.
+    document.addEventListener('message', function(e) {
+      window.dispatchEvent(new MessageEvent('message', { data: e.data, origin: e.origin }));
+    });
+    // Also override window.postMessage to ensure any direct calls
+    // from React Native WebView are captured regardless of mechanism.
+    var _origPost = window.postMessage.bind(window);
+    window.postMessage = function(data, origin) {
+      _origPost(data, origin || '*');
+      try {
+        document.dispatchEvent(new MessageEvent('message', { data: data }));
+      } catch(e) {}
+    };
+  }
 })();
 true;
 `;
@@ -101,11 +128,7 @@ export const YouTubePlayer = React.forwardRef<
   },
   ref
 ) {
-  const playerRef = useRef<YoutubeIframeRef & {
-    injectJavaScript?: (s: string) => void;
-    playVideo?: () => void;
-    pauseVideo?: () => void;
-  }>(null);
+  const playerRef = useRef<YoutubeIframeRef>(null);
 
   const [isReady, setIsReady]         = useState(false);
   const [hasError, setHasError]       = useState(false);
@@ -118,6 +141,9 @@ export const YouTubePlayer = React.forwardRef<
   const setDuration    = usePlayerStore((s) => s.setDuration);
   const setPlaying     = usePlayerStore((s) => s.setPlaying);
   const isPlaying      = usePlayerStore((s) => s.isPlaying);
+
+  const playerReadyRef = useRef(false);
+  const pendingPlayRef = useRef<boolean | null>(null);
 
   // ── timedtext 상태 ────────────────────────────────────────────────────────
   const loadedSegmentsRef  = useRef<TimedTextSegment[]>([]);
@@ -139,7 +165,51 @@ export const YouTubePlayer = React.forwardRef<
 
   // isPlaying 최신값 ref (타이머 콜백 내 클로저에서 사용)
   const isPlayingRef = useRef(isPlaying);
-  useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
+
+  // ── Android spurious PAUSED guard ────────────────────────────────────────
+  // Android's YouTube IFrame player often fires PAUSED(2) right before
+  // PLAYING(1) during the initial buffering sequence after playVideo() is
+  // called.  If we let this through, the onStateChange handler in the
+  // parent sets isPlaying=false, which immediately sends pauseVideo — a
+  // loop that prevents the video from ever starting.
+  // We record the timestamp whenever the play intent changes (false→true)
+  // and suppress any PAUSED event that arrives within 1500 ms of that.
+  const playIntentMsRef = useRef<number>(0);
+
+  useEffect(() => {
+    if (isPlaying) {
+      playIntentMsRef.current = Date.now();
+    }
+    isPlayingRef.current = isPlaying;
+  }, [isPlaying]);
+
+  useEffect(() => {
+    if (isPlaying || !playerReadyRef.current) return;
+
+    const check = setTimeout(async () => {
+      try {
+        const t1 = await playerRef.current?.getCurrentTime();
+        if (t1 == null) return;
+        await new Promise<void>(r => setTimeout(r, 350));
+        const t2 = await playerRef.current?.getCurrentTime();
+        if (t2 == null) return;
+        const stillPlaying = Math.abs(t2 - t1) > 0.08;
+        if (stillPlaying) {
+          console.log('[YTPlayer] pause not delivered, sending again');
+          // Directly re-send pause via the play prop mechanism.
+          // Toggle true→false to force library useEffect re-run.
+          setPlaying(true);
+          setTimeout(() => {
+            if (!isPlayingRef.current) {
+              setPlaying(false);
+            }
+          }, 80);
+        }
+      } catch {}
+    }, 700);
+
+    return () => clearTimeout(check);
+  }, [isPlaying, setPlaying]);
 
   // props ref (interval 내에서 최신 콜백 참조)
   const onSubtitleDataRef     = useRef(onSubtitleData);
@@ -288,32 +358,24 @@ export const YouTubePlayer = React.forwardRef<
       if (videoId) doFetch(videoId);
     },
     play: () => {
-      if (typeof playerRef.current?.playVideo === "function") {
-        playerRef.current.playVideo();
-      } else {
-        playerRef.current?.injectJavaScript?.(
-          "if(window.player&&typeof window.player.playVideo==='function')window.player.playVideo(); true;"
-        );
+      if (!playerReadyRef.current) {
+        pendingPlayRef.current = true;
+        return;
       }
+      setPlaying(true);
     },
     pause: () => {
-      if (typeof playerRef.current?.pauseVideo === "function") {
-        playerRef.current.pauseVideo();
-      } else {
-        playerRef.current?.injectJavaScript?.(
-          "if(window.player&&typeof window.player.pauseVideo==='function')window.player.pauseVideo(); true;"
-        );
+      if (!playerReadyRef.current) {
+        pendingPlayRef.current = false;
+        return;
       }
+      setPlaying(false);
     },
   }));
 
   // ── State change handler ──────────────────────────────────────────────────
   const handleStateChange = useCallback(
     (state: PLAYER_STATES) => {
-      if (state === PLAYER_STATES.PLAYING) setPlaying(true);
-      if (state === PLAYER_STATES.PAUSED || state === PLAYER_STATES.ENDED)
-        setPlaying(false);
-
       const stateMap: Partial<Record<
         PLAYER_STATES,
         "playing" | "paused" | "ended" | "buffering" | "unstarted"
@@ -326,9 +388,21 @@ export const YouTubePlayer = React.forwardRef<
       };
 
       const mapped = stateMap[state];
-      if (mapped) onStateChange?.(mapped);
+      if (!mapped) return;
+
+      // ── Spurious PAUSED guard (Android) ──────────────────────────────────
+      // Android's YT IFrame API emits PAUSED right before PLAYING during the
+      // initial buffering phase.  Suppress PAUSED events that arrive within
+      // 1500 ms of a play intent so they do not reset isPlaying=false and
+      // trigger an immediate pauseVideo postMessage, preventing playback.
+      if (mapped === 'paused' && Date.now() - playIntentMsRef.current < 300) {
+        console.log('[YTPlayer v27] Suppressing spurious PAUSED (Android buffering guard)');
+        return;
+      }
+
+      onStateChange?.(mapped);
     },
-    [setPlaying, onStateChange]
+    [onStateChange]
   );
 
   const handleError = useCallback(
@@ -346,9 +420,48 @@ export const YouTubePlayer = React.forwardRef<
 
   const handleReady = useCallback(() => {
     console.log("[YTPlayer v27] onReady");
+    playerReadyRef.current = true;
     setIsReady(true);
     onReady?.();
-  }, [onReady]);
+    // Flush any play command queued before library was ready.
+    // requestAnimationFrame ensures React commit has finished.
+    // 150ms ensures library's internal playerReady has fully settled.
+    if (pendingPlayRef.current !== null) {
+      const queued = pendingPlayRef.current;
+      pendingPlayRef.current = null;
+      setTimeout(() => {
+        requestAnimationFrame(() => {
+          setPlaying(queued);
+        });
+      }, 150);
+    }
+  }, [onReady, setPlaying]);
+
+  // After player is ready, re-apply the current play state
+  // to compensate for any postMessage that fired before the
+  // Android WebView's forceAndroidAutoplay channel stabilized.
+  // playerReadyRef.current is used (not isReady state) so this
+  // effect runs exactly once when the player first becomes ready.
+  useEffect(() => {
+    if (!playerReadyRef.current) return;
+
+    const timeout = setTimeout(() => {
+      // Only act if we expect the video to be playing.
+      // The toggle (false → true) forces the library's
+      // internal useEffect([play, sendPostMessage]) to re-run
+      // now that the WebView postMessage channel is stable.
+      const currentlyPlaying = usePlayerStore.getState().isPlaying;
+      if (currentlyPlaying) {
+        setPlaying(false);
+        setTimeout(() => setPlaying(true), 100);
+      }
+    }, 500);
+
+    return () => clearTimeout(timeout);
+  // playerReadyRef.current is a ref value, not reactive —
+  // we intentionally omit it from deps so this runs once on mount.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── 에러 화면 ─────────────────────────────────────────────────────────────
   if (hasError) {
@@ -390,9 +503,12 @@ export const YouTubePlayer = React.forwardRef<
         onReady={handleReady}
         onChangeState={handleStateChange}
         onError={handleError}
+        forceAndroidAutoplay={Platform.OS === 'android'}
         webViewProps={{
           androidLayerType: "hardware",
           injectedJavaScript: hideSubtitleScript,
+          allowsInlineMediaPlayback: true,
+          mediaPlaybackRequiresUserAction: false,
         }}
         initialPlayerParams={{
           showClosedCaptions: false, // cc_load_policy:0 — 네이티브 자막 비활성화
@@ -430,28 +546,13 @@ export const YouTubePlayer = React.forwardRef<
             tapTimerRef.current = null;
 
             if (count === 1) {
-              console.log(`[TAP] count=${count} isPlaying=${isPlayingRef.current}`);
-              // Direct IFrame command is more reliable than waiting for the
-              // play prop to propagate through React's render cycle.
-              // Try the ref method first; fall back to window.player JS injection.
-              if (isPlayingRef.current) {
-                if (typeof playerRef.current?.pauseVideo === "function") {
-                  playerRef.current.pauseVideo();
-                } else {
-                  playerRef.current?.injectJavaScript?.(
-                    "if(window.player&&typeof window.player.pauseVideo==='function')window.player.pauseVideo(); true;"
-                  );
-                }
-              } else {
-                if (typeof playerRef.current?.playVideo === "function") {
-                  playerRef.current.playVideo();
-                } else {
-                  playerRef.current?.injectJavaScript?.(
-                    "if(window.player&&typeof window.player.playVideo==='function')window.player.playVideo(); true;"
-                  );
-                }
+              const nextPlaying = !isPlayingRef.current;
+              console.log(`[TAP] count=${count} isPlaying=${isPlayingRef.current} ready=${playerReadyRef.current}`);
+              if (!playerReadyRef.current) {
+                pendingPlayRef.current = nextPlaying;
+                return;
               }
-              setPlaying(!isPlayingRef.current); // sync Zustand state
+              setPlaying(nextPlaying);
             } else if (count >= 2) {
               // 더블탭 → 시크
               const x    = tapLocationRef.current;

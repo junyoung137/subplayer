@@ -36,7 +36,6 @@ import {
   Animated,
   TouchableOpacity,
   StyleSheet,
-  SafeAreaView,
   Modal,
   ScrollView,
   Pressable,
@@ -49,6 +48,7 @@ import {
   PermissionsAndroid,
   NativeModules,
 } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import * as ScreenOrientation from "expo-screen-orientation";
 import { router } from "expo-router";
 import { useTranslation } from "react-i18next";
@@ -69,7 +69,7 @@ import { useMediaProjectionProcessor } from "../hooks/useMediaProjectionProcesso
 import { useWhisperModel } from "../hooks/useWhisperModel";
 import { LANGUAGES, getLanguageByCode } from "../constants/languages";
 import { useRetranslate } from "../hooks/useRetranslate";
-import { Settings, Check, CheckCircle2, XCircle, AlertTriangle, Mic, Search } from 'lucide-react-native';
+import { Settings, Check, CheckCircle2, XCircle, AlertTriangle, Mic, Search, Loader2, AlertCircle, RotateCcw, Brain } from 'lucide-react-native';
 import { useBackgroundTranslation } from '../hooks/useBackgroundTranslation';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
@@ -125,15 +125,15 @@ function formatRemaining(secs: number): string {
   return s > 0 ? `약 ${m}분 ${s}초 남음` : `약 ${m}분 남음`;
 }
 
-function getSubtitleStatusLabel(phase: SubtitlePhase, progress: number): string {
+function getSubtitleStatusLabel(phase: SubtitlePhase, progress: number, tFn: (key: string, opts?: any) => string): string {
   switch (phase) {
-    case "fetching":         return "📡 자막 데이터 가져오는 중...";
-    case "resuming":         return "⏳ 이어서 번역 중...";
-    case "translating":      return `🌐 번역 중... ${Math.round(progress * 100)}%`;
-    case "done":             return "✓ 자막 준비 완료";
-    case "no_subtitles":     return "⚠️ 자막 없음 → Whisper 모드";
-    case "fallback_whisper": return "🎙 음성 모델 캡처 모드";
-    case "error":            return "❌ 자막 오류";
+    case "fetching":         return tFn("player.statusFetching");
+    case "resuming":         return tFn("player.statusResuming");
+    case "translating":      return tFn("player.statusTranslating", { percent: Math.round(progress * 100) });
+    case "done":             return tFn("player.statusDone");
+    case "no_subtitles":     return tFn("player.statusNoSubtitles");
+    case "fallback_whisper": return tFn("player.statusWhisper");
+    case "error":            return tFn("player.statusError");
     default:                 return "";
   }
 }
@@ -433,9 +433,9 @@ export default function YoutubePlayerScreen() {
     setPhase("fallback_whisper");
 
     Alert.alert(
-      "자막 없음",
-      "이 영상에 자막 데이터가 없습니다.\nWhisper 음성 인식 모드로 전환합니다.",
-      [{ text: "확인" }]
+      t("player.noSubtitlesTitle"),
+      t("player.noSubtitlesMessage"),
+      [{ text: t("player.noSubtitlesConfirm") }]
     );
     if (modelLoaded) startWhisper();
   }, [subtitlePhase]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -927,21 +927,21 @@ export default function YoutubePlayerScreen() {
     setRemainingSecs(null);
     if (!isResume) setLoadingLabel('');
 
-    setLoadingLabel('🔄 모델 로딩 중...');
+    setLoadingLabel(t("player.loadingModel"));
     const hasGemma = await ensureGemma();
     if (isBgRunningRef.current || myJobId !== jobIdRef.current) return;
 
     if (isResume) {
-      setLoadingLabel('⏳ 이전 번역 복원 중...');
+      setLoadingLabel(t("player.loadingRestoring"));
     } else {
-      setLoadingLabel('🧠 문장 분석 중...');
+      setLoadingLabel(t("player.loadingAnalyzing"));
 
       const jobIdAtProbe = myJobId;
       AsyncStorage.getItem(`gemma_checkpoint_v4_${youtubeVideoId ?? ''}`)
         .then(v => {
           if (!v) return;
           if (jobIdAtProbe !== jobIdRef.current) return;
-          setLoadingLabel('⏳ 이전 번역 복원 중...');
+          setLoadingLabel(t("player.loadingRestoring"));
         })
         .catch(() => {});
     }
@@ -1227,7 +1227,7 @@ export default function YoutubePlayerScreen() {
     AsyncStorage.getItem(`gemma_checkpoint_v4_${youtubeVideoId}`)
       .then(raw => {
         if (raw && loadingSubLabelRef.current === '') {
-          setLoadingLabel('⏳ 이전 번역 이어서 준비 중...');
+          setLoadingLabel(t("player.loadingModelPreparing"));
           setPhase('resuming');
         }
       })
@@ -1294,7 +1294,7 @@ export default function YoutubePlayerScreen() {
 
         allSegmentsRef.current = null;
         if (!autoFetchCompletedRef.current) {
-          setLoadingLabel('⏳ 이전 번역 이어서 준비 중...');
+          setLoadingLabel(t("player.loadingModelPreparing"));
           setPhase("resuming");
           ytPlayerRef.current?.fetchSubtitles();
         } else {
@@ -1324,7 +1324,7 @@ export default function YoutubePlayerScreen() {
           cached.segments.length > 0 ? cached.translatedCount / cached.segments.length : 0
         );
         if (!autoFetchCompletedRef.current) {
-          setLoadingLabel('⏳ 이전 번역 이어서 준비 중...');
+          setLoadingLabel(t("player.loadingModelPreparing"));
           setPhase("resuming");
           ytPlayerRef.current?.fetchSubtitles();
         } else {
@@ -1347,7 +1347,7 @@ export default function YoutubePlayerScreen() {
     }
     console.log("[CACHE] Cache miss → start fetch");
     if (subtitlePhaseRef.current !== 'resuming') {
-      setLoadingLabel('📡 자막 가져오는 중...');
+      setLoadingLabel(t("player.loadingFetching"));
     }
     setPhase("fetching");
     ytPlayerRef.current?.fetchSubtitles();
@@ -1548,10 +1548,10 @@ export default function YoutubePlayerScreen() {
       const granted = await PermissionsAndroid.request(
         PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS,
         {
-          title:           '알림 권한',
-          message:         '번역 완료 시 알림을 받으려면 권한이 필요합니다.',
-          buttonPositive:  '허용',
-          buttonNegative:  '거부',
+          title:           t("player.notifPermTitle"),
+          message:         t("player.notifPermMessage"),
+          buttonPositive:  t("player.notifPermAllow"),
+          buttonNegative:  t("player.notifPermDeny"),
         }
       );
       if (granted !== PermissionsAndroid.RESULTS.GRANTED) return;
@@ -1563,12 +1563,12 @@ export default function YoutubePlayerScreen() {
 
     if (isBgRunning) {
       Alert.alert(
-        '백그라운드 번역 중',
-        '현재 번역이 진행 중입니다.\n취소하고 새로 시작할까요?',
+        t("player.bgCancelTitle"),
+        t("player.bgCancelMessage"),
         [
-          { text: '계속 유지', style: 'cancel' },
+          { text: t("player.bgCancelKeep"), style: 'cancel' },
           {
-            text: '취소하고 새로 시작',
+            text: t("player.bgCancelRestart"),
             style: 'destructive',
             onPress: async () => {
               await cancelTranslation();
@@ -1672,21 +1672,21 @@ export default function YoutubePlayerScreen() {
           isFullscreen={isLandscape}
           onStateChange={(state) => {
             if (state === "playing") {
-              setPlaying(true);
+              if (!isPlaying) setPlaying(true);
               if (subtitlePhase === "idle" && !isBgRunningRef.current) {
                 setPhase("fetching");
               }
             }
             if (state === "paused" || state === "ended") {
-              setPlaying(false);
+              if (isPlaying) setPlaying(false);
             }
           }}
           onError={(code) => {
             Alert.alert(
-              "재생 오류",
+              t("player.embedErrorTitle"),
               code === "150" || code === "101"
-                ? "이 영상은 임베드가 허용되지 않습니다.\n다른 영상을 시도해 보세요."
-                : `YouTube 오류 코드: ${code}`
+                ? t("player.embedErrorMessage")
+                : t("player.playbackErrorMessage", { code })
             );
           }}
         />
@@ -1719,18 +1719,23 @@ export default function YoutubePlayerScreen() {
             <Text style={progressCard.title}>
               {displayPhase === 'fetching' ? t("player.loadingSubtitles") : t("player.translatingProgress")}
             </Text>
-            <Text style={progressCard.sub} numberOfLines={1}>
-              {isStale
-                ? '처리 중...'
-                : displayPhase === 'fetching'
-                  ? (loadingSubLabel || '자막 요청 중...')
-                  : (displayPhase === 'translating' || displayPhase === 'resuming') &&
-                    translatedCount > 0 && totalSegments > 0
-                    ? `${translatedCount} / ${totalSegments}`
-                    : loadingSubLabel !== ''
-                      ? loadingSubLabel
-                      : '번역 준비 중...'}
-            </Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+              {(displayPhase === 'fetching' || displayPhase === 'translating' || displayPhase === 'resuming') && (
+                <Loader2 size={11} color="#6366f1" />
+              )}
+              <Text style={progressCard.sub} numberOfLines={1}>
+                {isStale
+                  ? t("player.processing")
+                  : displayPhase === 'fetching'
+                    ? (loadingSubLabel || t("player.loadingFetching"))
+                    : (displayPhase === 'translating' || displayPhase === 'resuming') &&
+                      translatedCount > 0 && totalSegments > 0
+                      ? `${translatedCount} / ${totalSegments}`
+                      : loadingSubLabel !== ''
+                        ? loadingSubLabel
+                        : t("player.progressPreparingShort")}
+              </Text>
+            </View>
             {(displayPhase === 'translating' || displayPhase === 'resuming') && remainingSecs !== null && remainingSecs > 0 && (
               <Text style={progressCard.eta}>
                 {formatRemaining(remainingSecs)}
@@ -1753,22 +1758,14 @@ export default function YoutubePlayerScreen() {
           pillStyles.container,
           { borderLeftColor: getPillBorderColor(displayPhase) },
         ]}>
-          <View style={{ marginRight: 4 }}>
-            {displayPhase === 'error'
-              ? <XCircle size={14} color="#ef4444" />
-              : displayPhase === 'no_subtitles'
-              ? <AlertTriangle size={14} color="#f59e0b" />
-              : <Mic size={14} color="#aaa" />}
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+            {displayPhase === 'error'            && <AlertCircle size={12} color="#ef4444" />}
+            {displayPhase === 'no_subtitles'     && <AlertTriangle size={12} color="#f59e0b" />}
+            {displayPhase === 'fallback_whisper' && <Mic size={12} color="#aaa" />}
+            <Text style={[pillStyles.statusText, displayPhase === 'error' && { color: '#ef4444' }]} numberOfLines={1}>
+              {getSubtitleStatusLabel(displayPhase, subtitleProgress, t)}
+            </Text>
           </View>
-          <Text
-            style={[
-              pillStyles.statusText,
-              displayPhase === 'error' && { color: '#ef4444' },
-            ]}
-            numberOfLines={1}
-          >
-            {getSubtitleStatusLabel(displayPhase, subtitleProgress)}
-          </Text>
           <TouchableOpacity onPress={handleRetrySubtitles} style={pillStyles.retryBtn}>
             <Text style={pillStyles.retryBtnText}>{t("common.retry")}</Text>
           </TouchableOpacity>
@@ -1788,15 +1785,15 @@ export default function YoutubePlayerScreen() {
                 const p = bgStatus?.progress ?? 0;
                 const st = bgStatus?.status;
                 if (!st || st === 'fetching') {
-                  if (p < 0.02) return '자막 요청 중...';
-                  if (p < 0.05) return '자막 수신 중...';
-                  return '모델 로딩 중...';
+                  if (p < 0.02) return t("player.bgSubLabelFetching1");
+                  if (p < 0.05) return t("player.bgSubLabelFetching2");
+                  return t("player.bgSubLabelFetching3");
                 }
-                if (st === 'saving') return '결과 저장 중...';
+                if (st === 'saving') return t("player.bgSubLabelSaving");
                 if (st === 'translating' && (bgStatus?.totalCount ?? 0) > 0) {
                   return `${bgStatus!.translatedCount} / ${bgStatus!.totalCount}`;
                 }
-                return '번역 준비 중...';
+                return t("player.bgSubLabelPreparing");
               })()}
             </Text>
             {bgRemainingSecs !== null && bgRemainingSecs > 0 && (
@@ -1876,11 +1873,6 @@ export default function YoutubePlayerScreen() {
         <TouchableOpacity
           style={styles.playBtn}
           onPress={() => {
-            if (isPlaying) {
-              ytPlayerRef.current?.pause();
-            } else {
-              ytPlayerRef.current?.play();
-            }
             setPlaying(!isPlaying);
           }}
           activeOpacity={0.75}

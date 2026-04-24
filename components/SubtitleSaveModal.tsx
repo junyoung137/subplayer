@@ -11,6 +11,7 @@ import {
 } from "react-native";
 import * as Sharing from "expo-sharing";
 import { Save, Share2, Trash2, X, Check, Folder } from 'lucide-react-native';
+import { useTranslation } from "react-i18next";
 import {
   saveSubtitleFile,
   listSavedSubtitles,
@@ -54,9 +55,10 @@ function buildPreview(
   subtitles: SaveableSubtitle[],
   format: Format,
   mode: Mode,
+  noSubtitlesLabel: string,
 ): string {
   const sample = subtitles.slice(0, 3);
-  if (sample.length === 0) return "(자막 없음)";
+  if (sample.length === 0) return noSubtitlesLabel;
   return format === "srt"
     ? generateSrt(sample, mode)
     : generateTxt(sample, mode);
@@ -95,6 +97,8 @@ export function SubtitleSaveModal({
   const [saveResult, setSaveResult] = useState<string | null>(null);
   const [savedFiles, setSavedFiles] = useState<SavedFile[]>([]);
 
+  const { t } = useTranslation();
+
   const subs: SaveableSubtitle[] = subtitles.map((s) => ({
     startTime:  s.startTime,
     endTime:    s.endTime,
@@ -126,7 +130,7 @@ export function SubtitleSaveModal({
     const result = await saveSubtitleFile(subs, videoId, videoTitle, format, mode, saveMode);
 
     if (result.success) {
-      const label = saveMode === "download" ? "✓ 다운로드 완료!" : "✓ 저장 완료!";
+      const label = saveMode === "download" ? t("subtitleSave.resultDownloadDone") : t("subtitleSave.resultSaveDone");
       setSaveResult(label);
       await loadSavedFiles();
       setTimeout(() => {
@@ -134,7 +138,7 @@ export function SubtitleSaveModal({
         onClose();
       }, 2000);
     } else {
-      setSaveResult(`오류: ${result.error ?? "알 수 없는 오류"}`);
+      setSaveResult(t("subtitleSave.resultError", { error: result.error ?? t("subtitleSave.resultUnknownError") }));
     }
 
     setIsSaving(false);
@@ -144,12 +148,12 @@ export function SubtitleSaveModal({
 
   const handleDelete = (file: SavedFile) => {
     Alert.alert(
-      "자막 파일 삭제",
-      `"${file.name}"을(를) 삭제하시겠습니까?`,
+      t("subtitleSave.deleteTitle"),
+      t("subtitleSave.deleteMessage", { name: file.name }),
       [
-        { text: "취소", style: "cancel" },
+        { text: t("subtitleSave.deleteCancel"), style: "cancel" },
         {
-          text: "삭제",
+          text: t("subtitleSave.deleteConfirm"),
           style: "destructive",
           onPress: async () => {
             await deleteSavedSubtitle(file.uri);
@@ -171,7 +175,7 @@ export function SubtitleSaveModal({
 
   // ── Derived values ────────────────────────────────────────────────────────
 
-  const preview  = buildPreview(subs, format, mode);
+  const preview  = buildPreview(subs, format, mode, t("subtitleSave.previewEmpty"));
   const sizeKb   = estimatedSizeKb(subs, format, mode);
   const isMono   = format === "srt";
 
@@ -193,7 +197,7 @@ export function SubtitleSaveModal({
           <View style={styles.header}>
             <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
               <Save size={18} color="#ccc" />
-              <Text style={styles.headerTitle}>자막 저장</Text>
+              <Text style={styles.headerTitle}>{t("subtitleSave.title")}</Text>
             </View>
             <TouchableOpacity onPress={onClose} hitSlop={HIT_SLOP}>
               <X size={16} color="#888" />
@@ -206,47 +210,47 @@ export function SubtitleSaveModal({
           >
 
             {/* ── Format selection ───────────────────────────────────── */}
-            <Text style={styles.sectionLabel}>파일 형식</Text>
+            <Text style={styles.sectionLabel}>{t("subtitleSave.formatLabel")}</Text>
             <View style={styles.toggleRow}>
               <ToggleButton
                 label="SRT"
-                sublabel="영상 플레이어용"
+                sublabel={t("subtitleSave.formatSrtSub")}
                 active={format === "srt"}
                 onPress={() => setFormat("srt")}
               />
               <ToggleButton
                 label="TXT"
-                sublabel="텍스트 파일"
+                sublabel={t("subtitleSave.formatTxtSub")}
                 active={format === "txt"}
                 onPress={() => setFormat("txt")}
               />
             </View>
 
             {/* ── Content mode selection ─────────────────────────────── */}
-            <Text style={styles.sectionLabel}>자막 내용</Text>
+            <Text style={styles.sectionLabel}>{t("subtitleSave.contentLabel")}</Text>
             <View style={styles.toggleRow}>
               <ToggleButton
-                label="원문"
-                sublabel="원어만"
+                label={t("subtitleSave.modeOriginal")}
+                sublabel={t("subtitleSave.modeOriginalSub")}
                 active={mode === "original"}
                 onPress={() => setMode("original")}
               />
               <ToggleButton
-                label="번역"
-                sublabel="번역어만"
+                label={t("subtitleSave.modeTranslated")}
+                sublabel={t("subtitleSave.modeTranslatedSub")}
                 active={mode === "translated"}
                 onPress={() => setMode("translated")}
               />
               <ToggleButton
-                label="이중"
-                sublabel="원문+번역"
+                label={t("subtitleSave.modeBilingual")}
+                sublabel={t("subtitleSave.modeBilingualSub")}
                 active={mode === "bilingual"}
                 onPress={() => setMode("bilingual")}
               />
             </View>
 
             {/* ── Preview ────────────────────────────────────────────── */}
-            <Text style={styles.sectionLabel}>미리보기</Text>
+            <Text style={styles.sectionLabel}>{t("subtitleSave.previewLabel")}</Text>
             <ScrollView
               style={styles.previewBox}
               nestedScrollEnabled
@@ -260,10 +264,10 @@ export function SubtitleSaveModal({
             {/* ── Info ───────────────────────────────────────────────── */}
             <View style={styles.infoRow}>
               <Text style={styles.infoText}>
-                총 {subtitles.length}개 자막
+                {t("subtitleSave.infoCount", { count: subtitles.length })}
               </Text>
               <Text style={styles.infoText}>
-                예상 크기: {sizeKb} KB
+                {t("subtitleSave.infoSize", { size: sizeKb })}
               </Text>
             </View>
 
@@ -278,12 +282,12 @@ export function SubtitleSaveModal({
                 {isSaving ? (
                   <View style={styles.saveBtnInner}>
                     <ActivityIndicator color="#fff" size="small" />
-                    <Text style={styles.saveBtnText}>저장 중...</Text>
+                    <Text style={styles.saveBtnText}>{t("subtitleSave.saving")}</Text>
                   </View>
                 ) : (
                   <View style={styles.saveBtnInner}>
                     <Share2 size={16} color="#fff" />
-                    <Text style={styles.saveBtnText}>공유</Text>
+                    <Text style={styles.saveBtnText}>{t("subtitleSave.share")}</Text>
                   </View>
                 )}
               </TouchableOpacity>
@@ -297,12 +301,12 @@ export function SubtitleSaveModal({
                 {isSaving ? (
                   <View style={styles.saveBtnInner}>
                     <ActivityIndicator color="#fff" size="small" />
-                    <Text style={styles.saveBtnText}>저장 중...</Text>
+                    <Text style={styles.saveBtnText}>{t("subtitleSave.saving")}</Text>
                   </View>
                 ) : (
                   <View style={styles.saveBtnInner}>
                     <Save size={16} color="#fff" />
-                    <Text style={styles.saveBtnText}>기기에 저장</Text>
+                    <Text style={styles.saveBtnText}>{t("subtitleSave.saveToDevice")}</Text>
                   </View>
                 )}
               </TouchableOpacity>
@@ -320,7 +324,7 @@ export function SubtitleSaveModal({
               <>
                 <View style={[{ flexDirection: "row", alignItems: "center", gap: 6 }, styles.sectionLabelTop]}>
                   <Folder size={16} color="#aaa" />
-                  <Text style={styles.sectionLabel}>저장된 자막 목록</Text>
+                  <Text style={styles.sectionLabel}>{t("subtitleSave.savedFilesLabel")}</Text>
                 </View>
                 {savedFiles.map((file) => (
                   <View key={file.uri} style={styles.fileRow}>

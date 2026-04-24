@@ -9,12 +9,10 @@ import {
 } from "react-native";
 import Slider from "@react-native-community/slider";
 import { useSettingsStore } from "../store/useSettingsStore";
+import { useTranslation } from "react-i18next";
 
-const SUBTITLE_STYLES = [
-  { key: "outline", label: "외곽선", icon: "T" },
-  { key: "pill",    label: "박스",   icon: "T" },
-  { key: "bar",     label: "바형",   icon: "T" },
-] as const;
+const SUBTITLE_STYLE_KEYS = ["outline", "pill", "bar"] as const;
+type SubtitleStyleKey = typeof SUBTITLE_STYLE_KEYS[number];
 
 interface SubtitleQuickPanelProps {
   visible: boolean;
@@ -27,11 +25,20 @@ export function SubtitleQuickPanel({ visible, onClose }: SubtitleQuickPanelProps
   const timingOffset     = useSettingsStore((s) => s.timingOffset);
   const update           = useSettingsStore((s) => s.update);
 
+  const { t } = useTranslation();
+
+  const SUBTITLE_STYLES: { key: SubtitleStyleKey; label: string; icon: string }[] = [
+    { key: "outline", label: t("subtitlePanel.styleOutline"), icon: "T" },
+    { key: "pill",    label: t("subtitlePanel.stylePill"),    icon: "T" },
+    { key: "bar",     label: t("subtitlePanel.styleBar"),     icon: "T" },
+  ];
+
+  const offsetUnit = t("subtitlePanel.offsetUnit") ?? "s";
   const offsetLabel = timingOffset === 0
-    ? "0초"
+    ? t("subtitlePanel.offsetZero")
     : timingOffset > 0
-      ? `+${timingOffset.toFixed(1)}초`
-      : `${timingOffset.toFixed(1)}초`;
+      ? `+${timingOffset.toFixed(1)}${offsetUnit}`
+      : `${timingOffset.toFixed(1)}${offsetUnit}`;
 
   const offsetColor = timingOffset === 0 ? "#60a5fa" : timingOffset > 0 ? "#34d399" : "#f87171";
 
@@ -48,7 +55,7 @@ export function SubtitleQuickPanel({ visible, onClose }: SubtitleQuickPanelProps
           {/* 핸들 바 */}
           <View style={styles.handle} />
 
-          <Text style={styles.title}>자막 스타일</Text>
+          <Text style={styles.title}>{t("subtitlePanel.title")}</Text>
 
           {/* 스타일 선택 카드 */}
           <View style={styles.styleRow}>
@@ -64,16 +71,16 @@ export function SubtitleQuickPanel({ visible, onClose }: SubtitleQuickPanelProps
                   {/* 미리보기 영역 */}
                   <View style={styles.preview}>
                     {s.key === "outline" && (
-                      <Text style={styles.prevOutline}>자막</Text>
+                      <Text style={styles.prevOutline}>Sub</Text>
                     )}
                     {s.key === "pill" && (
                       <View style={styles.prevPillBox}>
-                        <Text style={styles.prevPillText}>자막</Text>
+                        <Text style={styles.prevPillText}>Sub</Text>
                       </View>
                     )}
                     {s.key === "bar" && (
                       <View style={styles.prevBarBox}>
-                        <Text style={styles.prevBarText}>자막</Text>
+                        <Text style={styles.prevBarText}>Sub</Text>
                       </View>
                     )}
                   </View>
@@ -88,15 +95,15 @@ export function SubtitleQuickPanel({ visible, onClose }: SubtitleQuickPanelProps
           {/* 글자 크기 슬라이더 */}
           <View style={styles.sliderSection}>
             <View style={styles.sliderHeader}>
-              <Text style={styles.sliderLabel}>글자 크기</Text>
+              <Text style={styles.sliderLabel}>{t("subtitlePanel.fontSize")}</Text>
               <Text style={styles.sliderValue}>{subtitleFontSize}px</Text>
             </View>
             <View style={styles.sliderRow}>
               <Text style={styles.sliderHint}>A</Text>
               <Slider
                 style={styles.slider}
-                minimumValue={12}
-                maximumValue={36}
+                minimumValue={10}
+                maximumValue={25}
                 step={1}
                 value={subtitleFontSize}
                 onValueChange={(v) => update({ subtitleFontSize: v })}
@@ -112,8 +119,8 @@ export function SubtitleQuickPanel({ visible, onClose }: SubtitleQuickPanelProps
           <View style={styles.sliderSection}>
             <View style={styles.sliderHeader}>
               <View>
-                <Text style={styles.sliderLabel}>자막 타이밍 오프셋</Text>
-                <Text style={styles.sliderSubLabel}>자막이 늦으면 -, 빠르면 +</Text>
+                <Text style={styles.sliderLabel}>{t("subtitlePanel.timingOffset")}</Text>
+                <Text style={styles.sliderSubLabel}>{t("subtitlePanel.timingOffsetHint")}</Text>
               </View>
               <Text style={[styles.sliderValue, { color: offsetColor }]}>{offsetLabel}</Text>
             </View>
@@ -138,17 +145,17 @@ export function SubtitleQuickPanel({ visible, onClose }: SubtitleQuickPanelProps
                 onPress={() => update({ timingOffset: 0 })}
                 activeOpacity={0.75}
               >
-                <Text style={styles.resetBtnText}>↺ 0초로 초기화</Text>
+                <Text style={styles.resetBtnText}>{t("subtitlePanel.resetToZero")}</Text>
               </TouchableOpacity>
             )}
           </View>
 
           {/* 자막 편집 안내 */}
-          <Text style={styles.editHint}>✎ 자막을 길게 누르면 직접 수정할 수 있어요</Text>
+          <Text style={styles.editHint}>{t("subtitlePanel.editHint")}</Text>
 
           {/* 닫기 버튼 */}
           <TouchableOpacity style={styles.closeBtn} onPress={onClose} activeOpacity={0.75}>
-            <Text style={styles.closeBtnText}>닫기</Text>
+            <Text style={styles.closeBtnText}>{t("subtitlePanel.close")}</Text>
           </TouchableOpacity>
 
         </Pressable>
