@@ -1,11 +1,17 @@
 /**
- * YouTubePlayer (v27)
+ * YouTubePlayer (v28)
  *
- * Subtitle source: yt-dlp proxy only (youtubeTimedText.ts).
- * Architecture:
- *   1. onReady → fetchYoutubeSubtitles(videoId) loads all TimedTextSegments
- *   2. 500ms polling loop matches currentTime ↔ segments
- *   3. onSubtitleData fires only when active segment changes
+ * 변경사항 (v27 → v28):
+ * ─────────────────────────────────────────────────────────────────────────────
+ * [BUG FIX] 외부 재생버튼 작동 안 하는 문제
+ *   - 원인: play()/pause()가 setPlaying()만 호출 → store 값이 이미 같으면
+ *           zustand가 업데이트를 건너뜀 → play prop 변화 없음 → postMessage 미전송
+ *   - 수정: useImperativeHandle의 play()/pause()에서
+ *           store 업데이트 전에 false→true (또는 true→false) 토글을 한 사이클
+ *           먼저 실행하여 prop 변화를 강제로 만듦
+ *   - 영향 범위: useImperativeHandle 내부 play/pause 2개 메서드만 변경
+ *               다른 로직(자막, 폴링, 탭, 시크 등) 전혀 변경 없음
+ * ─────────────────────────────────────────────────────────────────────────────
  */
 import React, { useRef, useCallback, useEffect, useState } from "react";
 import {
@@ -52,7 +58,7 @@ export interface YouTubePlayerProps {
 export interface YouTubePlayerHandle {
   seekTo: (t: number) => void;
   setRate: (rate: number) => void;
-  fetchSubtitles: () => void; // 수동 재시도
+  fetchSubtitles: () => void;
   play: () => void;
   pause: () => void;
 }
@@ -64,11 +70,6 @@ export interface SubtitleFetchResult {
 }
 
 // ── YouTube 내장 자막 숨김 ────────────────────────────────────────────────────
-// outer frame(lonelycpp.github.io)에서 실행됨.
-// display:none OK — DOM 읽기 불필요 (timedtext fetch 방식으로 전환)
-// YouTube 플레이어의 caption DOM은 cross-origin iframe 내부이므로
-// 실질적 숨김은 cc_load_policy:0(showClosedCaptions:false)으로 처리됨.
-// YouTube timedtext 딜레이 보정 — 발화 대비 자막이 늦게 도착하는 시간(초)
 const SUBTITLE_LEAD_S = 0.5;
 
 const hideSubtitleScript = `
@@ -77,23 +78,10 @@ const hideSubtitleScript = `
   s.innerHTML = '.ytp-caption-window-container, .captions-text { display: none !important; }';
   (document.head || document.documentElement).appendChild(s);
 
-  // ── Android postMessage bridge ──────────────────────────────────────────
-  // On Android, react-native-webview dispatches postMessage events on
-  // "document" via document.dispatchEvent(new MessageEvent(...)).
-  // The YouTube iframe library (lonelycpp/react-native-youtube-iframe)
-  // listens on "window", not "document", so play/pause commands are
-  // silently dropped on Android.  Re-dispatch document messages on window
-  // so the library's handler receives them.  On iOS, postMessage already
-  // dispatches on window, so this listener never fires there.
   if (typeof document !== 'undefined' && typeof window !== 'undefined') {
-    // Bridge for Android: react-native-webview dispatches postMessage
-    // on document, but the YouTube iframe library listens on window.
-    // Re-dispatch so both targets receive every message.
     document.addEventListener('message', function(e) {
       window.dispatchEvent(new MessageEvent('message', { data: e.data, origin: e.origin }));
     });
-    // Also override window.postMessage to ensure any direct calls
-    // from React Native WebView are captured regardless of mechanism.
     var _origPost = window.postMessage.bind(window);
     window.postMessage = function(data, origin) {
       _origPost(data, origin || '*');
@@ -153,27 +141,19 @@ export const YouTubePlayer = React.forwardRef<
   // ── 광고/버퍼링 시간 점프 감지 ───────────────────────────────────────────
   const prevTimeRef          = useRef<number>(0);
   const seekingRef           = useRef<boolean>(false);
-  // 시크 직후 폴링이 setCurrentTime을 덮어쓰지 않도록 800ms 보호
   const isTimeSyncBlockedRef = useRef<boolean>(false);
 
   // ── 탭 감지용 refs ────────────────────────────────────────────────────────
-  const tapCountRef      = useRef<number>(0);
-  const tapTimerRef      = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const tapLocationRef   = useRef<number>(0);
-  const pressStartRef    = useRef<number>(0);
+  const tapCountRef       = useRef<number>(0);
+  const tapTimerRef       = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const tapLocationRef    = useRef<number>(0);
+  const pressStartRef     = useRef<number>(0);
   const containerWidthRef = useRef<number>(0);
 
-  // isPlaying 최신값 ref (타이머 콜백 내 클로저에서 사용)
+  // isPlaying 최신값 ref
   const isPlayingRef = useRef(isPlaying);
 
   // ── Android spurious PAUSED guard ────────────────────────────────────────
-  // Android's YouTube IFrame player often fires PAUSED(2) right before
-  // PLAYING(1) during the initial buffering sequence after playVideo() is
-  // called.  If we let this through, the onStateChange handler in the
-  // parent sets isPlaying=false, which immediately sends pauseVideo — a
-  // loop that prevents the video from ever starting.
-  // We record the timestamp whenever the play intent changes (false→true)
-  // and suppress any PAUSED event that arrives within 1500 ms of that.
   const playIntentMsRef = useRef<number>(0);
 
   useEffect(() => {
@@ -195,9 +175,7 @@ export const YouTubePlayer = React.forwardRef<
         if (t2 == null) return;
         const stillPlaying = Math.abs(t2 - t1) > 0.08;
         if (stillPlaying) {
-          console.log('[YTPlayer] pause not delivered, sending again');
-          // Directly re-send pause via the play prop mechanism.
-          // Toggle true→false to force library useEffect re-run.
+          console.log('[YTPlayer v28] pause not delivered, sending again');
           setPlaying(true);
           setTimeout(() => {
             if (!isPlayingRef.current) {
@@ -211,11 +189,11 @@ export const YouTubePlayer = React.forwardRef<
     return () => clearTimeout(check);
   }, [isPlaying, setPlaying]);
 
-  // props ref (interval 내에서 최신 콜백 참조)
-  const onSubtitleDataRef     = useRef(onSubtitleData);
-  const onSubtitleClearRef    = useRef(onSubtitleClear);
-  const onSubtitlesLoadedRef  = useRef(onSubtitlesLoaded);
-  const onSeekRef             = useRef(onSeek);
+  // props ref
+  const onSubtitleDataRef    = useRef(onSubtitleData);
+  const onSubtitleClearRef   = useRef(onSubtitleClear);
+  const onSubtitlesLoadedRef = useRef(onSubtitlesLoaded);
+  const onSeekRef            = useRef(onSeek);
   useEffect(() => { onSubtitleDataRef.current = onSubtitleData; }, [onSubtitleData]);
   useEffect(() => { onSubtitleClearRef.current = onSubtitleClear; }, [onSubtitleClear]);
   useEffect(() => { onSubtitlesLoadedRef.current = onSubtitlesLoaded; }, [onSubtitlesLoaded]);
@@ -230,21 +208,18 @@ export const YouTubePlayer = React.forwardRef<
 
       (async () => {
         try {
-          console.log(`[YTPlayer v27] caption fetch 시작: ${vid}`);
+          console.log(`[YTPlayer v28] caption fetch 시작: ${vid}`);
           const result = await fetchYoutubeSubtitles(vid, "en");
           if (cancelled) return;
 
           if (result && result.segments.length > 0) {
-            // 1. 정렬
             const raw = [...result.segments].sort((a, b) => a.startTime - b.startTime);
 
-            // 2. 중복 / 0-길이 세그먼트 제거 (startTime 차이 < 0.1s)
             const deduped = raw.filter((seg, i) => {
               if (i === 0) return true;
               return seg.startTime >= raw[i - 1].startTime + 0.1;
             });
 
-            // 3. 오버랩 해소: endTime을 다음 세그먼트 startTime으로 클리핑
             for (let i = 0; i < deduped.length - 1; i++) {
               if (deduped[i].endTime > deduped[i + 1].startTime) {
                 deduped[i] = { ...deduped[i], endTime: deduped[i + 1].startTime };
@@ -255,14 +230,14 @@ export const YouTubePlayer = React.forwardRef<
             captionLangRef.current    = result.language;
             onSubtitlesLoadedRef.current?.(deduped, result.language);
             console.log(
-              `[YTPlayer v27] ${deduped.length}개 세그먼트 로드 완료 (raw=${result.segments.length}, lang=${result.language})`
+              `[YTPlayer v28] ${deduped.length}개 세그먼트 로드 완료 (raw=${result.segments.length}, lang=${result.language})`
             );
           } else {
-            console.log(`[YTPlayer v27] 자막 없음: ${vid}`);
+            console.log(`[YTPlayer v28] 자막 없음: ${vid}`);
           }
         } catch (e) {
           if (cancelled) return;
-          console.warn("[YTPlayer v27] caption fetch 오류:", e);
+          console.warn("[YTPlayer v28] caption fetch 오류:", e);
         }
       })();
 
@@ -271,20 +246,18 @@ export const YouTubePlayer = React.forwardRef<
     []
   );
 
-  // isReady + videoId 변경 시 caption fetch 트리거
   useEffect(() => {
     if (!isReady || !videoId) return;
     return doFetch(videoId);
   }, [isReady, videoId, doFetch]);
 
-  // videoId 변경 시 이전 세그먼트 즉시 클리어 (새 영상 로드 전 잔존 자막 방지)
   useEffect(() => {
     loadedSegmentsRef.current  = [];
     lastEmittedTextRef.current = "";
     onSubtitleClearRef.current?.();
   }, [videoId]);
 
-  // ── 500ms polling: currentTime/duration + subtitle sync ──────────────────
+  // ── 500ms polling ─────────────────────────────────────────────────────────
   useEffect(() => {
     if (!isReady) return;
     const timer = setInterval(async () => {
@@ -294,18 +267,14 @@ export const YouTubePlayer = React.forwardRef<
         const d = await playerRef.current?.getDuration();
 
         if (t != null) {
-          // 시크 직후 800ms 동안은 폴링이 낙관적 업데이트를 덮어쓰지 않음
           if (!isTimeSyncBlockedRef.current) setCurrentTime(t);
 
-          // ── timedtext 실시간 동기화 ────────────────────────────────────
           const segments = loadedSegmentsRef.current;
           if (segments.length > 0) {
-            // 광고/버퍼링 종료 후 시간이 10초 이상 점프하면 한 사이클 건너뜀
             const timeDelta = Math.abs(t - prevTimeRef.current);
             prevTimeRef.current = t;
-            if (timeDelta > 10) return; // 불안정한 전환 구간 — 다음 폴링까지 대기
+            if (timeDelta > 10) return;
 
-            // 자막 룩업만 lead offset 적용 (시크바 표시에는 미적용)
             const lookupTime = t + SUBTITLE_LEAD_S;
             const active = segments.find(
               (s) => lookupTime >= s.startTime && lookupTime < s.endTime
@@ -326,7 +295,6 @@ export const YouTubePlayer = React.forwardRef<
                 });
               }
             } else if (lastEmittedTextRef.current !== "") {
-              // 세그먼트 간 공백 구간
               seekingRef.current         = false;
               lastEmittedTextRef.current = "";
               onSubtitleClearRef.current?.();
@@ -340,9 +308,8 @@ export const YouTubePlayer = React.forwardRef<
     return () => clearInterval(timer);
   }, [isReady, setCurrentTime, setDuration]);
 
-  // ── 단일탭(재생·일시정지) + 더블탭(±10초 시크) ────────────────────────────
   const DOUBLE_TAP_MS = 300;
-  const TAP_MAX_MS    = 250; // 이보다 길면 롱프레스로 간주, 탭 무시
+  const TAP_MAX_MS    = 250;
   const SEEK_DELTA    = 10;
 
   // ── Ref 메서드 노출 ───────────────────────────────────────────────────────
@@ -357,19 +324,43 @@ export const YouTubePlayer = React.forwardRef<
     fetchSubtitles: () => {
       if (videoId) doFetch(videoId);
     },
+
+    // [BUG FIX] 외부 재생버튼 수정
+    // 문제: setPlaying(true)만 호출하면 store 값이 이미 true일 때
+    //       zustand가 동일 값으로 판단해 상태 업데이트를 건너뜀
+    //       → play prop 변화 없음 → postMessage 미전송 → 재생 안 됨
+    // 해결: 현재 store 값과 관계없이 false→true 토글을 강제로 실행하여
+    //       react-native-youtube-iframe의 play prop 변화를 보장
     play: () => {
       if (!playerReadyRef.current) {
         pendingPlayRef.current = true;
         return;
       }
-      setPlaying(true);
+      // 이미 playing 상태여도 prop 변화를 강제로 만들기 위해 토글
+      const alreadyPlaying = isPlayingRef.current;
+      if (alreadyPlaying) {
+        // false → true 토글: prop이 변해야 library가 playVideo postMessage 전송
+        setPlaying(false);
+        setTimeout(() => setPlaying(true), 50);
+      } else {
+        setPlaying(true);
+      }
     },
+
     pause: () => {
       if (!playerReadyRef.current) {
         pendingPlayRef.current = false;
         return;
       }
-      setPlaying(false);
+      // 이미 paused 상태여도 prop 변화를 강제로 만들기 위해 토글
+      const alreadyPaused = !isPlayingRef.current;
+      if (alreadyPaused) {
+        // true → false 토글
+        setPlaying(true);
+        setTimeout(() => setPlaying(false), 50);
+      } else {
+        setPlaying(false);
+      }
     },
   }));
 
@@ -390,13 +381,8 @@ export const YouTubePlayer = React.forwardRef<
       const mapped = stateMap[state];
       if (!mapped) return;
 
-      // ── Spurious PAUSED guard (Android) ──────────────────────────────────
-      // Android's YT IFrame API emits PAUSED right before PLAYING during the
-      // initial buffering phase.  Suppress PAUSED events that arrive within
-      // 1500 ms of a play intent so they do not reset isPlaying=false and
-      // trigger an immediate pauseVideo postMessage, preventing playback.
       if (mapped === 'paused' && Date.now() - playIntentMsRef.current < 300) {
-        console.log('[YTPlayer v27] Suppressing spurious PAUSED (Android buffering guard)');
+        console.log('[YTPlayer v28] Suppressing spurious PAUSED (Android buffering guard)');
         return;
       }
 
@@ -408,7 +394,7 @@ export const YouTubePlayer = React.forwardRef<
   const handleError = useCallback(
     (e: string) => {
       if (!e || e === "undefined") {
-        console.warn("[YTPlayer v27] handleError 무시: code=", e);
+        console.warn("[YTPlayer v28] handleError 무시: code=", e);
         return;
       }
       setHasError(true);
@@ -419,13 +405,10 @@ export const YouTubePlayer = React.forwardRef<
   );
 
   const handleReady = useCallback(() => {
-    console.log("[YTPlayer v27] onReady");
+    console.log("[YTPlayer v28] onReady");
     playerReadyRef.current = true;
     setIsReady(true);
     onReady?.();
-    // Flush any play command queued before library was ready.
-    // requestAnimationFrame ensures React commit has finished.
-    // 150ms ensures library's internal playerReady has fully settled.
     if (pendingPlayRef.current !== null) {
       const queued = pendingPlayRef.current;
       pendingPlayRef.current = null;
@@ -437,19 +420,10 @@ export const YouTubePlayer = React.forwardRef<
     }
   }, [onReady, setPlaying]);
 
-  // After player is ready, re-apply the current play state
-  // to compensate for any postMessage that fired before the
-  // Android WebView's forceAndroidAutoplay channel stabilized.
-  // playerReadyRef.current is used (not isReady state) so this
-  // effect runs exactly once when the player first becomes ready.
   useEffect(() => {
     if (!playerReadyRef.current) return;
 
     const timeout = setTimeout(() => {
-      // Only act if we expect the video to be playing.
-      // The toggle (false → true) forces the library's
-      // internal useEffect([play, sendPostMessage]) to re-run
-      // now that the WebView postMessage channel is stable.
       const currentlyPlaying = usePlayerStore.getState().isPlaying;
       if (currentlyPlaying) {
         setPlaying(false);
@@ -458,8 +432,6 @@ export const YouTubePlayer = React.forwardRef<
     }, 500);
 
     return () => clearTimeout(timeout);
-  // playerReadyRef.current is a ref value, not reactive —
-  // we intentionally omit it from deps so this runs once on mount.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -511,7 +483,7 @@ export const YouTubePlayer = React.forwardRef<
           mediaPlaybackRequiresUserAction: false,
         }}
         initialPlayerParams={{
-          showClosedCaptions: false, // cc_load_policy:0 — 네이티브 자막 비활성화
+          showClosedCaptions: false,
           controls: false,
           rel: false,
           modestbranding: true,
@@ -520,13 +492,6 @@ export const YouTubePlayer = React.forwardRef<
           preventFullScreen: false,
         }}
       />
-      {/*
-        단일탭 / 더블탭 오버레이
-        - TouchableOpacity 대신 onStartShouldSetResponder View 사용
-        - 모든 탭을 가로채서 300ms 창으로 단일/더블 구분
-        - 단일탭 → 재생/일시정지 토글
-        - 더블탭 좌반 → −10s 시크, 우반 → +10s 시크
-      */}
       <View
         style={StyleSheet.absoluteFillObject}
         onStartShouldSetResponder={() => true}
@@ -535,7 +500,7 @@ export const YouTubePlayer = React.forwardRef<
           tapLocationRef.current = e.nativeEvent.locationX;
         }}
         onResponderRelease={() => {
-          if (Date.now() - pressStartRef.current > TAP_MAX_MS) return; // 롱프레스 무시
+          if (Date.now() - pressStartRef.current > TAP_MAX_MS) return;
 
           tapCountRef.current += 1;
           if (tapTimerRef.current) clearTimeout(tapTimerRef.current);
@@ -554,7 +519,6 @@ export const YouTubePlayer = React.forwardRef<
               }
               setPlaying(nextPlaying);
             } else if (count >= 2) {
-              // 더블탭 → 시크
               const x    = tapLocationRef.current;
               const w    = containerWidthRef.current;
               const side = w > 0 && x < w / 2 ? "left" : "right";
