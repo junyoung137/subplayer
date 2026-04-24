@@ -1,17 +1,11 @@
 /**
- * YouTubePlayer (v28)
+ * YouTubePlayer (v27)
  *
- * 변경사항 (v27 → v28):
- * ─────────────────────────────────────────────────────────────────────────────
- * [BUG FIX] 외부 재생버튼 작동 안 하는 문제
- *   - 원인: play()/pause()가 setPlaying()만 호출 → store 값이 이미 같으면
- *           zustand가 업데이트를 건너뜀 → play prop 변화 없음 → postMessage 미전송
- *   - 수정: useImperativeHandle의 play()/pause()에서
- *           store 업데이트 전에 false→true (또는 true→false) 토글을 한 사이클
- *           먼저 실행하여 prop 변화를 강제로 만듦
- *   - 영향 범위: useImperativeHandle 내부 play/pause 2개 메서드만 변경
- *               다른 로직(자막, 폴링, 탭, 시크 등) 전혀 변경 없음
- * ─────────────────────────────────────────────────────────────────────────────
+ * Subtitle source: yt-dlp proxy only (youtubeTimedText.ts).
+ * Architecture:
+ *   1. onReady → fetchYoutubeSubtitles(videoId) loads all TimedTextSegments
+ *   2. 500ms polling loop matches currentTime ↔ segments
+ *   3. onSubtitleData fires only when active segment changes
  */
 import React, { useRef, useCallback, useEffect, useState } from "react";
 import {
@@ -20,7 +14,6 @@ import {
   ActivityIndicator,
   Text,
   TouchableOpacity,
-  Platform,
 } from "react-native";
 import YoutubePlayer, {
   YoutubeIframeRef,
@@ -58,7 +51,7 @@ export interface YouTubePlayerProps {
 export interface YouTubePlayerHandle {
   seekTo: (t: number) => void;
   setRate: (rate: number) => void;
-  fetchSubtitles: () => void;
+  fetchSubtitles: () => void; // 수동 재시도
   play: () => void;
   pause: () => void;
 }
@@ -70,6 +63,11 @@ export interface SubtitleFetchResult {
 }
 
 // ── YouTube 내장 자막 숨김 ────────────────────────────────────────────────────
+// outer frame(lonelycpp.github.io)에서 실행됨.
+// display:none OK — DOM 읽기 불필요 (timedtext fetch 방식으로 전환)
+// YouTube 플레이어의 caption DOM은 cross-origin iframe 내부이므로
+// 실질적 숨김은 cc_load_policy:0(showClosedCaptions:false)으로 처리됨.
+// YouTube timedtext 딜레이 보정 — 발화 대비 자막이 늦게 도착하는 시간(초)
 const SUBTITLE_LEAD_S = 0.5;
 
 const hideSubtitleScript = `
@@ -77,19 +75,6 @@ const hideSubtitleScript = `
   var s = document.createElement('style');
   s.innerHTML = '.ytp-caption-window-container, .captions-text { display: none !important; }';
   (document.head || document.documentElement).appendChild(s);
-
-  if (typeof document !== 'undefined' && typeof window !== 'undefined') {
-    document.addEventListener('message', function(e) {
-      window.dispatchEvent(new MessageEvent('message', { data: e.data, origin: e.origin }));
-    });
-    var _origPost = window.postMessage.bind(window);
-    window.postMessage = function(data, origin) {
-      _origPost(data, origin || '*');
-      try {
-        document.dispatchEvent(new MessageEvent('message', { data: data }));
-      } catch(e) {}
-    };
-  }
 })();
 true;
 `;
@@ -116,7 +101,11 @@ export const YouTubePlayer = React.forwardRef<
   },
   ref
 ) {
-  const playerRef = useRef<YoutubeIframeRef>(null);
+  const playerRef = useRef<YoutubeIframeRef & {
+    injectJavaScript?: (s: string) => void;
+    playVideo?: () => void;
+    pauseVideo?: () => void;
+  }>(null);
 
   const [isReady, setIsReady]         = useState(false);
   const [hasError, setHasError]       = useState(false);
@@ -130,9 +119,6 @@ export const YouTubePlayer = React.forwardRef<
   const setPlaying     = usePlayerStore((s) => s.setPlaying);
   const isPlaying      = usePlayerStore((s) => s.isPlaying);
 
-  const playerReadyRef = useRef(false);
-  const pendingPlayRef = useRef<boolean | null>(null);
-
   // ── timedtext 상태 ────────────────────────────────────────────────────────
   const loadedSegmentsRef  = useRef<TimedTextSegment[]>([]);
   const captionLangRef     = useRef<string>("auto");
@@ -141,59 +127,25 @@ export const YouTubePlayer = React.forwardRef<
   // ── 광고/버퍼링 시간 점프 감지 ───────────────────────────────────────────
   const prevTimeRef          = useRef<number>(0);
   const seekingRef           = useRef<boolean>(false);
+  // 시크 직후 폴링이 setCurrentTime을 덮어쓰지 않도록 800ms 보호
   const isTimeSyncBlockedRef = useRef<boolean>(false);
 
   // ── 탭 감지용 refs ────────────────────────────────────────────────────────
-  const tapCountRef       = useRef<number>(0);
-  const tapTimerRef       = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const tapLocationRef    = useRef<number>(0);
-  const pressStartRef     = useRef<number>(0);
+  const tapCountRef      = useRef<number>(0);
+  const tapTimerRef      = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const tapLocationRef   = useRef<number>(0);
+  const pressStartRef    = useRef<number>(0);
   const containerWidthRef = useRef<number>(0);
 
-  // isPlaying 최신값 ref
+  // isPlaying 최신값 ref (타이머 콜백 내 클로저에서 사용)
   const isPlayingRef = useRef(isPlaying);
+  useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
 
-  // ── Android spurious PAUSED guard ────────────────────────────────────────
-  const playIntentMsRef = useRef<number>(0);
-
-  useEffect(() => {
-    if (isPlaying) {
-      playIntentMsRef.current = Date.now();
-    }
-    isPlayingRef.current = isPlaying;
-  }, [isPlaying]);
-
-  useEffect(() => {
-    if (isPlaying || !playerReadyRef.current) return;
-
-    const check = setTimeout(async () => {
-      try {
-        const t1 = await playerRef.current?.getCurrentTime();
-        if (t1 == null) return;
-        await new Promise<void>(r => setTimeout(r, 350));
-        const t2 = await playerRef.current?.getCurrentTime();
-        if (t2 == null) return;
-        const stillPlaying = Math.abs(t2 - t1) > 0.08;
-        if (stillPlaying) {
-          console.log('[YTPlayer v28] pause not delivered, sending again');
-          setPlaying(true);
-          setTimeout(() => {
-            if (!isPlayingRef.current) {
-              setPlaying(false);
-            }
-          }, 80);
-        }
-      } catch {}
-    }, 700);
-
-    return () => clearTimeout(check);
-  }, [isPlaying, setPlaying]);
-
-  // props ref
-  const onSubtitleDataRef    = useRef(onSubtitleData);
-  const onSubtitleClearRef   = useRef(onSubtitleClear);
-  const onSubtitlesLoadedRef = useRef(onSubtitlesLoaded);
-  const onSeekRef            = useRef(onSeek);
+  // props ref (interval 내에서 최신 콜백 참조)
+  const onSubtitleDataRef     = useRef(onSubtitleData);
+  const onSubtitleClearRef    = useRef(onSubtitleClear);
+  const onSubtitlesLoadedRef  = useRef(onSubtitlesLoaded);
+  const onSeekRef             = useRef(onSeek);
   useEffect(() => { onSubtitleDataRef.current = onSubtitleData; }, [onSubtitleData]);
   useEffect(() => { onSubtitleClearRef.current = onSubtitleClear; }, [onSubtitleClear]);
   useEffect(() => { onSubtitlesLoadedRef.current = onSubtitlesLoaded; }, [onSubtitlesLoaded]);
@@ -208,18 +160,21 @@ export const YouTubePlayer = React.forwardRef<
 
       (async () => {
         try {
-          console.log(`[YTPlayer v28] caption fetch 시작: ${vid}`);
+          console.log(`[YTPlayer v27] caption fetch 시작: ${vid}`);
           const result = await fetchYoutubeSubtitles(vid, "en");
           if (cancelled) return;
 
           if (result && result.segments.length > 0) {
+            // 1. 정렬
             const raw = [...result.segments].sort((a, b) => a.startTime - b.startTime);
 
+            // 2. 중복 / 0-길이 세그먼트 제거 (startTime 차이 < 0.1s)
             const deduped = raw.filter((seg, i) => {
               if (i === 0) return true;
               return seg.startTime >= raw[i - 1].startTime + 0.1;
             });
 
+            // 3. 오버랩 해소: endTime을 다음 세그먼트 startTime으로 클리핑
             for (let i = 0; i < deduped.length - 1; i++) {
               if (deduped[i].endTime > deduped[i + 1].startTime) {
                 deduped[i] = { ...deduped[i], endTime: deduped[i + 1].startTime };
@@ -230,14 +185,14 @@ export const YouTubePlayer = React.forwardRef<
             captionLangRef.current    = result.language;
             onSubtitlesLoadedRef.current?.(deduped, result.language);
             console.log(
-              `[YTPlayer v28] ${deduped.length}개 세그먼트 로드 완료 (raw=${result.segments.length}, lang=${result.language})`
+              `[YTPlayer v27] ${deduped.length}개 세그먼트 로드 완료 (raw=${result.segments.length}, lang=${result.language})`
             );
           } else {
-            console.log(`[YTPlayer v28] 자막 없음: ${vid}`);
+            console.log(`[YTPlayer v27] 자막 없음: ${vid}`);
           }
         } catch (e) {
           if (cancelled) return;
-          console.warn("[YTPlayer v28] caption fetch 오류:", e);
+          console.warn("[YTPlayer v27] caption fetch 오류:", e);
         }
       })();
 
@@ -246,18 +201,20 @@ export const YouTubePlayer = React.forwardRef<
     []
   );
 
+  // isReady + videoId 변경 시 caption fetch 트리거
   useEffect(() => {
     if (!isReady || !videoId) return;
     return doFetch(videoId);
   }, [isReady, videoId, doFetch]);
 
+  // videoId 변경 시 이전 세그먼트 즉시 클리어 (새 영상 로드 전 잔존 자막 방지)
   useEffect(() => {
     loadedSegmentsRef.current  = [];
     lastEmittedTextRef.current = "";
     onSubtitleClearRef.current?.();
   }, [videoId]);
 
-  // ── 500ms polling ─────────────────────────────────────────────────────────
+  // ── 500ms polling: currentTime/duration + subtitle sync ──────────────────
   useEffect(() => {
     if (!isReady) return;
     const timer = setInterval(async () => {
@@ -267,14 +224,18 @@ export const YouTubePlayer = React.forwardRef<
         const d = await playerRef.current?.getDuration();
 
         if (t != null) {
+          // 시크 직후 800ms 동안은 폴링이 낙관적 업데이트를 덮어쓰지 않음
           if (!isTimeSyncBlockedRef.current) setCurrentTime(t);
 
+          // ── timedtext 실시간 동기화 ────────────────────────────────────
           const segments = loadedSegmentsRef.current;
           if (segments.length > 0) {
+            // 광고/버퍼링 종료 후 시간이 10초 이상 점프하면 한 사이클 건너뜀
             const timeDelta = Math.abs(t - prevTimeRef.current);
             prevTimeRef.current = t;
-            if (timeDelta > 10) return;
+            if (timeDelta > 10) return; // 불안정한 전환 구간 — 다음 폴링까지 대기
 
+            // 자막 룩업만 lead offset 적용 (시크바 표시에는 미적용)
             const lookupTime = t + SUBTITLE_LEAD_S;
             const active = segments.find(
               (s) => lookupTime >= s.startTime && lookupTime < s.endTime
@@ -295,6 +256,7 @@ export const YouTubePlayer = React.forwardRef<
                 });
               }
             } else if (lastEmittedTextRef.current !== "") {
+              // 세그먼트 간 공백 구간
               seekingRef.current         = false;
               lastEmittedTextRef.current = "";
               onSubtitleClearRef.current?.();
@@ -308,8 +270,9 @@ export const YouTubePlayer = React.forwardRef<
     return () => clearInterval(timer);
   }, [isReady, setCurrentTime, setDuration]);
 
+  // ── 단일탭(재생·일시정지) + 더블탭(±10초 시크) ────────────────────────────
   const DOUBLE_TAP_MS = 300;
-  const TAP_MAX_MS    = 250;
+  const TAP_MAX_MS    = 250; // 이보다 길면 롱프레스로 간주, 탭 무시
   const SEEK_DELTA    = 10;
 
   // ── Ref 메서드 노출 ───────────────────────────────────────────────────────
@@ -324,42 +287,22 @@ export const YouTubePlayer = React.forwardRef<
     fetchSubtitles: () => {
       if (videoId) doFetch(videoId);
     },
-
-    // [BUG FIX] 외부 재생버튼 수정
-    // 문제: setPlaying(true)만 호출하면 store 값이 이미 true일 때
-    //       zustand가 동일 값으로 판단해 상태 업데이트를 건너뜀
-    //       → play prop 변화 없음 → postMessage 미전송 → 재생 안 됨
-    // 해결: 현재 store 값과 관계없이 false→true 토글을 강제로 실행하여
-    //       react-native-youtube-iframe의 play prop 변화를 보장
     play: () => {
-      if (!playerReadyRef.current) {
-        pendingPlayRef.current = true;
-        return;
-      }
-      // 이미 playing 상태여도 prop 변화를 강제로 만들기 위해 토글
-      const alreadyPlaying = isPlayingRef.current;
-      if (alreadyPlaying) {
-        // false → true 토글: prop이 변해야 library가 playVideo postMessage 전송
-        setPlaying(false);
-        setTimeout(() => setPlaying(true), 50);
+      if (typeof playerRef.current?.playVideo === "function") {
+        playerRef.current.playVideo();
       } else {
-        setPlaying(true);
+        playerRef.current?.injectJavaScript?.(
+          "if(window.player&&typeof window.player.playVideo==='function')window.player.playVideo(); true;"
+        );
       }
     },
-
     pause: () => {
-      if (!playerReadyRef.current) {
-        pendingPlayRef.current = false;
-        return;
-      }
-      // 이미 paused 상태여도 prop 변화를 강제로 만들기 위해 토글
-      const alreadyPaused = !isPlayingRef.current;
-      if (alreadyPaused) {
-        // true → false 토글
-        setPlaying(true);
-        setTimeout(() => setPlaying(false), 50);
+      if (typeof playerRef.current?.pauseVideo === "function") {
+        playerRef.current.pauseVideo();
       } else {
-        setPlaying(false);
+        playerRef.current?.injectJavaScript?.(
+          "if(window.player&&typeof window.player.pauseVideo==='function')window.player.pauseVideo(); true;"
+        );
       }
     },
   }));
@@ -367,6 +310,10 @@ export const YouTubePlayer = React.forwardRef<
   // ── State change handler ──────────────────────────────────────────────────
   const handleStateChange = useCallback(
     (state: PLAYER_STATES) => {
+      if (state === PLAYER_STATES.PLAYING) setPlaying(true);
+      if (state === PLAYER_STATES.PAUSED || state === PLAYER_STATES.ENDED)
+        setPlaying(false);
+
       const stateMap: Partial<Record<
         PLAYER_STATES,
         "playing" | "paused" | "ended" | "buffering" | "unstarted"
@@ -379,22 +326,15 @@ export const YouTubePlayer = React.forwardRef<
       };
 
       const mapped = stateMap[state];
-      if (!mapped) return;
-
-      if (mapped === 'paused' && Date.now() - playIntentMsRef.current < 300) {
-        console.log('[YTPlayer v28] Suppressing spurious PAUSED (Android buffering guard)');
-        return;
-      }
-
-      onStateChange?.(mapped);
+      if (mapped) onStateChange?.(mapped);
     },
-    [onStateChange]
+    [setPlaying, onStateChange]
   );
 
   const handleError = useCallback(
     (e: string) => {
       if (!e || e === "undefined") {
-        console.warn("[YTPlayer v28] handleError 무시: code=", e);
+        console.warn("[YTPlayer v27] handleError 무시: code=", e);
         return;
       }
       setHasError(true);
@@ -405,35 +345,10 @@ export const YouTubePlayer = React.forwardRef<
   );
 
   const handleReady = useCallback(() => {
-    console.log("[YTPlayer v28] onReady");
-    playerReadyRef.current = true;
+    console.log("[YTPlayer v27] onReady");
     setIsReady(true);
     onReady?.();
-    if (pendingPlayRef.current !== null) {
-      const queued = pendingPlayRef.current;
-      pendingPlayRef.current = null;
-      setTimeout(() => {
-        requestAnimationFrame(() => {
-          setPlaying(queued);
-        });
-      }, 150);
-    }
-  }, [onReady, setPlaying]);
-
-  useEffect(() => {
-    if (!playerReadyRef.current) return;
-
-    const timeout = setTimeout(() => {
-      const currentlyPlaying = usePlayerStore.getState().isPlaying;
-      if (currentlyPlaying) {
-        setPlaying(false);
-        setTimeout(() => setPlaying(true), 100);
-      }
-    }, 500);
-
-    return () => clearTimeout(timeout);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [onReady]);
 
   // ── 에러 화면 ─────────────────────────────────────────────────────────────
   if (hasError) {
@@ -475,15 +390,12 @@ export const YouTubePlayer = React.forwardRef<
         onReady={handleReady}
         onChangeState={handleStateChange}
         onError={handleError}
-        forceAndroidAutoplay={Platform.OS === 'android'}
         webViewProps={{
           androidLayerType: "hardware",
           injectedJavaScript: hideSubtitleScript,
-          allowsInlineMediaPlayback: true,
-          mediaPlaybackRequiresUserAction: false,
         }}
         initialPlayerParams={{
-          showClosedCaptions: false,
+          showClosedCaptions: false, // cc_load_policy:0 — 네이티브 자막 비활성화
           controls: false,
           rel: false,
           modestbranding: true,
@@ -492,6 +404,13 @@ export const YouTubePlayer = React.forwardRef<
           preventFullScreen: false,
         }}
       />
+      {/*
+        단일탭 / 더블탭 오버레이
+        - TouchableOpacity 대신 onStartShouldSetResponder View 사용
+        - 모든 탭을 가로채서 300ms 창으로 단일/더블 구분
+        - 단일탭 → 재생/일시정지 토글
+        - 더블탭 좌반 → −10s 시크, 우반 → +10s 시크
+      */}
       <View
         style={StyleSheet.absoluteFillObject}
         onStartShouldSetResponder={() => true}
@@ -500,7 +419,7 @@ export const YouTubePlayer = React.forwardRef<
           tapLocationRef.current = e.nativeEvent.locationX;
         }}
         onResponderRelease={() => {
-          if (Date.now() - pressStartRef.current > TAP_MAX_MS) return;
+          if (Date.now() - pressStartRef.current > TAP_MAX_MS) return; // 롱프레스 무시
 
           tapCountRef.current += 1;
           if (tapTimerRef.current) clearTimeout(tapTimerRef.current);
@@ -511,14 +430,30 @@ export const YouTubePlayer = React.forwardRef<
             tapTimerRef.current = null;
 
             if (count === 1) {
-              const nextPlaying = !isPlayingRef.current;
-              console.log(`[TAP] count=${count} isPlaying=${isPlayingRef.current} ready=${playerReadyRef.current}`);
-              if (!playerReadyRef.current) {
-                pendingPlayRef.current = nextPlaying;
-                return;
+              console.log(`[TAP] count=${count} isPlaying=${isPlayingRef.current}`);
+              // Direct IFrame command is more reliable than waiting for the
+              // play prop to propagate through React's render cycle.
+              // Try the ref method first; fall back to window.player JS injection.
+              if (isPlayingRef.current) {
+                if (typeof playerRef.current?.pauseVideo === "function") {
+                  playerRef.current.pauseVideo();
+                } else {
+                  playerRef.current?.injectJavaScript?.(
+                    "if(window.player&&typeof window.player.pauseVideo==='function')window.player.pauseVideo(); true;"
+                  );
+                }
+              } else {
+                if (typeof playerRef.current?.playVideo === "function") {
+                  playerRef.current.playVideo();
+                } else {
+                  playerRef.current?.injectJavaScript?.(
+                    "if(window.player&&typeof window.player.playVideo==='function')window.player.playVideo(); true;"
+                  );
+                }
               }
-              setPlaying(nextPlaying);
+              setPlaying(!isPlayingRef.current); // sync Zustand state
             } else if (count >= 2) {
+              // 더블탭 → 시크
               const x    = tapLocationRef.current;
               const w    = containerWidthRef.current;
               const side = w > 0 && x < w / 2 ? "left" : "right";

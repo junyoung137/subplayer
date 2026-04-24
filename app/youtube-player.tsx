@@ -1,31 +1,17 @@
 /**
- * YoutubePlayerScreen (v16)
+ * YoutubePlayerScreen (v19)
  *
- * 변경사항 (v15 → v16):
+ * 변경사항 (v18 → v19):
  * ─────────────────────────────────────────────────────────────────────────────
- * [BUG FIX 1] BG 번역 중 FG 번역 동시 실행 방지
- *   - handleSubtitlesLoaded: isBgRunning 체크 추가
- *   - handlePlayerReady: isBgRunning 시 fetchSubtitles 호출 자체 차단
- *   - translateFromResult: isBgRunning ref 체크 추가
- *
- * [BUG FIX 2] BG progress 0%에서 멈추는 문제
- *   - useBackgroundTranslation POLL_INTERVAL_MS 기본값이 2000ms로 느림
- *   - bgStatus polling을 500ms로 강화 (BG 활성 시에만)
- *   - bgStatus.progress === 0 shimmer → 실제 progress 반영 즉시 전환
- *   - backgroundTranslationTask onProgress throttle 완화:
- *     completed % 5 → completed % 2 (더 자주 AsyncStorage 업데이트)
- *
- * [BUG FIX 3] 저장 버튼 번역 중 표시 문제
- *   - 저장 버튼 조건: subtitlePhase === "done" && !isBgRunning && subtitles.length > 0
- *   - BG 실행 중에는 저장 버튼 완전 숨김
- *
- * [BUG FIX 4] 캐시 히트 후 FG 번역 재시작 문제
- *   - handlePlayerReady에서 full cache hit 시 allSegmentsRef.current에 sentinel 세팅
- *   - handleSubtitlesLoaded에서 sentinel 감지 시 번역 스킵
- *   - isBgRunningRef 추가: 비동기 콜백에서 최신 isBgRunning 값 참조
- *
- * [KEEP v15]
- *   - jobIdRef 패턴, makeSegmentId, RAF throttle, bgResultApplied
+ * [BUG FIX] 재생버튼 미작동 문제
+ *   - 원인 1: current=0 (영상 미시작) 상태에서 YouTubePlayer 내부 tap 핸들러가
+ *             "double-tap ignored" 처리하여 play() 명령 자체가 무시됨
+ *   - 원인 2: 연속 탭 시 play() → pause() 순서 역전으로 상태 충돌 발생
+ *   - 수정: optimisticPlaying 로컬 state + debounce ref 로 해결.
+ *           버튼 탭 시 optimisticPlaying 즉시 토글 (UI 즉각 반응).
+ *           300ms debounce 후 실제 ref.play()/pause() 1회만 호출.
+ *           isPlaying store 상태는 오직 onStateChange 이벤트에서만 업데이트 (단방향).
+ *           play prop 추가 없음 — YouTubePlayerHandle ref 메서드만 사용.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -69,7 +55,7 @@ import { useMediaProjectionProcessor } from "../hooks/useMediaProjectionProcesso
 import { useWhisperModel } from "../hooks/useWhisperModel";
 import { LANGUAGES, getLanguageByCode } from "../constants/languages";
 import { useRetranslate } from "../hooks/useRetranslate";
-import { Settings, Check, CheckCircle2, XCircle, AlertTriangle, Mic, Search, Loader2, AlertCircle, RotateCcw, Brain } from 'lucide-react-native';
+import { Settings, Check, CheckCircle2, XCircle, AlertTriangle, Mic, Search, Loader2, Globe, CheckCircle, AlertCircle, Radio, RotateCcw, Brain, Clock } from 'lucide-react-native';
 import { useBackgroundTranslation } from '../hooks/useBackgroundTranslation';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
@@ -215,10 +201,6 @@ export default function YoutubePlayerScreen() {
   const bumpSeek        = usePlayerStore((s) => s.bumpSeek);
   const setPendingGenre = usePlayerStore((s) => s.setPendingGenre);
 
-  // Read pendingGenre synchronously once — not a hook, safe here.
-  // By the time this component mounts, HomeScreen has already called
-  // setPendingGenre() before router.push(), so the store value is current.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   const _initialGenre = usePlayerStore.getState().pendingGenre ?? "general";
 
   const subtitleMode   = useSettingsStore((s) => s.subtitleMode);
@@ -272,6 +254,14 @@ export default function YoutubePlayerScreen() {
   const bannerOpacity          = useRef(new Animated.Value(0.7)).current;
   const lastProgressTimestampRef = useRef<number>(0);
 
+  // ── [FIX v19] 재생 버튼 debounce 처리 ───────────────────────────────────
+  // optimisticPlaying: 버튼 탭 시 UI 즉각 반응용 로컬 state
+  // debounceTimerRef:  300ms 내 중복 탭 방지 — 마지막 의도만 ref.play()/pause() 호출
+  // 실제 isPlaying store 상태는 오직 onStateChange 이벤트에서만 업데이트 (단방향)
+  const [optimisticPlaying, setOptimisticPlaying] = useState(false);
+  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingPlayRef   = useRef<boolean | null>(null);
+
   // Animation refs for smooth progress bar interpolation
   const animProgressRef = useRef(0);
   const animFrameRef    = useRef<number | null>(null);
@@ -294,28 +284,24 @@ export default function YoutubePlayerScreen() {
   const bgSecsPerPctRef    = useRef<number>(0);
   const bgUpdateCountRef   = useRef<number>(0);
 
-  // [BUG FIX 1] isBgRunning을 비동기 콜백에서 참조하기 위한 ref
-  // useState는 클로저에서 stale해지므로 ref로 최신값 동기화
   const isBgRunningRef = useRef(false);
   useEffect(() => {
     isBgRunningRef.current = isBgRunning;
   }, [isBgRunning]);
 
-  // [BUG 5] Mirror bgStatus into a ref so the unmount closure can read the
-  // latest value without capturing a stale state snapshot.
   const bgStatusRef = useRef<typeof bgStatus>(bgStatus);
   useEffect(() => {
     bgStatusRef.current = bgStatus;
   }, [bgStatus]);
 
-  // Unified progress high-water mark — ensures the bar never jumps backward.
+  // Unified progress high-water mark
   const highWaterProgressRef = useRef(0);
 
   // ── Genre-restore race guards ─────────────────────────────────────────────
   const currentVideoIdRef  = useRef<string | null>(null);
   const playerReadyOnceRef = useRef(false);
-  const genreReadyRef      = useRef(true);           // synchronous — always ready
-  const genreValueRef      = useRef(_initialGenre);  // seeded from store on mount
+  const genreReadyRef      = useRef(true);
+  const genreValueRef      = useRef(_initialGenre);
 
   // ── Local state ───────────────────────────────────────────────────────────
   const [langModalVisible,     setLangModalVisible]     = useState(false);
@@ -345,16 +331,13 @@ export default function YoutubePlayerScreen() {
   const [remainingSecs,    setRemainingSecs]      = useState<number | null>(null);
   const [bgRemainingSecs,  setBgRemainingSecs]    = useState<number | null>(null);
   const [displayedPct,     setDisplayedPct]       = useState(0);
-  // [FIX BUG2] Guards the save button — true only when a translation or BG result
-  // has fully completed in the current screen session.  Prevents premature save
-  // button appearance on cache-restore before BG state is confirmed.
   const [translationEverCompleted, setTranslationEverCompleted] = useState(false);
   const [usingWhisper,     setUsingWhisper]      = useState(false);
   const [showBgDoneBanner, setShowBgDoneBanner]  = useState(false);
   const bgDoneTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [isStale, setIsStale] = useState(false);
 
-  // ── Loading sub-label (stage hint inside the progress card sub-text) ──────
+  // ── Loading sub-label ──────────────────────────────────────────────────────
   const [loadingSubLabel, setLoadingSubLabel] = useState<string>('');
   const loadingSubLabelRef = useRef<string>('');
   const setLoadingLabel = useCallback((label: string) => {
@@ -363,7 +346,7 @@ export default function YoutubePlayerScreen() {
   }, []);
 
   const setPhase = useCallback((phase: SubtitlePhase) => {
-    subtitlePhaseRef.current = phase;        // ← ref FIRST, always
+    subtitlePhaseRef.current = phase;
     setSubtitlePhase_DO_NOT_CALL(phase);
   }, []);
 
@@ -385,7 +368,6 @@ export default function YoutubePlayerScreen() {
         || bgSt === 'translating'
         || bgSt === 'saving';
 
-      // Only cancel FG work on unmount — never interrupt a running BG job.
       if (!bgActive) {
         cancelledRef.current = true;
         jobIdRef.current++;
@@ -402,7 +384,6 @@ export default function YoutubePlayerScreen() {
       }
       animProgressRef.current = 0;
       animTargetRef.current   = 0;
-      // [BUG 5] Do NOT unload the model if BG is actively translating.
       if (gemmaLoadedRef.current && !bgActive) {
         unloadGemma().catch(() => {});
         gemmaLoadedRef.current = false;
@@ -414,7 +395,6 @@ export default function YoutubePlayerScreen() {
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Reset high-water mark when the translation job identity changes.
   useEffect(() => {
     highWaterProgressRef.current = 0;
     secsPerSegmentRef.current = 0;
@@ -596,7 +576,7 @@ export default function YoutubePlayerScreen() {
 
       const elapsed = now - startTime;
       const t       = Math.min(elapsed / durationMs, 1);
-      const eased   = 1 - Math.pow(1 - t, 3); // ease-out cubic
+      const eased   = 1 - Math.pow(1 - t, 3);
 
       const currentReal = bgStatusRef.current?.progress ?? 0;
       const maxAllowed  = options?.ignoreCap
@@ -699,7 +679,6 @@ export default function YoutubePlayerScreen() {
     setPendingGenre(null);
   }, [youtubeVideoId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── BUG 4: bgResultApplied reset on videoId change ─────────────────────────
   useEffect(() => {
     bgResultApplied.current      = false;
     autoFetchCompletedRef.current = false;
@@ -714,7 +693,7 @@ export default function YoutubePlayerScreen() {
     }
   }, [youtubeVideoId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── bg 번역 결과 복원 (마운트 시 / BG가 이미 완료된 경우) ──────────────────
+  // ── bg 번역 결과 복원 ──────────────────────────────────────────────────────
   useEffect(() => {
     if (!youtubeVideoId) return;
     (async () => {
@@ -880,7 +859,6 @@ export default function YoutubePlayerScreen() {
       return;
     }
 
-    // [BUG FIX 1] BG 번역 실행 중이면 FG 번역 시작 차단
     if (isBgRunningRef.current) {
       console.log('[TRANSLATE] BG translation running, skipping FG translation');
       return;
@@ -1421,6 +1399,32 @@ export default function YoutubePlayerScreen() {
     ytPlayerRef.current?.seekTo(time);
   }, [setCurrentTime, bumpSeek]);
 
+  // ── [FIX v19] 재생 토글 핸들러 (debounce) ───────────────────────────────
+  // 1) optimisticPlaying 즉시 토글 → 버튼 아이콘 즉각 반응
+  // 2) 300ms debounce → 연속 탭 시 마지막 의도만 ref.play()/pause() 1회 호출
+  // 실제 isPlaying store 상태는 onStateChange에서만 업데이트 (단방향)
+  const handlePlayToggle = useCallback(() => {
+    const next = !optimisticPlaying;
+    setOptimisticPlaying(next);
+    pendingPlayRef.current = next;
+
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+    }
+    debounceTimerRef.current = setTimeout(() => {
+      debounceTimerRef.current = null;
+      const intent = pendingPlayRef.current;
+      if (intent === null) return;
+      pendingPlayRef.current = null;
+      console.log(`[v19] debounced play intent → ${intent}`);
+      if (intent) {
+        ytPlayerRef.current?.play();
+      } else {
+        ytPlayerRef.current?.pause();
+      }
+    }, 300);
+  }, [optimisticPlaying]);
+
   // ── 수동 재시도 ───────────────────────────────────────────────────────────
   const handleRetrySubtitles = useCallback(() => {
     jobIdRef.current++;
@@ -1649,10 +1653,7 @@ export default function YoutubePlayerScreen() {
       <View style={isLandscape
         ? {
             position: 'absolute',
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
+            top: 0, left: 0, right: 0, bottom: 0,
             zIndex: 1,
             backgroundColor: '#000',
             justifyContent: 'center',
@@ -1671,14 +1672,17 @@ export default function YoutubePlayerScreen() {
           onFullscreenToggle={handleFullscreenToggle}
           isFullscreen={isLandscape}
           onStateChange={(state) => {
+            // [FIX v19] 실제 플레이어 이벤트 기반 단방향 상태 업데이트
             if (state === "playing") {
-              if (!isPlaying) setPlaying(true);
+              setPlaying(true);
+              setOptimisticPlaying(true);
               if (subtitlePhase === "idle" && !isBgRunningRef.current) {
                 setPhase("fetching");
               }
             }
             if (state === "paused" || state === "ended") {
-              if (isPlaying) setPlaying(false);
+              setPlaying(false);
+              setOptimisticPlaying(false);
             }
           }}
           onError={(code) => {
@@ -1759,9 +1763,9 @@ export default function YoutubePlayerScreen() {
           { borderLeftColor: getPillBorderColor(displayPhase) },
         ]}>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
-            {displayPhase === 'error'            && <AlertCircle size={12} color="#ef4444" />}
+            {displayPhase === 'error'            && <AlertCircle   size={12} color="#ef4444" />}
             {displayPhase === 'no_subtitles'     && <AlertTriangle size={12} color="#f59e0b" />}
-            {displayPhase === 'fallback_whisper' && <Mic size={12} color="#aaa" />}
+            {displayPhase === 'fallback_whisper' && <Mic           size={12} color="#aaa"    />}
             <Text style={[pillStyles.statusText, displayPhase === 'error' && { color: '#ef4444' }]} numberOfLines={1}>
               {getSubtitleStatusLabel(displayPhase, subtitleProgress, t)}
             </Text>
@@ -1870,14 +1874,18 @@ export default function YoutubePlayerScreen() {
 
       {/* ── 컨트롤 바 ─────────────────────────────────────────────────────── */}
       {!isLandscape && <View style={styles.controlBar}>
+        {/*
+          [FIX v19] 재생버튼: debounce 방식으로 교체
+          - optimisticPlaying으로 아이콘 즉각 반응
+          - 300ms debounce 후 ref.play()/pause() 1회만 호출
+          - isPlaying store는 onStateChange에서만 업데이트 (단방향)
+        */}
         <TouchableOpacity
           style={styles.playBtn}
-          onPress={() => {
-            setPlaying(!isPlaying);
-          }}
+          onPress={handlePlayToggle}
           activeOpacity={0.75}
         >
-          <Text style={styles.playBtnText}>{isPlaying ? "⏸" : "▶"}</Text>
+          <Text style={styles.playBtnText}>{optimisticPlaying ? "⏸" : "▶"}</Text>
         </TouchableOpacity>
 
         <TouchableOpacity
@@ -1905,7 +1913,6 @@ export default function YoutubePlayerScreen() {
           <Text style={styles.chipBtnText}>Aa</Text>
         </TouchableOpacity>
 
-        {/* 자막 검색 버튼 */}
         <TouchableOpacity
           style={styles.chipBtn}
           onPress={() => setSearchModalVisible(true)}
