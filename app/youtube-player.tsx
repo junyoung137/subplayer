@@ -55,7 +55,7 @@ import { useMediaProjectionProcessor } from "../hooks/useMediaProjectionProcesso
 import { useWhisperModel } from "../hooks/useWhisperModel";
 import { LANGUAGES, getLanguageByCode } from "../constants/languages";
 import { useRetranslate } from "../hooks/useRetranslate";
-import { Settings, Check, CheckCircle2, XCircle, AlertTriangle, Mic, Search, Loader2, Globe, CheckCircle, AlertCircle, Radio, RotateCcw, Brain, Clock } from 'lucide-react-native';
+import { Settings, Check, CheckCircle2, XCircle, AlertTriangle, Mic, Search, Loader2, Globe, CheckCircle, AlertCircle, Radio, RotateCcw, Brain, Clock, Minimize2 } from 'lucide-react-native';
 import { useBackgroundTranslation } from '../hooks/useBackgroundTranslation';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from "expo-file-system/legacy";
@@ -269,6 +269,7 @@ export default function YoutubePlayerScreen() {
   // 실제 isPlaying store 상태는 오직 onStateChange 이벤트에서만 업데이트 (단방향)
   const [optimisticPlaying, setOptimisticPlaying] = useState(false);
   const optimisticPlayingRef  = useRef(false);
+  const [fullscreenOverlayVisible, setFullscreenOverlayVisible] = useState(false);
 
   // Animation refs for smooth progress bar interpolation
   const animProgressRef = useRef(0);
@@ -1690,6 +1691,7 @@ export default function YoutubePlayerScreen() {
           playing={optimisticPlaying}
           onTap={handlePlayToggle}
           onFullscreenToggle={handleFullscreenToggle}
+          onOverlayVisibilityChange={(visible) => setFullscreenOverlayVisible(visible)}
           isFullscreen={isLandscape}
           onStateChange={(state) => {
             // [FIX v19] 실제 플레이어 이벤트 기반 단방향 상태 업데이트
@@ -1723,6 +1725,32 @@ export default function YoutubePlayerScreen() {
         <View style={styles.subtitleLayer} pointerEvents="box-none">
           <SubtitleOverlay />
         </View>
+        {/* ── 풀스크린 오버레이 컨트롤 (landscape only) ─────────────────── */}
+        {isLandscape && fullscreenOverlayVisible && (
+          <View style={{
+            position: 'absolute', bottom: 16, left: 12, right: 12, zIndex: 30,
+            flexDirection: 'row', alignItems: 'center',
+            backgroundColor: 'rgba(0,0,0,0.55)', borderRadius: 10,
+            paddingHorizontal: 10, paddingVertical: 6, gap: 8,
+          }}>
+            <Text style={{ color: '#fff', fontSize: 11, fontVariant: ['tabular-nums'], minWidth: 36 }}>
+              {fmt(currentTime)}
+            </Text>
+            <View style={{ flex: 1 }}>
+              <YoutubeSeekBar currentTime={currentTime} duration={duration} onSeek={handleSeek} />
+            </View>
+            <Text style={{ color: '#fff', fontSize: 11, fontVariant: ['tabular-nums'], minWidth: 36, textAlign: 'right' }}>
+              {fmt(duration)}
+            </Text>
+            <TouchableOpacity
+              onPress={handleFullscreenToggle}
+              activeOpacity={0.7}
+              style={{ width: 28, height: 28, borderRadius: 5, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' }}
+            >
+              <Minimize2 size={16} color="#fff" />
+            </TouchableOpacity>
+          </View>
+        )}
       </View>
 
       {/* ── 시간 표시 ────────────────────────────────────────────────────── */}

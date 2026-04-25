@@ -43,7 +43,7 @@ import {
 } from "../services/youtubeTimedText";
 import { parseYoutubeId } from "../utils/youtubeUtils";
 export { parseYoutubeId };
-import { AlertTriangle, Maximize2, Minimize2 } from 'lucide-react-native';
+import { AlertTriangle, Maximize2 } from 'lucide-react-native';
 
 // ── Props / Handle 타입 ───────────────────────────────────────────────────────
 export interface YouTubePlayerProps {
@@ -61,6 +61,7 @@ export interface YouTubePlayerProps {
   onSeek?: (newTime: number) => void;
   onTap?: () => void;           // ✅ [v28] 단일탭을 Screen으로 위임
   onFullscreenToggle?: () => void;
+  onOverlayVisibilityChange?: (visible: boolean) => void;
   isFullscreen?: boolean;
   playing?: boolean;
   style?: object;
@@ -116,6 +117,7 @@ export const YouTubePlayer = React.forwardRef<
     onSeek,
     onTap,            // ✅ [v28] 추가
     onFullscreenToggle,
+    onOverlayVisibilityChange,
     isFullscreen = false,
     playing,
     style,
@@ -132,6 +134,48 @@ export const YouTubePlayer = React.forwardRef<
   const [hasError, setHasError]       = useState(false);
   const [errMsg, setErrMsg]           = useState("");
   const [currentRate, setCurrentRate] = useState(playbackRate);
+  const [showOverlay, setShowOverlay] = useState(false);
+  const overlayHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const onOverlayVisibilityChangeRef = useRef(onOverlayVisibilityChange);
+  useEffect(() => { onOverlayVisibilityChangeRef.current = onOverlayVisibilityChange; }, [onOverlayVisibilityChange]);
+
+  const triggerOverlay = useCallback(() => {
+    if (overlayHideTimerRef.current) clearTimeout(overlayHideTimerRef.current);
+    setShowOverlay(true);
+    onOverlayVisibilityChangeRef.current?.(true);
+    if (isPlayingRef.current) {
+      overlayHideTimerRef.current = setTimeout(() => {
+        setShowOverlay(false);
+        onOverlayVisibilityChangeRef.current?.(false);
+        overlayHideTimerRef.current = null;
+      }, 3000);
+    }
+    // If paused: no timer — stays visible until play resumes
+  }, []);
+
+  useEffect(() => {
+    if (!isFullscreen) {
+      if (overlayHideTimerRef.current) { clearTimeout(overlayHideTimerRef.current); overlayHideTimerRef.current = null; }
+      setShowOverlay(false);
+      return;
+    }
+    if (!isPlaying) {
+      if (overlayHideTimerRef.current) { clearTimeout(overlayHideTimerRef.current); overlayHideTimerRef.current = null; }
+      setShowOverlay(true);
+      onOverlayVisibilityChangeRef.current?.(true);
+    } else if (showOverlay) {
+      if (overlayHideTimerRef.current) clearTimeout(overlayHideTimerRef.current);
+      overlayHideTimerRef.current = setTimeout(() => {
+        setShowOverlay(false);
+        onOverlayVisibilityChangeRef.current?.(false);
+        overlayHideTimerRef.current = null;
+      }, 3000);
+    }
+  }, [isPlaying, isFullscreen, showOverlay]);
+
+  useEffect(() => {
+    return () => { if (overlayHideTimerRef.current) clearTimeout(overlayHideTimerRef.current); };
+  }, []);
 
 
   useEffect(() => { setCurrentRate(playbackRate); }, [playbackRate]);
@@ -480,6 +524,7 @@ export const YouTubePlayer = React.forwardRef<
               //          onTap prop을 통해 Screen의 handlePlayToggle에 완전 위임
               console.log(`[TAP v28] single-tap → delegating to onTap`);
               onTapRef.current?.();
+              if (isFullscreen) triggerOverlay();
 
             } else if (count >= 2) {
               tapCountRef.current = 0;
@@ -497,14 +542,16 @@ export const YouTubePlayer = React.forwardRef<
           }, DOUBLE_TAP_MS);
         }}
       />
-      {/* ── 전체화면 버튼 ─────────────────────────────────────────────────── */}
-      <TouchableOpacity
-        style={styles.fullscreenBtn}
-        onPress={onFullscreenToggle}
-        activeOpacity={0.7}
-      >
-        {isFullscreen ? <Minimize2 size={18} color="#fff" /> : <Maximize2 size={18} color="#fff" />}
-      </TouchableOpacity>
+      {/* ── 전체화면 버튼 (portrait only — landscape minimize는 Screen에서 렌더링) ── */}
+      {!isFullscreen && (
+        <TouchableOpacity
+          style={styles.fullscreenBtn}
+          onPress={onFullscreenToggle}
+          activeOpacity={0.7}
+        >
+          <Maximize2 size={18} color="#fff" />
+        </TouchableOpacity>
+      )}
       {!isReady && (
         <View style={[styles.loadingOverlay, { height }]}>
           <ActivityIndicator size="large" color="#ff0000" />
