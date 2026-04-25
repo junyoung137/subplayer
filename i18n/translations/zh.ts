@@ -283,6 +283,9 @@
     error: "错误",
     fileCopyError: "无法将文件复制到缓存。",
     fileOpenError: "无法打开文件: ",
+    videoGenreLabel: "视频类型",
+    subtitleFileLabel: "字幕文件（可选）",
+    subtitleFilePlaceholder: "+ 选择SRT文件（跳过AI翻译）",
   },
   genre: {
     general: "通用",

@@ -283,6 +283,9 @@
     error: "오류",
     fileCopyError: "파일을 캐시에 복사할 수 없습니다.",
     fileOpenError: "파일을 열 수 없습니다: ",
+    videoGenreLabel: "영상 장르",
+    subtitleFileLabel: "자막 파일 (선택사항)",
+    subtitleFilePlaceholder: "+ SRT 파일 선택 (AI 번역 건너뜀)",
   },
   genre: {
     general: "일반",

@@ -283,6 +283,9 @@
     error: "Erro",
     fileCopyError: "Não é possível copiar o arquivo para o cache.",
     fileOpenError: "Não é possível abrir o arquivo: ",
+    videoGenreLabel: "Gênero do vídeo",
+    subtitleFileLabel: "Arquivo de legenda (opcional)",
+    subtitleFilePlaceholder: "+ Selecionar arquivo SRT (pula a tradução IA)",
   },
   genre: {
     general: "Geral",

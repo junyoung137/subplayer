@@ -283,6 +283,9 @@
     error: "Lỗi",
     fileCopyError: "Không thể sao chép tệp vào bộ nhớ đệm.",
     fileOpenError: "Không thể mở tệp: ",
+    videoGenreLabel: "Thể loại video",
+    subtitleFileLabel: "Tệp phụ đề (tùy chọn)",
+    subtitleFilePlaceholder: "+ Chọn tệp SRT (bỏ qua dịch AI)",
   },
   genre: {
     general: "Chung",

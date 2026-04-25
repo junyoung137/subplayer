@@ -283,6 +283,9 @@
     error: "Fehler",
     fileCopyError: "Datei kann nicht in den Cache kopiert werden.",
     fileOpenError: "Datei kann nicht geöffnet werden: ",
+    videoGenreLabel: "Videogenre",
+    subtitleFileLabel: "Untertiteldatei (optional)",
+    subtitleFilePlaceholder: "+ SRT-Datei auswählen (KI-Übersetzung überspringen)",
   },
   genre: {
     general: "Allgemein",

@@ -159,7 +159,7 @@ export function UrlInputModal({
       setSubtitleUri(file.uri);
       setSubtitleName(file.name);
     } catch (e) {
-      Alert.alert("오류", "자막 파일을 열 수 없습니다: " + String(e));
+      Alert.alert(t("url.error"), t("url.fileOpenError") + String(e));
     }
   };
 
@@ -256,7 +256,7 @@ export function UrlInputModal({
 
               {/* Optional subtitle file */}
               <View style={{ gap: 6 }}>
-                <Text style={styles.inputLabel}>자막 파일 (선택사항)</Text>
+                <Text style={styles.inputLabel}>{t("url.subtitleFileLabel")}</Text>
                 {subtitleUri ? (
                   <View style={{
                     flexDirection: "row", alignItems: "center",
@@ -282,7 +282,7 @@ export function UrlInputModal({
                     onPress={pickSubtitleFile}
                     activeOpacity={0.75}
                   >
-                    <Text style={{ color: "#555", fontSize: 13 }}>+ SRT 파일 선택 (AI 번역 건너뜀)</Text>
+                    <Text style={{ color: "#555", fontSize: 13 }}>{t("url.subtitleFilePlaceholder")}</Text>
                   </TouchableOpacity>
                 )}
               </View>
@@ -333,7 +333,7 @@ export function UrlInputModal({
 
               {/* Optional subtitle file */}
               <View style={{ gap: 6 }}>
-                <Text style={styles.inputLabel}>자막 파일 (선택사항)</Text>
+                <Text style={styles.inputLabel}>{t("url.subtitleFileLabel")}</Text>
                 {subtitleUri ? (
                   <View style={{
                     flexDirection: "row", alignItems: "center",
@@ -359,7 +359,7 @@ export function UrlInputModal({
                     onPress={pickSubtitleFile}
                     activeOpacity={0.75}
                   >
-                    <Text style={{ color: "#555", fontSize: 13 }}>+ SRT 파일 선택 (AI 번역 건너뜀)</Text>
+                    <Text style={{ color: "#555", fontSize: 13 }}>{t("url.subtitleFilePlaceholder")}</Text>
                   </TouchableOpacity>
                 )}
               </View>

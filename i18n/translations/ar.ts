@@ -283,6 +283,9 @@
     error: "خطأ",
     fileCopyError: "لا يمكن نسخ الملف إلى ذاكرة التخزين المؤقت.",
     fileOpenError: "لا يمكن فتح الملف: ",
+    videoGenreLabel: "نوع الفيديو",
+    subtitleFileLabel: "ملف الترجمة (اختياري)",
+    subtitleFilePlaceholder: "+ اختيار ملف SRT (تخطي الترجمة بالذكاء الاصطناعي)",
   },
   genre: {
     general: "عام",

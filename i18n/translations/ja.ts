@@ -283,6 +283,9 @@
     error: "エラー",
     fileCopyError: "ファイルをキャッシュにコピーできません。",
     fileOpenError: "ファイルを開けません: ",
+    videoGenreLabel: "動画ジャンル",
+    subtitleFileLabel: "字幕ファイル（任意）",
+    subtitleFilePlaceholder: "+ SRTファイルを選択（AI翻訳をスキップ）",
   },
   genre: {
     general: "一般",

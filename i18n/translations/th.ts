@@ -283,6 +283,9 @@
     error: "ข้อผิดพลาด",
     fileCopyError: "ไม่สามารถคัดลอกไฟล์ไปยังแคช",
     fileOpenError: "ไม่สามารถเปิดไฟล์: ",
+    videoGenreLabel: "ประเภทวิดีโอ",
+    subtitleFileLabel: "ไฟล์คำบรรยาย (ไม่บังคับ)",
+    subtitleFilePlaceholder: "+ เลือกไฟล์ SRT (ข้ามการแปลด้วย AI)",
   },
   genre: {
     general: "ทั่วไป",

@@ -1156,12 +1156,14 @@ export default function YoutubePlayerScreen() {
     segments: TimedTextSegment[],
     language: string,
   ) => {
-    if (allSegmentsRef.current !== null) return;
+    if (srtModeActiveRef.current) return;
 
     if (bgResultApplied.current) {
       console.log('[YT_SCREEN] BG result applied, skipping FG subtitle load');
       return;
     }
+
+    if (allSegmentsRef.current !== null) return;
 
     autoFetchCompletedRef.current = true;
 
@@ -1215,7 +1217,7 @@ export default function YoutubePlayerScreen() {
     const srtUri = initialSrtUri.current;
     if (srtUri) {
       initialSrtUri.current = null;
-      srtModeActiveRef.current = true;
+      srtModeActiveRef.current = true; // set BEFORE async read — blocks any racing handleSubtitlesLoaded
       try {
         const content = await FileSystem.readAsStringAsync(srtUri);
         const segments = parseSrt(content);

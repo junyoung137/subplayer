@@ -283,6 +283,9 @@
     error: "Ошибка",
     fileCopyError: "Не удаётся скопировать файл в кэш.",
     fileOpenError: "Не удаётся открыть файл: ",
+    videoGenreLabel: "Жанр видео",
+    subtitleFileLabel: "Файл субтитров (необязательно)",
+    subtitleFilePlaceholder: "+ Выбрать SRT файл (пропустить AI перевод)",
   },
   genre: {
     general: "Общее",

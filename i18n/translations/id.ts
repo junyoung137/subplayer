@@ -283,6 +283,9 @@
     error: "Kesalahan",
     fileCopyError: "Tidak dapat menyalin file ke cache.",
     fileOpenError: "Tidak dapat membuka file: ",
+    videoGenreLabel: "Genre video",
+    subtitleFileLabel: "File subtitle (opsional)",
+    subtitleFilePlaceholder: "+ Pilih file SRT (lewati terjemahan AI)",
   },
   genre: {
     general: "Umum",

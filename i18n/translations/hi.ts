@@ -283,6 +283,9 @@
     error: "त्रुटि",
     fileCopyError: "फ़ाइल को कैश में कॉपी नहीं किया जा सकता।",
     fileOpenError: "फ़ाइल नहीं खुल सकती: ",
+    videoGenreLabel: "वीडियो शैली",
+    subtitleFileLabel: "सबटाइटल फ़ाइल (वैकल्पिक)",
+    subtitleFilePlaceholder: "+ SRT फ़ाइल चुनें (AI अनुवाद छोड़ें)",
   },
   genre: {
     general: "सामान्य",

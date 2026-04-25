@@ -283,6 +283,9 @@ const en = {
     error: "Error",
     fileCopyError: "Cannot copy file to cache.",
     fileOpenError: "Cannot open file: ",
+    videoGenreLabel: "Video Genre",
+    subtitleFileLabel: "Subtitle File (optional)",
+    subtitleFilePlaceholder: "+ Select SRT file (skips AI translation)",
   },
   genre: {
     general: "General",
