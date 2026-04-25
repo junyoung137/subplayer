@@ -150,15 +150,18 @@ function YoutubeSeekBar({
     return Math.min(Math.max((x / bw) * duration, 0), duration);
   };
 
+  const onSeekRef = useRef(onSeek);
+  onSeekRef.current = onSeek;
+
   const pan = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder:        () => true,
       onMoveShouldSetPanResponder:         () => true,
       onStartShouldSetPanResponderCapture: () => true,
       onMoveShouldSetPanResponderCapture:  () => true,
-      onPanResponderGrant:   (e) => onSeek(getTimeRef.current(e.nativeEvent.locationX)),
-      onPanResponderMove:    (e) => onSeek(getTimeRef.current(e.nativeEvent.locationX)),
-      onPanResponderRelease: (e) => onSeek(getTimeRef.current(e.nativeEvent.locationX)),
+      onPanResponderGrant:   (e) => onSeekRef.current(getTimeRef.current(e.nativeEvent.locationX)),
+      onPanResponderMove:    (e) => onSeekRef.current(getTimeRef.current(e.nativeEvent.locationX)),
+      onPanResponderRelease: (e) => onSeekRef.current(getTimeRef.current(e.nativeEvent.locationX)),
     })
   ).current;
 
@@ -1424,10 +1427,30 @@ export default function YoutubePlayerScreen() {
   };
 
   // ── 시크 ─────────────────────────────────────────────────────────────────
+  const fsSeekPendingRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const fsSeekValueRef = useRef<number>(0);
+  const fsSeekingRef = useRef<boolean>(false);
+
   const handleSeek = useCallback((t: number) => {
+    if (fsSeekingRef.current) return;
     setCurrentTime(t);
     bumpSeek();
     ytPlayerRef.current?.seekTo(t);
+  }, [setCurrentTime, bumpSeek]);
+
+  const handleFullscreenSeek = useCallback((t: number) => {
+    fsSeekValueRef.current = t;
+    fsSeekingRef.current = true;
+    setCurrentTime(t);
+    // Block the 500ms polling from overwriting our optimistic update
+    ytPlayerRef.current?.blockTimeSync(1200);
+    if (fsSeekPendingRef.current) clearTimeout(fsSeekPendingRef.current);
+    fsSeekPendingRef.current = setTimeout(() => {
+      ytPlayerRef.current?.seekTo(fsSeekValueRef.current);
+      bumpSeek();
+      fsSeekPendingRef.current = null;
+      setTimeout(() => { fsSeekingRef.current = false; }, 800);
+    }, 200);
   }, [setCurrentTime, bumpSeek]);
 
   // ── 검색 모달용 seek 핸들러 ───────────────────────────────────────────────
@@ -1675,14 +1698,20 @@ export default function YoutubePlayerScreen() {
             top: 0, left: 0, right: 0, bottom: 0,
             zIndex: 1,
             backgroundColor: '#000',
-            justifyContent: 'center',
-            alignItems: 'center',
+            overflow: 'hidden',
           }
         : [styles.playerWrap, { height: playerHeight }]}>
+        <View style={isLandscape ? {
+          position: 'absolute',
+          top: 0, left: 0, right: 0, bottom: 0,
+          justifyContent: 'center',
+          alignItems: 'center',
+        } : undefined}>
         <YouTubePlayer
           ref={ytPlayerRef}
           videoId={youtubeVideoId}
           height={playerHeight}
+          style={isLandscape ? { width: screenWidth } : undefined}
           playbackRate={playbackRate}
           onReady={handlePlayerReady}
           onSubtitleData={handleSubtitleData}
@@ -1722,33 +1751,65 @@ export default function YoutubePlayerScreen() {
             );
           }}
         />
+        </View>
         <View style={styles.subtitleLayer} pointerEvents="box-none">
           <SubtitleOverlay />
         </View>
         {/* ── 풀스크린 오버레이 컨트롤 (landscape only) ─────────────────── */}
         {isLandscape && fullscreenOverlayVisible && (
-          <View style={{
-            position: 'absolute', bottom: 16, left: 12, right: 12, zIndex: 30,
-            flexDirection: 'row', alignItems: 'center',
-            backgroundColor: 'rgba(0,0,0,0.55)', borderRadius: 10,
-            paddingHorizontal: 10, paddingVertical: 6, gap: 8,
-          }}>
-            <Text style={{ color: '#fff', fontSize: 11, fontVariant: ['tabular-nums'], minWidth: 36 }}>
-              {fmt(currentTime)}
-            </Text>
-            <View style={{ flex: 1 }}>
-              <YoutubeSeekBar currentTime={currentTime} duration={duration} onSeek={handleSeek} />
-            </View>
-            <Text style={{ color: '#fff', fontSize: 11, fontVariant: ['tabular-nums'], minWidth: 36, textAlign: 'right' }}>
-              {fmt(duration)}
-            </Text>
-            <TouchableOpacity
-              onPress={handleFullscreenToggle}
-              activeOpacity={0.7}
-              style={{ width: 28, height: 28, borderRadius: 5, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' }}
+          <View
+            style={{
+              position: 'absolute',
+              bottom: 8,
+              left: 0,
+              right: 0,
+              zIndex: 30,
+              paddingHorizontal: 12,
+            }}
+          >
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                backgroundColor: 'rgba(0,0,0,0.55)',
+                borderRadius: 10,
+                paddingHorizontal: 10,
+                paddingVertical: 6,
+                gap: 8,
+              }}
             >
-              <Minimize2 size={16} color="#fff" />
-            </TouchableOpacity>
+              <Text style={{
+                color: '#fff', fontSize: 11,
+                fontVariant: ['tabular-nums'], minWidth: 36,
+              }}>
+                {fmt(currentTime)}
+              </Text>
+              <View style={{ flex: 1 }}>
+                <YoutubeSeekBar
+                  currentTime={currentTime}
+                  duration={duration}
+                  onSeek={handleFullscreenSeek}
+                />
+              </View>
+              <Text style={{
+                color: '#fff', fontSize: 11,
+                fontVariant: ['tabular-nums'],
+                minWidth: 36, textAlign: 'right',
+              }}>
+                {fmt(duration)}
+              </Text>
+              <TouchableOpacity
+                onPress={handleFullscreenToggle}
+                activeOpacity={0.7}
+                style={{
+                  width: 24, height: 24, borderRadius: 4,
+                  backgroundColor: 'rgba(0,0,0,0.4)',
+                  justifyContent: 'center', alignItems: 'center',
+                }}
+              >
+                <Minimize2 size={16} color="#fff" />
+              </TouchableOpacity>
+            </View>
           </View>
         )}
       </View>

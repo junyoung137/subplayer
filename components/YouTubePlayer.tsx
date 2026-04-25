@@ -74,6 +74,7 @@ export interface YouTubePlayerHandle {
   play: () => void;
   pause: () => void;
   disableCaptions: () => void;
+  blockTimeSync: (ms: number) => void;
 }
 
 export interface SubtitleFetchResult {
@@ -139,39 +140,61 @@ export const YouTubePlayer = React.forwardRef<
   const onOverlayVisibilityChangeRef = useRef(onOverlayVisibilityChange);
   useEffect(() => { onOverlayVisibilityChangeRef.current = onOverlayVisibilityChange; }, [onOverlayVisibilityChange]);
 
+  // Use a ref to always access latest isFullscreen value inside callbacks
+  const isFullscreenRef = useRef(isFullscreen);
+  useEffect(() => { isFullscreenRef.current = isFullscreen; }, [isFullscreen]);
+
   const triggerOverlay = useCallback(() => {
-    if (overlayHideTimerRef.current) clearTimeout(overlayHideTimerRef.current);
+    if (overlayHideTimerRef.current) {
+      clearTimeout(overlayHideTimerRef.current);
+      overlayHideTimerRef.current = null;
+    }
     setShowOverlay(true);
     onOverlayVisibilityChangeRef.current?.(true);
-    if (isPlayingRef.current) {
+    if (!isPlayingRef.current) {
       overlayHideTimerRef.current = setTimeout(() => {
         setShowOverlay(false);
         onOverlayVisibilityChangeRef.current?.(false);
         overlayHideTimerRef.current = null;
-      }, 3000);
+      }, 1500);
     }
-    // If paused: no timer — stays visible until play resumes
+    // If playing: no timer — overlay hides via isPlaying effect
   }, []);
 
   useEffect(() => {
-    if (!isFullscreen) {
-      if (overlayHideTimerRef.current) { clearTimeout(overlayHideTimerRef.current); overlayHideTimerRef.current = null; }
-      setShowOverlay(false);
-      return;
-    }
+    if (!isFullscreenRef.current) return;
     if (!isPlaying) {
-      if (overlayHideTimerRef.current) { clearTimeout(overlayHideTimerRef.current); overlayHideTimerRef.current = null; }
-      setShowOverlay(true);
-      onOverlayVisibilityChangeRef.current?.(true);
-    } else if (showOverlay) {
-      if (overlayHideTimerRef.current) clearTimeout(overlayHideTimerRef.current);
+      // Paused → start 1500ms hide timer
+      if (overlayHideTimerRef.current) {
+        clearTimeout(overlayHideTimerRef.current);
+        overlayHideTimerRef.current = null;
+      }
       overlayHideTimerRef.current = setTimeout(() => {
         setShowOverlay(false);
         onOverlayVisibilityChangeRef.current?.(false);
         overlayHideTimerRef.current = null;
-      }, 3000);
+      }, 1500);
+    } else {
+      // Playing → cancel any running timer, keep overlay hidden
+      // (overlay shown only via tap → triggerOverlay())
+      if (overlayHideTimerRef.current) {
+        clearTimeout(overlayHideTimerRef.current);
+        overlayHideTimerRef.current = null;
+      }
     }
-  }, [isPlaying, isFullscreen, showOverlay]);
+  }, [isPlaying]);
+
+  // Separate effect for isFullscreen changes only
+  useEffect(() => {
+    if (!isFullscreen) {
+      if (overlayHideTimerRef.current) {
+        clearTimeout(overlayHideTimerRef.current);
+        overlayHideTimerRef.current = null;
+      }
+      setShowOverlay(false);
+      onOverlayVisibilityChangeRef.current?.(false);
+    }
+  }, [isFullscreen]);
 
   useEffect(() => {
     return () => { if (overlayHideTimerRef.current) clearTimeout(overlayHideTimerRef.current); };
@@ -383,6 +406,10 @@ export const YouTubePlayer = React.forwardRef<
         "try{player.unloadModule('captions');player.unloadModule('cc');}catch(e){}; true;"
       );
     },
+    blockTimeSync: (ms: number) => {
+      isTimeSyncBlockedRef.current = true;
+      setTimeout(() => { isTimeSyncBlockedRef.current = false; }, ms);
+    },
   }));
 
   // ── State change handler ──────────────────────────────────────────────────
@@ -474,7 +501,7 @@ export const YouTubePlayer = React.forwardRef<
       <YoutubePlayer
         ref={playerRef}
         height={height}
-        width={isFullscreen ? height * (16 / 9) : undefined}
+        width={undefined}
         videoId={videoId}
         play={playing ?? false}
         playbackRate={currentRate}
