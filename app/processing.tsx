@@ -485,8 +485,10 @@ export default function ProcessingScreen() {
       serviceStartedRef.current = true;
       process(videoUri).then(({ success, translationSkipped }) => {
         if (cancelledRef.current) return;
-        stopBackgroundProcessing();
-        serviceStartedRef.current = false;
+        if (!cancelledRef.current) {
+          stopBackgroundProcessing();
+          serviceStartedRef.current = false;
+        }
         if (success) {
           setPlaying(true);
           if (translationSkipped) {
@@ -691,7 +693,7 @@ export default function ProcessingScreen() {
       stopBackgroundProcessing();
       serviceStartedRef.current = false;
     }
-    router.back();
+    setTimeout(() => router.back(), 50);
   };
 
   // ── Cache-checking UI ─────────────────────────────────────────────────────
