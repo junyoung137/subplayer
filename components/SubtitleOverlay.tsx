@@ -303,6 +303,7 @@ export function SubtitleOverlay() {
   const subtitlePositionPct = useSettingsStore((s) => s.subtitlePositionPct);
   const subtitleStyle = useSettingsStore((s) => s.subtitleStyle ?? "outline");
   const targetLanguage = useSettingsStore((s) => s.targetLanguage);
+  const timingOffset = useSettingsStore((s) => s.timingOffset);
   const update = useSettingsStore((s) => s.update);
 
   const positionPctRef = useRef(subtitlePositionPct);
@@ -399,9 +400,10 @@ export function SubtitleOverlay() {
 
   useEffect(() => { renderedLineRef.current = renderedLine; }, [renderedLine]);
 
+  const adjustedTime = currentTime + (timingOffset ?? 0) + 0.5;
   const candidate = useMemo(
-    () => findActiveDisplayLine(displayLines, currentTime),
-    [displayLines, currentTime],
+    () => findActiveDisplayLine(displayLines, adjustedTime),
+    [displayLines, adjustedTime],
   );
 
   // Dynamic Hold + MIN_DISPLAY_S 적용
@@ -413,12 +415,12 @@ export function SubtitleOverlay() {
     const sameId = candidate?.segmentId === current?.segmentId;
 
     if (sameId && isSeeked) {
-      displayedAtRef.current = currentTime;
+      displayedAtRef.current = adjustedTime;
       return;
     }
     if (sameId) return;
 
-    const elapsed = currentTime - displayedAtRef.current;
+    const elapsed = adjustedTime - displayedAtRef.current;
 
     let dynamicHold = 0;
     if (candidate) {
@@ -430,7 +432,7 @@ export function SubtitleOverlay() {
 
     if (current === null || isSeeked) {
       displayedLineRef.current = candidate;
-      displayedAtRef.current = currentTime;
+      displayedAtRef.current = adjustedTime;
       setDisplayedLine(candidate);
     } else if (candidate === null) {
       if (minMet) {
@@ -439,10 +441,10 @@ export function SubtitleOverlay() {
       }
     } else if (minMet) {
       displayedLineRef.current = candidate;
-      displayedAtRef.current = currentTime;
+      displayedAtRef.current = adjustedTime;
       setDisplayedLine(candidate);
     }
-  }, [currentTime, candidate?.segmentId, seekVersion]);
+  }, [adjustedTime, candidate?.segmentId, seekVersion]);
 
   // Fade Animation
   useEffect(() => {

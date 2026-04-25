@@ -58,7 +58,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       const raw = await AsyncStorage.getItem(STORAGE_KEY);
       if (raw) {
         const saved = JSON.parse(raw) as Partial<Settings>;
-        set({ ...DEFAULTS, ...saved, hydrated: true });
+        set({ ...DEFAULTS, ...saved, timingOffset: 0, hydrated: true });
       } else {
         set({ hydrated: true });
       }

@@ -129,7 +129,7 @@ export function SubtitleQuickPanel({ visible, onClose }: SubtitleQuickPanelProps
               <Slider
                 style={styles.slider}
                 minimumValue={-5}
-                maximumValue={2}
+                maximumValue={5}
                 step={0.1}
                 value={timingOffset}
                 onValueChange={(v) => update({ timingOffset: Math.round(v * 10) / 10 })}
@@ -137,7 +137,7 @@ export function SubtitleQuickPanel({ visible, onClose }: SubtitleQuickPanelProps
                 maximumTrackTintColor="#333"
                 thumbTintColor="#fff"
               />
-              <Text style={styles.sliderHint}>+2</Text>
+              <Text style={styles.sliderHint}>+5</Text>
             </View>
             {timingOffset !== 0 && (
               <TouchableOpacity
