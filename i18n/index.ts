@@ -18,7 +18,11 @@ import th from "./translations/th";
 import vi from "./translations/vi";
 import id from "./translations/id";
 
-const deviceLocale = Localization.getLocales?.()[0]?.languageCode ?? "ko";
+const SUPPORTED_LANGS = [
+  "ko","en","ja","zh","fr","de","es","it","pt","ru","ar","hi","th","vi","id",
+];
+const rawLocale = Localization.getLocales?.()[0]?.languageCode ?? "en";
+const deviceLocale = SUPPORTED_LANGS.includes(rawLocale) ? rawLocale : "en";
 
 i18n
   .use(initReactI18next)
@@ -41,7 +45,7 @@ i18n
       id: { translation: id },
     },
     lng: deviceLocale,
-    fallbackLng: "ko",
+    fallbackLng: "en",
     interpolation: {
       escapeValue: false,
     },

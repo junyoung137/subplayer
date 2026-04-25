@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as Localization from "expo-localization";
 
 export type SubtitleStyleType = "outline" | "pill" | "bar";
 
@@ -30,6 +31,13 @@ interface SettingsStore extends Settings {
   update: (partial: Partial<Settings>) => void;
 }
 
+const SUPPORTED_LANGS = [
+  "ko","en","ja","zh","fr","de","es","it","pt","ru","ar","hi","th","vi","id",
+];
+
+const deviceLang = Localization.getLocales?.()[0]?.languageCode ?? "en";
+const defaultInterfaceLang = SUPPORTED_LANGS.includes(deviceLang) ? deviceLang : "en";
+
 const DEFAULTS: Settings = {
   whisperModel: "small",
   sourceLanguage: "auto",
@@ -44,7 +52,7 @@ const DEFAULTS: Settings = {
   subtitlePositionPct: 0.85,
   thermalProtection: true,
   subtitleStyle: "pill",  // 기본값: 갈매기형
-  interfaceLanguage: "ko",
+  interfaceLanguage: defaultInterfaceLang,
 };
 
 const STORAGE_KEY = "realtimesub_settings";

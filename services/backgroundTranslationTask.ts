@@ -126,7 +126,7 @@ export async function backgroundTranslationTask(taskData: BgTranslationTask): Pr
     console.warn(`[BG_TASK] _isRunning=true on entry — waiting ${waitMs}ms for previous task to clear...`);
     await sleep(waitMs);
     if (_isRunning) {
-      console.error(`[BG_TASK] _isRunning still true after ${waitMs}ms — force-clearing and proceeding`);
+      console.warn(`[BG_TASK] _isRunning still true after ${waitMs}ms — force-clearing and proceeding`);
       _isRunning = false;
     }
   }
