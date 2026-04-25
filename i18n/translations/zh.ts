@@ -349,6 +349,20 @@
     noResultsTitle:      "无结果",
     noResultsDesc:       "请尝试其他关键词\n也可以尝试更短的词语",
   },
+  subtitleEdit: {
+    title: "编辑字幕",
+    tabTranslated: "译文",
+    tabOriginal: "原文",
+    labelTranslated: "编辑译文",
+    labelOriginal: "编辑原文",
+    placeholderTranslated: "请输入译文",
+    placeholderOriginal: "请输入原文",
+    referenceOriginal: "原文参考",
+    referenceTranslated: "译文参考",
+    reset: "还原",
+    cancel: "取消",
+    save: "保存",
+  },
 } as const;
 
 export default zh;

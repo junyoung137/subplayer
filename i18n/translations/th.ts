@@ -349,6 +349,20 @@
     noResultsTitle:      "ไม่พบผลลัพธ์",
     noResultsDesc:       "ลองคำค้นหาอื่น\nสามารถใช้คำที่สั้นกว่าได้",
   },
+  subtitleEdit: {
+    title: "แก้ไขคำบรรยาย",
+    tabTranslated: "คำแปล",
+    tabOriginal: "ต้นฉบับ",
+    labelTranslated: "แก้ไขคำแปล",
+    labelOriginal: "แก้ไขต้นฉบับ",
+    placeholderTranslated: "กรอกคำแปล",
+    placeholderOriginal: "กรอกข้อความต้นฉบับ",
+    referenceOriginal: "อ้างอิงต้นฉบับ",
+    referenceTranslated: "อ้างอิงคำแปล",
+    reset: "คืนค่า",
+    cancel: "ยกเลิก",
+    save: "บันทึก",
+  },
 } as const;
 
 export default th;

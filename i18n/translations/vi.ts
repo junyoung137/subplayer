@@ -349,6 +349,20 @@
     noResultsTitle:      "Không có kết quả",
     noResultsDesc:       "Thử từ khóa khác\nCũng có thể dùng từ ngắn hơn",
   },
+  subtitleEdit: {
+    title: "Chỉnh sửa phụ đề",
+    tabTranslated: "Bản dịch",
+    tabOriginal: "Gốc",
+    labelTranslated: "Chỉnh sửa bản dịch",
+    labelOriginal: "Chỉnh sửa bản gốc",
+    placeholderTranslated: "Nhập bản dịch",
+    placeholderOriginal: "Nhập văn bản gốc",
+    referenceOriginal: "Tham khảo gốc",
+    referenceTranslated: "Tham khảo dịch",
+    reset: "Hoàn tác",
+    cancel: "Hủy",
+    save: "Lưu",
+  },
 } as const;
 
 export default vi;

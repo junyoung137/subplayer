@@ -349,6 +349,20 @@
     noResultsTitle:      "कोई परिणाम नहीं",
     noResultsDesc:       "किसी अन्य कीवर्ड का प्रयास करें\nछोटे शब्दों से भी खोज सकते हैं",
   },
+  subtitleEdit: {
+    title: "सबटाइटल संपादित करें",
+    tabTranslated: "अनुवाद",
+    tabOriginal: "मूल",
+    labelTranslated: "अनुवाद संपादित करें",
+    labelOriginal: "मूल संपादित करें",
+    placeholderTranslated: "अनुवाद दर्ज करें",
+    placeholderOriginal: "मूल पाठ दर्ज करें",
+    referenceOriginal: "मूल संदर्भ",
+    referenceTranslated: "अनुवाद संदर्भ",
+    reset: "वापस करें",
+    cancel: "रद्द करें",
+    save: "सहेजें",
+  },
 } as const;
 
 export default hi;

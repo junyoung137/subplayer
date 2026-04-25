@@ -13,6 +13,7 @@ import {
 } from "react-native";
 import { usePlayerStore, SubtitleSegment } from "../store/usePlayerStore";
 import { useSettingsStore } from "../store/useSettingsStore";
+import { useTranslation } from "react-i18next";
 
 interface SubtitleEditModalProps {
   segment: SubtitleSegment | null;
@@ -20,6 +21,7 @@ interface SubtitleEditModalProps {
 }
 
 export function SubtitleEditModal({ segment, onClose }: SubtitleEditModalProps) {
+  const { t } = useTranslation();
   const updateSubtitle = usePlayerStore((s) => s.updateSubtitle);
   const subtitleMode   = useSettingsStore((s) => s.subtitleMode);
 
@@ -85,7 +87,7 @@ export function SubtitleEditModal({ segment, onClose }: SubtitleEditModalProps) 
 
             {/* 헤더 */}
             <View style={styles.header}>
-              <Text style={styles.headerTitle}>자막 수정</Text>
+              <Text style={styles.headerTitle}>{t("subtitleEdit.title")}</Text>
               {segment && (
                 <Text style={styles.headerTime}>
                   {formatTime(segment.startTime)} → {formatTime(segment.endTime)}
@@ -103,7 +105,7 @@ export function SubtitleEditModal({ segment, onClose }: SubtitleEditModalProps) 
                 }}
               >
                 <Text style={[styles.tabText, activeTab === "translated" && styles.tabTextActive]}>
-                  번역문
+                  {t("subtitleEdit.tabTranslated")}
                 </Text>
               </TouchableOpacity>
               <TouchableOpacity
@@ -114,7 +116,7 @@ export function SubtitleEditModal({ segment, onClose }: SubtitleEditModalProps) 
                 }}
               >
                 <Text style={[styles.tabText, activeTab === "original" && styles.tabTextActive]}>
-                  원문
+                  {t("subtitleEdit.tabOriginal")}
                 </Text>
               </TouchableOpacity>
             </View>
@@ -123,7 +125,7 @@ export function SubtitleEditModal({ segment, onClose }: SubtitleEditModalProps) 
             <View style={styles.inputSection}>
               {activeTab === "translated" ? (
                 <>
-                  <Text style={styles.inputLabel}>번역문 수정</Text>
+                  <Text style={styles.inputLabel}>{t("subtitleEdit.labelTranslated")}</Text>
                   <TextInput
                     ref={translatedRef}
                     style={styles.textInput}
@@ -131,21 +133,21 @@ export function SubtitleEditModal({ segment, onClose }: SubtitleEditModalProps) 
                     onChangeText={setEditedTranslated}
                     multiline
                     autoFocus
-                    placeholder="번역문을 입력하세요"
+                    placeholder={t("subtitleEdit.placeholderTranslated")}
                     placeholderTextColor="#555"
                     selectionColor="#2563eb"
                   />
                   {/* 원문 참고 표시 */}
                   {editedOriginal.length > 0 && (
                     <View style={styles.referenceBox}>
-                      <Text style={styles.referenceLabel}>원문 참고</Text>
+                      <Text style={styles.referenceLabel}>{t("subtitleEdit.referenceOriginal")}</Text>
                       <Text style={styles.referenceText}>{editedOriginal}</Text>
                     </View>
                   )}
                 </>
               ) : (
                 <>
-                  <Text style={styles.inputLabel}>원문 수정</Text>
+                  <Text style={styles.inputLabel}>{t("subtitleEdit.labelOriginal")}</Text>
                   <TextInput
                     ref={originalRef}
                     style={styles.textInput}
@@ -153,14 +155,14 @@ export function SubtitleEditModal({ segment, onClose }: SubtitleEditModalProps) 
                     onChangeText={setEditedOriginal}
                     multiline
                     autoFocus
-                    placeholder="원문을 입력하세요"
+                    placeholder={t("subtitleEdit.placeholderOriginal")}
                     placeholderTextColor="#555"
                     selectionColor="#2563eb"
                   />
                   {/* 번역문 참고 표시 */}
                   {editedTranslated.length > 0 && (
                     <View style={styles.referenceBox}>
-                      <Text style={styles.referenceLabel}>번역문 참고</Text>
+                      <Text style={styles.referenceLabel}>{t("subtitleEdit.referenceTranslated")}</Text>
                       <Text style={styles.referenceText}>{editedTranslated}</Text>
                     </View>
                   )}
@@ -176,7 +178,7 @@ export function SubtitleEditModal({ segment, onClose }: SubtitleEditModalProps) 
                 disabled={!hasChanges}
                 activeOpacity={0.75}
               >
-                <Text style={styles.btnResetText}>되돌리기</Text>
+                <Text style={styles.btnResetText}>{t("subtitleEdit.reset")}</Text>
               </TouchableOpacity>
 
               <TouchableOpacity
@@ -184,7 +186,7 @@ export function SubtitleEditModal({ segment, onClose }: SubtitleEditModalProps) 
                 onPress={onClose}
                 activeOpacity={0.75}
               >
-                <Text style={styles.btnCancelText}>취소</Text>
+                <Text style={styles.btnCancelText}>{t("subtitleEdit.cancel")}</Text>
               </TouchableOpacity>
 
               <TouchableOpacity
@@ -192,7 +194,7 @@ export function SubtitleEditModal({ segment, onClose }: SubtitleEditModalProps) 
                 onPress={handleSave}
                 activeOpacity={0.75}
               >
-                <Text style={styles.btnSaveText}>저장</Text>
+                <Text style={styles.btnSaveText}>{t("subtitleEdit.save")}</Text>
               </TouchableOpacity>
             </View>
 

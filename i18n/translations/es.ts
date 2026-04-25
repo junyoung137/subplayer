@@ -349,6 +349,20 @@
     noResultsTitle:      "Sin resultados",
     noResultsDesc:       "Prueba con otra palabra clave\nTambién puedes usar palabras más cortas",
   },
+  subtitleEdit: {
+    title: "Editar subtítulo",
+    tabTranslated: "Traducción",
+    tabOriginal: "Original",
+    labelTranslated: "Editar traducción",
+    labelOriginal: "Editar original",
+    placeholderTranslated: "Ingrese la traducción",
+    placeholderOriginal: "Ingrese el texto original",
+    referenceOriginal: "Referencia original",
+    referenceTranslated: "Referencia de traducción",
+    reset: "Revertir",
+    cancel: "Cancelar",
+    save: "Guardar",
+  },
 } as const;
 
 export default es;

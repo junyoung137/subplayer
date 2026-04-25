@@ -323,6 +323,7 @@ export function SubtitleOverlay() {
   const isDraggingRef = useRef(false);
   const renderedLineRef = useRef<DisplayLine | null>(null);
   const isLongPressRef = useRef(false);
+  const subtitlesRef = useRef(subtitles);
 
   const displayLines = useMemo(
     () => buildDisplayLines(subtitles, subtitleMode, targetLanguage),
@@ -342,7 +343,7 @@ export function SubtitleOverlay() {
         longPressTimerRef.current = setTimeout(() => {
           if (!isDraggingRef.current && renderedLineRef.current) {
             isLongPressRef.current = true;
-            const seg = subtitles.find((s) => s.id === renderedLineRef.current!.segmentId);
+            const seg = subtitlesRef.current.find((s) => s.id === renderedLineRef.current!.segmentId);
             if (seg) setEditingSegment({ ...seg });
           }
         }, LONG_PRESS_MS);
@@ -399,6 +400,7 @@ export function SubtitleOverlay() {
   const fadeAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => { renderedLineRef.current = renderedLine; }, [renderedLine]);
+  useEffect(() => { subtitlesRef.current = subtitles; }, [subtitles]);
 
   const adjustedTime = currentTime + (timingOffset ?? 0) + 0.5;
   const candidate = useMemo(

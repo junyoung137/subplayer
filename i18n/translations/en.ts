@@ -349,6 +349,20 @@ const en = {
     noResultsTitle:      "No Results",
     noResultsDesc:       "Try a different keyword\nShorter words may also work",
   },
+  subtitleEdit: {
+    title: "Edit Subtitle",
+    tabTranslated: "Translation",
+    tabOriginal: "Original",
+    labelTranslated: "Edit Translation",
+    labelOriginal: "Edit Original",
+    placeholderTranslated: "Enter translation",
+    placeholderOriginal: "Enter original text",
+    referenceOriginal: "Original reference",
+    referenceTranslated: "Translation reference",
+    reset: "Revert",
+    cancel: "Cancel",
+    save: "Save",
+  },
 } as const;
 
 export default en;

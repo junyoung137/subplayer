@@ -349,6 +349,20 @@
     noResultsTitle:      "結果なし",
     noResultsDesc:       "別のキーワードで試してください\n短い単語でも検索できます",
   },
+  subtitleEdit: {
+    title: "字幕を編集",
+    tabTranslated: "翻訳",
+    tabOriginal: "原文",
+    labelTranslated: "翻訳を編集",
+    labelOriginal: "原文を編集",
+    placeholderTranslated: "翻訳を入力してください",
+    placeholderOriginal: "原文を入力してください",
+    referenceOriginal: "原文参考",
+    referenceTranslated: "翻訳参考",
+    reset: "元に戻す",
+    cancel: "キャンセル",
+    save: "保存",
+  },
 } as const;
 
 export default ja;

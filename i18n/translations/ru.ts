@@ -349,6 +349,20 @@
     noResultsTitle:      "Нет результатов",
     noResultsDesc:       "Попробуйте другое ключевое слово\nМожно использовать более короткие слова",
   },
+  subtitleEdit: {
+    title: "Редактировать субтитр",
+    tabTranslated: "Перевод",
+    tabOriginal: "Оригинал",
+    labelTranslated: "Редактировать перевод",
+    labelOriginal: "Редактировать оригинал",
+    placeholderTranslated: "Введите перевод",
+    placeholderOriginal: "Введите оригинальный текст",
+    referenceOriginal: "Оригинальный текст",
+    referenceTranslated: "Текст перевода",
+    reset: "Отменить",
+    cancel: "Отмена",
+    save: "Сохранить",
+  },
 } as const;
 
 export default ru;

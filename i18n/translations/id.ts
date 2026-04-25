@@ -349,6 +349,20 @@
     noResultsTitle:      "Tidak ada hasil",
     noResultsDesc:       "Coba kata kunci lain\nAnda juga bisa menggunakan kata yang lebih pendek",
   },
+  subtitleEdit: {
+    title: "Edit Subtitle",
+    tabTranslated: "Terjemahan",
+    tabOriginal: "Asli",
+    labelTranslated: "Edit terjemahan",
+    labelOriginal: "Edit asli",
+    placeholderTranslated: "Masukkan terjemahan",
+    placeholderOriginal: "Masukkan teks asli",
+    referenceOriginal: "Referensi asli",
+    referenceTranslated: "Referensi terjemahan",
+    reset: "Kembalikan",
+    cancel: "Batal",
+    save: "Simpan",
+  },
 } as const;
 
 export default id;

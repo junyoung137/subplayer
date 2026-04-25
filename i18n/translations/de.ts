@@ -349,6 +349,20 @@
     noResultsTitle:      "Keine Ergebnisse",
     noResultsDesc:       "Versuche ein anderes Stichwort\nAuch kürzere Wörter sind möglich",
   },
+  subtitleEdit: {
+    title: "Untertitel bearbeiten",
+    tabTranslated: "Übersetzung",
+    tabOriginal: "Original",
+    labelTranslated: "Übersetzung bearbeiten",
+    labelOriginal: "Original bearbeiten",
+    placeholderTranslated: "Übersetzung eingeben",
+    placeholderOriginal: "Originaltext eingeben",
+    referenceOriginal: "Originalreferenz",
+    referenceTranslated: "Übersetzungsreferenz",
+    reset: "Zurücksetzen",
+    cancel: "Abbrechen",
+    save: "Speichern",
+  },
 } as const;
 
 export default de;

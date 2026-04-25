@@ -349,6 +349,20 @@
     noResultsTitle:      "결과 없음",
     noResultsDesc:       "다른 키워드로 시도해보세요",
   },
+  subtitleEdit: {
+    title: "자막 수정",
+    tabTranslated: "번역문",
+    tabOriginal: "원문",
+    labelTranslated: "번역문 수정",
+    labelOriginal: "원문 수정",
+    placeholderTranslated: "번역문을 입력하세요",
+    placeholderOriginal: "원문을 입력하세요",
+    referenceOriginal: "원문 참고",
+    referenceTranslated: "번역문 참고",
+    reset: "되돌리기",
+    cancel: "취소",
+    save: "저장",
+  },
 } as const;
 
 export default ko;

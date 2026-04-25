@@ -349,6 +349,20 @@
     noResultsTitle:      "لا توجد نتائج",
     noResultsDesc:       "جرب كلمة مفتاحية أخرى\nيمكنك أيضاً استخدام كلمات أقصر",
   },
+  subtitleEdit: {
+    title: "تعديل الترجمة",
+    tabTranslated: "الترجمة",
+    tabOriginal: "الأصل",
+    labelTranslated: "تعديل الترجمة",
+    labelOriginal: "تعديل الأصل",
+    placeholderTranslated: "أدخل الترجمة",
+    placeholderOriginal: "أدخل النص الأصلي",
+    referenceOriginal: "مرجع الأصل",
+    referenceTranslated: "مرجع الترجمة",
+    reset: "استعادة",
+    cancel: "إلغاء",
+    save: "حفظ",
+  },
 } as const;
 
 export default ar;
