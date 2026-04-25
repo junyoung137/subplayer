@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -10,6 +10,7 @@ import {
   Alert,
   Animated,
   Easing,
+  BackHandler,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { X, Check } from 'lucide-react-native';
@@ -485,10 +486,8 @@ export default function ProcessingScreen() {
       serviceStartedRef.current = true;
       process(videoUri).then(({ success, translationSkipped }) => {
         if (cancelledRef.current) return;
-        if (!cancelledRef.current) {
-          stopBackgroundProcessing();
-          serviceStartedRef.current = false;
-        }
+        stopBackgroundProcessing();
+        serviceStartedRef.current = false;
         if (success) {
           setPlaying(true);
           if (translationSkipped) {
@@ -496,7 +495,7 @@ export default function ProcessingScreen() {
               t("processing.noTranslationModel"),
               t("processing.noTranslationModelMsg"),
               [
-                { text: t("processing.modelManage"),        onPress: () => router.replace("/models") },
+                { text: t("processing.modelManage"), onPress: () => router.replace("/models") },
                 { text: t("processing.continueWithOriginal"), onPress: () => router.replace("/player") },
               ]
             );
@@ -672,6 +671,15 @@ export default function ProcessingScreen() {
     return () => clearInterval(interval);
   }, [currentStageIdx, effCurrent, effTotal]);
 
+  // ── Hardware back button: route through handleCancel ──────────────────────
+  useEffect(() => {
+    const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
+      handleCancel();
+      return true;
+    });
+    return () => subscription.remove();
+  }, [handleCancel]);
+
   // ── Sub-label for the active stage ────────────────────────────────────────
   const activeSubLabel: string = (() => {
     switch (activeStageId) {
@@ -686,15 +694,15 @@ export default function ProcessingScreen() {
     }
   })();
 
-  const handleCancel = () => {
+  const handleCancel = useCallback(() => {
     cancelledRef.current = true;
     cancel();
     if (serviceStartedRef.current) {
       stopBackgroundProcessing();
       serviceStartedRef.current = false;
     }
-    setTimeout(() => router.back(), 50);
-  };
+    setTimeout(() => router.back(), 100);
+  }, [cancel]);
 
   // ── Cache-checking UI ─────────────────────────────────────────────────────
   if (cacheStatus === "checking") {
