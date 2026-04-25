@@ -230,7 +230,7 @@
     styleBar:         "Barra",
     fontSize:         "Tamanho da fonte",
     timingOffset:     "Deslocamento de tempo da legenda",
-    timingOffsetHint: "Negativo se as legendas estão atrasadas, positivo se estão adiantadas",
+    timingOffsetHint: "Positivo se as legendas estão atrasadas, negativo se estão adiantadas",
     resetToZero:      "↺ Redefinir para 0s",
     editHint:         "✎ Pressione e segure uma legenda para editá-la diretamente",
     close:            "Fechar",

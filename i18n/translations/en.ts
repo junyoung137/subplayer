@@ -230,7 +230,7 @@ const en = {
     styleBar:         "Bar",
     fontSize:         "Font Size",
     timingOffset:     "Subtitle Timing Offset",
-    timingOffsetHint: "Negative if subtitles are late, positive if early",
+    timingOffsetHint: "Positive if subtitles are late, negative if early",
     resetToZero:      "↺ Reset to 0s",
     editHint:         "✎ Long press a subtitle to edit it directly",
     close:            "Close",

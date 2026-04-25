@@ -230,7 +230,7 @@
     styleBar:         "Batang",
     fontSize:         "Ukuran font",
     timingOffset:     "Offset waktu subtitle",
-    timingOffsetHint: "Negatif jika subtitle terlambat, positif jika terlalu cepat",
+    timingOffsetHint: "Positif jika subtitle terlambat, negatif jika terlalu cepat",
     resetToZero:      "↺ Reset ke 0s",
     editHint:         "✎ Tekan lama subtitle untuk mengeditnya langsung",
     close:            "Tutup",

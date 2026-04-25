@@ -230,7 +230,7 @@
     styleBar:         "แถบ",
     fontSize:         "ขนาดตัวอักษร",
     timingOffset:     "ออฟเซ็ตเวลาคำบรรยาย",
-    timingOffsetHint: "ลบถ้าคำบรรยายช้า บวกถ้าเร็ว",
+    timingOffsetHint: "บวกถ้าคำบรรยายช้า ลบถ้าเร็ว",
     resetToZero:      "↺ รีเซ็ตเป็น 0วิ",
     editHint:         "✎ กดค้างที่คำบรรยายเพื่อแก้ไขโดยตรง",
     close:            "ปิด",

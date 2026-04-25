@@ -230,7 +230,7 @@
     styleBar:         "Thanh",
     fontSize:         "Cỡ chữ",
     timingOffset:     "Độ lệch thời gian phụ đề",
-    timingOffsetHint: "Âm nếu phụ đề đến muộn, dương nếu đến sớm",
+    timingOffsetHint: "Dương nếu phụ đề đến muộn, âm nếu đến sớm",
     resetToZero:      "↺ Đặt lại về 0s",
     editHint:         "✎ Nhấn giữ phụ đề để chỉnh sửa trực tiếp",
     close:            "Đóng",

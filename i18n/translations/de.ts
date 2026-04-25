@@ -230,7 +230,7 @@
     styleBar:         "Balken",
     fontSize:         "Schriftgröße",
     timingOffset:     "Untertitel-Zeitversatz",
-    timingOffsetHint: "Negativ wenn Untertitel zu spät, positiv wenn zu früh",
+    timingOffsetHint: "Positiv wenn Untertitel zu spät, negativ wenn zu früh",
     resetToZero:      "↺ Auf 0s zurücksetzen",
     editHint:         "✎ Untertitel lang drücken zum direkten Bearbeiten",
     close:            "Schließen",

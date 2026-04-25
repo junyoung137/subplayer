@@ -230,7 +230,7 @@
     styleBar:         "Barra",
     fontSize:         "Tamaño de fuente",
     timingOffset:     "Desplazamiento de tiempo de subtítulos",
-    timingOffsetHint: "Negativo si los subtítulos llegan tarde, positivo si llegan antes",
+    timingOffsetHint: "Positivo si los subtítulos llegan tarde, negativo si llegan antes",
     resetToZero:      "↺ Restablecer a 0s",
     editHint:         "✎ Mantén pulsado un subtítulo para editarlo directamente",
     close:            "Cerrar",

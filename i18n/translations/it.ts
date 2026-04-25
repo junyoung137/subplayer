@@ -230,7 +230,7 @@
     styleBar:         "Barra",
     fontSize:         "Dimensione font",
     timingOffset:     "Offset temporale sottotitoli",
-    timingOffsetHint: "Negativo se i sottotitoli sono in ritardo, positivo se in anticipo",
+    timingOffsetHint: "Positivo se i sottotitoli sono in ritardo, negativo se in anticipo",
     resetToZero:      "↺ Reimposta a 0s",
     editHint:         "✎ Tieni premuto un sottotitolo per modificarlo direttamente",
     close:            "Chiudi",

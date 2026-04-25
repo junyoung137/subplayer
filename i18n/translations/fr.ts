@@ -230,7 +230,7 @@
     styleBar:         "Barre",
     fontSize:         "Taille de police",
     timingOffset:     "Décalage temporel des sous-titres",
-    timingOffsetHint: "Négatif si les sous-titres sont en retard, positif s'ils sont en avance",
+    timingOffsetHint: "Positif si les sous-titres sont en retard, négatif s'ils sont en avance",
     resetToZero:      "↺ Réinitialiser à 0s",
     editHint:         "✎ Appuyez longuement sur un sous-titre pour le modifier directement",
     close:            "Fermer",

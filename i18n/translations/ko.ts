@@ -230,7 +230,7 @@
     styleBar:         "바형",
     fontSize:         "글자 크기",
     timingOffset:     "자막 타이밍 오프셋",
-    timingOffsetHint: "자막이 늦으면 -, 빠르면 +",
+    timingOffsetHint: "자막이 늦으면 +, 빠르면 -",
     resetToZero:      "↺ 0초로 초기화",
     editHint:         "✎ 자막을 길게 누르면 직접 수정할 수 있어요",
     close:            "닫기",

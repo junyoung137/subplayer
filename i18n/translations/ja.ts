@@ -230,7 +230,7 @@
     styleBar:         "バー",
     fontSize:         "文字サイズ",
     timingOffset:     "字幕タイミングオフセット",
-    timingOffsetHint: "字幕が遅い場合は-、早い場合は+",
+    timingOffsetHint: "字幕が遅い場合は+、早い場合は-",
     resetToZero:      "↺ 0秒にリセット",
     editHint:         "✎ 字幕を長押しすると直接編集できます",
     close:            "閉じる",

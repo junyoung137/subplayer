@@ -230,7 +230,7 @@
     styleBar:         "条形",
     fontSize:         "字体大小",
     timingOffset:     "字幕时间偏移",
-    timingOffsetHint: "字幕晚则为负，早则为正",
+    timingOffsetHint: "字幕晚则为正，早则为负",
     resetToZero:      "↺ 重置为0秒",
     editHint:         "✎ 长按字幕可直接编辑",
     close:            "关闭",
