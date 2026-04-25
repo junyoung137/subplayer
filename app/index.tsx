@@ -846,7 +846,7 @@ export default function HomeScreen() {
                 return;
               }
               const result = await ImagePicker.launchImageLibraryAsync({
-                mediaTypes: ImagePicker.MediaTypeOptions.Images,
+                mediaTypes: ['images'],
                 allowsEditing: true,
                 aspect: [3, 2],   // enforce 3:2 crop — matches thumbStyles wrap ratio
                 quality: 0.8,
