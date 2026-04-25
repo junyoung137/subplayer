@@ -282,12 +282,7 @@ export default function YoutubePlayerScreen() {
   const autoFetchCompletedRef  = useRef(false);
   const srtModeActiveRef       = useRef(false);
 
-  // Read and consume pending SRT URI synchronously at render time,
-  // before any effects or player callbacks fire.
-  const initialSrtUri = useRef<string | null>(pendingSubtitleRef.current);
-  if (pendingSubtitleRef.current) {
-    pendingSubtitleRef.current = null;
-  }
+  const initialSrtUri = useRef<string | null>(null);
   const shimmerAnim            = useRef(new Animated.Value(0)).current;
   const bannerOpacity          = useRef(new Animated.Value(0.7)).current;
   const lastProgressTimestampRef = useRef<number>(0);
@@ -429,6 +424,37 @@ export default function YoutubePlayerScreen() {
         AsyncStorage.removeItem(`fg_fetched_subtitles_${youtubeVideoId}`).catch(() => {});
       }
     };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── SRT fallback: handles case where handlePlayerReady fired before pendingSubtitleRef was set ──
+  useEffect(() => {
+    const srtUri = pendingSubtitleRef.current;
+    if (!srtUri) return;
+    pendingSubtitleRef.current = null;
+    initialSrtUri.current = srtUri;
+    srtModeActiveRef.current = true;
+    (async () => {
+      try {
+        const { readAsStringAsync } = await import('expo-file-system/legacy');
+        const content = await readAsStringAsync(srtUri);
+        const segments = parseSrt(content);
+        if (segments.length > 0) {
+          bgResultApplied.current = true;
+          autoFetchCompletedRef.current = true;
+          cancelledRef.current = true;
+          jobIdRef.current++;
+          setSubtitles(segments);
+          setPhase('done');
+          setSubtitleProgress(1);
+          setTotalSegments(segments.length);
+          setTranslatedCount(segments.length);
+          setTranslationEverCompleted(true);
+          ytPlayerRef.current?.disableCaptions?.();
+        }
+      } catch (e) {
+        console.warn('[SRT useEffect] Failed to load SRT:', e);
+      }
+    })();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -1214,9 +1240,10 @@ export default function YoutubePlayerScreen() {
   // ── 플레이어 준비 + 캐시 체크 ─────────────────────────────────────────────
   const handlePlayerReady = useCallback(async () => {
     // ── SRT mode: must be FIRST — skip entire AI pipeline ─────────────────
-    const srtUri = initialSrtUri.current;
+    const srtUri = initialSrtUri.current ?? pendingSubtitleRef.current;
+    pendingSubtitleRef.current = null;
+    initialSrtUri.current = null;
     if (srtUri) {
-      initialSrtUri.current = null;
       srtModeActiveRef.current = true; // set BEFORE async read — blocks any racing handleSubtitlesLoaded
       try {
         const content = await FileSystem.readAsStringAsync(srtUri);

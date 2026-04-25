@@ -925,7 +925,7 @@ export default function HomeScreen() {
       }
       setPendingGenre(genre ?? 'general');
       setYoutubeVideo(videoId, title);
-      router.push("/youtube-player");
+      setTimeout(() => router.push("/youtube-player"), 0);
     }
     // 일반 URL은 향후 확장 가능
   };

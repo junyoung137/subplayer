@@ -254,39 +254,6 @@ export function UrlInputModal({
                 </ScrollView>
               </View>
 
-              {/* Optional subtitle file */}
-              <View style={{ gap: 6 }}>
-                <Text style={styles.inputLabel}>{t("url.subtitleFileLabel")}</Text>
-                {subtitleUri ? (
-                  <View style={{
-                    flexDirection: "row", alignItems: "center",
-                    backgroundColor: "#14532d", borderRadius: 10,
-                    borderWidth: 1, borderColor: "#22c55e",
-                    paddingHorizontal: 12, paddingVertical: 10, gap: 8,
-                  }}>
-                    <Text style={{ color: "#86efac", fontSize: 13, flex: 1 }} numberOfLines={1}>
-                      ✓ {subtitleName}
-                    </Text>
-                    <TouchableOpacity onPress={() => { setSubtitleUri(null); setSubtitleName(null); }}>
-                      <X size={16} color="#86efac" />
-                    </TouchableOpacity>
-                  </View>
-                ) : (
-                  <TouchableOpacity
-                    style={{
-                      flexDirection: "row", alignItems: "center", gap: 8,
-                      backgroundColor: "#1a1a1a", borderRadius: 10,
-                      borderWidth: 1, borderColor: "#2a2a2a", borderStyle: "dashed",
-                      paddingHorizontal: 12, paddingVertical: 10,
-                    }}
-                    onPress={pickSubtitleFile}
-                    activeOpacity={0.75}
-                  >
-                    <Text style={{ color: "#555", fontSize: 13 }}>{t("url.subtitleFilePlaceholder")}</Text>
-                  </TouchableOpacity>
-                )}
-              </View>
-
               <TouchableOpacity
                 style={styles.bigPickBtn}
                 onPress={pickLocalFile}
