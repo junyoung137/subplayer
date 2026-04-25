@@ -19,6 +19,7 @@ import * as ImagePicker from "expo-image-picker";
 import * as FileSystem from "expo-file-system/legacy";
 import { router, useFocusEffect } from "expo-router";
 import { verifyModelIntegrity } from "../services/modelDownloadService";
+import { deleteSubtitleCache } from "../services/subtitleDB";
 import { pendingSubtitleRef } from "../utils/pendingSubtitle";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { usePlayerStore } from "../store/usePlayerStore";
@@ -139,6 +140,38 @@ async function deleteFileFromDisk(uri: string): Promise<void> {
     }
   } catch (e) {
     console.warn("[FILE] Could not delete file from disk:", uri, e);
+  }
+}
+
+function localCacheKey(uri: string): string {
+  try {
+    const decoded = decodeURIComponent(uri);
+    const parts = decoded.replace(/\\/g, "/").split("/");
+    return "local__" + (parts[parts.length - 1] ?? uri);
+  } catch {
+    return "local__" + uri;
+  }
+}
+
+async function deleteSubtitleCacheForUri(uri: string): Promise<void> {
+  try {
+    const cacheKey = localCacheKey(uri);
+    // Remove AsyncStorage keys for this URI
+    const allKeys = await AsyncStorage.getAllKeys();
+    const toRemove = allKeys.filter(
+      (k) =>
+        (k.startsWith("realtimesub_cache_") && k.includes(cacheKey)) ||
+        k === `gemma_checkpoint_v4_${cacheKey}` ||
+        k === `fg_fetched_subtitles_${cacheKey}`
+    );
+    if (toRemove.length > 0) {
+      await AsyncStorage.multiRemove(toRemove);
+    }
+    // Remove SQLite subtitle cache entries
+    await deleteSubtitleCache(cacheKey);
+    console.log("[CACHE] Cleaned subtitle cache for:", cacheKey);
+  } catch (e) {
+    console.warn("[CACHE] Could not clean subtitle cache for:", uri, e);
   }
 }
 
@@ -841,16 +874,21 @@ export default function HomeScreen() {
 
   const goToProcessing = useCallback(() => {
     setLangModalVisible(false);
-    router.push("/processing");
+    if (pendingSubtitleRef.current) {
+      router.push("/player");
+    } else {
+      router.push("/processing");
+    }
   }, []);
 
   const handleCancelModal = useCallback(() => {
     setLangModalVisible(false);
     pendingFileRef.current = null;
+    pendingSubtitleRef.current = null;
   }, []);
 
   // ── 새 핸들러: 로컬 파일 선택 후 처리 ─────────────────────────────────────
-  const handleLocalFilePicked = async (stableUri: string, name: string, genre: string) => {
+  const handleLocalFilePicked = async (stableUri: string, name: string, genre: string, subtitleUri?: string) => {
     const fileSize = await getFileSize(stableUri);
     const thumbUri = (await fetchThumbnail(stableUri, undefined)) ?? undefined;
     const autoCategory =
@@ -872,6 +910,7 @@ export default function HomeScreen() {
       const filtered = prev.filter((f) => f.uri !== stableUri);
       return [entry, ...filtered].slice(0, 50);
     });
+    pendingSubtitleRef.current = subtitleUri ?? null;
     setPendingGenre(genre);
     setVideo(stableUri, name);
     pendingFileRef.current = { uri: stableUri, name };
@@ -927,6 +966,7 @@ export default function HomeScreen() {
     setRecentFiles((prev) => prev.map((f) => f.uri === stableUri ? { ...f, lastPlayedAt: Date.now() } : f));
     setVideo(stableUri, file.name);
     pendingFileRef.current = { uri: stableUri, name: file.name };
+    pendingSubtitleRef.current = null;
     setLangModalVisible(true);
   };
 
@@ -936,6 +976,7 @@ export default function HomeScreen() {
       {
         text: t("common.confirm"), style: "destructive", onPress: async () => {
           await deleteFileFromDisk(uri);
+          await deleteSubtitleCacheForUri(uri);
           setRecentFiles((prev) => prev.filter((f) => f.uri !== uri));
         },
       },
@@ -952,6 +993,7 @@ export default function HomeScreen() {
         onPress: async () => {
           const uris = new Set(targets.map((f) => f.uri));
           await Promise.all(targets.map((f) => deleteFileFromDisk(f.uri)));
+          await Promise.all(targets.map((f) => deleteSubtitleCacheForUri(f.uri)));
           setRecentFiles((prev) => prev.filter((f) => !uris.has(f.uri)));
         },
       },
@@ -965,6 +1007,7 @@ export default function HomeScreen() {
         text: t("common.delete"), style: "destructive",
         onPress: async () => {
           await Promise.all([...selectedUris].map((uri) => deleteFileFromDisk(uri)));
+          await Promise.all([...selectedUris].map((uri) => deleteSubtitleCacheForUri(uri)));
           setRecentFiles((prev) => prev.filter((f) => !selectedUris.has(f.uri)));
           setSelectedUris(new Set());
           setMultiSelect(false);

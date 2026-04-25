@@ -5,6 +5,7 @@ import { processVideo, ProcessingProgress } from "../services/videoProcessor";
 import { saveSubtitleCache } from "../services/subtitleCache";
 import { saveSubtitles } from "../services/subtitleDB";
 import { cancelFgInference } from "../services/gemmaTranslationService";
+import { pendingSubtitleRef } from "../utils/pendingSubtitle";
 
 export type ProcessResult = { success: boolean; translationSkipped: boolean };
 
@@ -74,28 +75,32 @@ export function useVideoProcessor() {
 
         if (cancelledRef.current) return { success: false, translationSkipped: false };
 
-        setSubtitles(subtitles);
+        // If an SRT file is pending, skip storing Whisper subtitles — SRT takes priority
+        if (!pendingSubtitleRef.current) {
+          setSubtitles(subtitles);
 
-        // [FIX 2] 캐시 이중화 해소:
-        //   - AsyncStorage (subtitleCache): ProcessingScreen의 캐시 확인용
-        //   - SQLite (subtitleDB): PlayerScreen의 캐시 확인용
-        // 둘 다 저장해서 앱 재시작 후 어느 경로로 진입해도 캐시 히트 보장
-        const cacheKey = localCacheKey(videoUri);
-        const srcLang = src === "auto" ? "en" : src;
+          // [FIX 2] 캐시 이중화 해소:
+          //   - AsyncStorage (subtitleCache): ProcessingScreen의 캐시 확인용
+          //   - SQLite (subtitleDB): PlayerScreen의 캐시 확인용
+          // 둘 다 저장해서 앱 재시작 후 어느 경로로 진입해도 캐시 히트 보장
+          const cacheKey = localCacheKey(videoUri);
+          const srcLang = src === "auto" ? "en" : src;
 
-        // AsyncStorage — ProcessingScreen이 getCachedSubtitles()로 확인
-        saveSubtitleCache(videoUri, tgt, subtitles, srcLang);
+          // AsyncStorage — ProcessingScreen이 getCachedSubtitles()로 확인
+          saveSubtitleCache(videoUri, tgt, subtitles, srcLang);
 
-        // SQLite — PlayerScreen이 loadSubtitles()로 확인
-        // 번역 완료 자막만 저장 (translationSkipped여도 원문 자막은 저장)
-        if (subtitles.length > 0) {
-          saveSubtitles(cacheKey, tgt, "local", subtitles).catch((e) =>
-            console.warn("[useVideoProcessor] SQLite 저장 실패 (non-fatal):", e)
-          );
+          // SQLite — PlayerScreen이 loadSubtitles()로 확인
+          // 번역 완료 자막만 저장 (translationSkipped여도 원문 자막은 저장)
+          if (subtitles.length > 0) {
+            saveSubtitles(cacheKey, tgt, "local", subtitles).catch((e) =>
+              console.warn("[useVideoProcessor] SQLite 저장 실패 (non-fatal):", e)
+            );
+          }
         }
 
         return { success: true, translationSkipped };
       } catch (e) {
+        if (cancelledRef.current) return { success: false, translationSkipped: false };
         const msg = String(e);
         setProcessingError(msg);
         setProgress({ step: "error", current: 0, total: 0, percent: 0, message: msg, error: msg });

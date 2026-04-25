@@ -138,6 +138,7 @@ export default function PlayerScreen() {
 
   // Read and consume pending SRT URI synchronously at render time.
   const initialSrtUri = useRef<string | null>(pendingSubtitleRef.current);
+  const hasSrtRef = useRef<boolean>(pendingSubtitleRef.current !== null);
   if (pendingSubtitleRef.current) {
     pendingSubtitleRef.current = null;
   }
@@ -208,6 +209,7 @@ export default function PlayerScreen() {
   useEffect(() => {
     if (!cacheKey) return;
     if (subtitleLoadedRef.current === cacheKey) return;
+    if (hasSrtRef.current) return;
 
     (async () => {
       const bgResult = await loadBgResult(cacheKey);
@@ -262,6 +264,7 @@ export default function PlayerScreen() {
   }, [bgStatus?.status, cacheKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
+    if (hasSrtRef.current) return;
     if (!cacheKey || subtitles.length === 0 || isBgRunningRef.current) return;
     const translatedCount = subtitles.filter((s) => s.translated && s.translated.trim() !== "").length;
     if (translatedCount === subtitles.length && subtitles.length > 0) {

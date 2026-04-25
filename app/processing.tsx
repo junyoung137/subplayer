@@ -418,6 +418,7 @@ export default function ProcessingScreen() {
   const [resumeCount,    setResumeCount]  = useState<number | null>(null);
   const hasStartedRef     = useRef(false);
   const serviceStartedRef = useRef(false);
+  const cancelledRef      = useRef(false);
 
   /** Peak values for completion detail text */
   const peakRef = useRef({ transcribeTotal: 0, sentenceTotal: 0 });
@@ -483,6 +484,7 @@ export default function ProcessingScreen() {
       startBackgroundProcessing();
       serviceStartedRef.current = true;
       process(videoUri).then(({ success, translationSkipped }) => {
+        if (cancelledRef.current) return;
         stopBackgroundProcessing();
         serviceStartedRef.current = false;
         if (success) {
@@ -683,6 +685,7 @@ export default function ProcessingScreen() {
   })();
 
   const handleCancel = () => {
+    cancelledRef.current = true;
     cancel();
     if (serviceStartedRef.current) {
       stopBackgroundProcessing();
