@@ -95,6 +95,11 @@
     modelBannerAction: "Загрузить →",
     noModelBanner: "Речевая модель не загружена",
     noGemmaBanner: "Модель перевода не загружена",
+    addPhoto: "Добавить фото",
+    allWithCount: "Все ({{count}})",
+    permissionRequired: "Требуется разрешение",
+    galleryPermissionMsg: "Требуется доступ к библиотеке фотографий.",
+    thumbnailSetFailed: "Не удалось установить миниатюру: {{error}}",
   },
   models: {
     speechRecognition: "Распознавание речи",

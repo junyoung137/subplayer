@@ -264,6 +264,7 @@ function FileThumbnail({
   duration?: number;
   onPickManual?: () => void;
 }) {
+  const { t } = useTranslation();
   const [thumb, setThumb] = useState<string | null>(thumbUri ?? null);
   const [loading, setLoading] = useState(!thumbUri);
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -338,7 +339,7 @@ function FileThumbnail({
       activeOpacity={0.7}
     >
       <Film size={32} color="#555" />
-      <Text style={thumbStyles.emptyLabel}>사진 추가</Text>
+      <Text style={thumbStyles.emptyLabel}>{t("home.addPhoto")}</Text>
     </TouchableOpacity>
   );
 }
@@ -841,7 +842,7 @@ export default function HomeScreen() {
             try {
               const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
               if (!perm.granted) {
-                Alert.alert("권한 필요", "사진 라이브러리 접근 권한이 필요합니다.");
+                Alert.alert(t("home.permissionRequired"), t("home.galleryPermissionMsg"));
                 return;
               }
               const result = await ImagePicker.launchImageLibraryAsync({
@@ -862,7 +863,7 @@ export default function HomeScreen() {
                 prev.map((f) => f.uri === fileUri ? { ...f, thumbnailUri: dest } : f)
               );
             } catch (e) {
-              Alert.alert("오류", "썸네일을 설정할 수 없습니다: " + String(e));
+              Alert.alert(t("common.error"), t("home.thumbnailSetFailed", { error: String(e) }));
             }
           },
         },
@@ -1297,10 +1298,10 @@ export default function HomeScreen() {
               onPress={() => setSelectedCat(currentCatObj.id)}
             >
               <Text style={[styles.subCatText, selectedCat === currentCatObj.id && styles.subCatTextActive]}>
-                전체 ({recentFiles.filter((f) => {
+                {t("home.allWithCount", { count: recentFiles.filter((f) => {
                   const ids = [currentCatObj.id, ...subCategories.map((c) => c.id)];
                   return ids.includes(f.category ?? "");
-                }).length})
+                }).length })}
               </Text>
             </TouchableOpacity>
             {subCategories.map((sub) => {

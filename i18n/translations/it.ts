@@ -95,6 +95,11 @@
     modelBannerAction: "Scarica →",
     noModelBanner: "Modello vocale non scaricato",
     noGemmaBanner: "Modello di traduzione non scaricato",
+    addPhoto: "Aggiungi foto",
+    allWithCount: "Tutti ({{count}})",
+    permissionRequired: "Autorizzazione richiesta",
+    galleryPermissionMsg: "È richiesto l'accesso alla libreria foto.",
+    thumbnailSetFailed: "Impossibile impostare la miniatura: {{error}}",
   },
   models: {
     speechRecognition: "Riconoscimento vocale",

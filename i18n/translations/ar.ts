@@ -95,6 +95,11 @@
     modelBannerAction: "تنزيل →",
     noModelBanner: "نموذج الصوت غير محمّل",
     noGemmaBanner: "نموذج الترجمة غير محمّل",
+    addPhoto: "إضافة صورة",
+    allWithCount: "الكل ({{count}})",
+    permissionRequired: "إذن مطلوب",
+    galleryPermissionMsg: "يلزم الإذن للوصول إلى مكتبة الصور.",
+    thumbnailSetFailed: "تعذر تعيين الصورة المصغرة: {{error}}",
   },
   models: {
     speechRecognition: "التعرف على الكلام",

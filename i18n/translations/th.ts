@@ -95,6 +95,11 @@
     modelBannerAction: "ดาวน์โหลด →",
     noModelBanner: "ยังไม่มีโมเดลเสียง",
     noGemmaBanner: "ยังไม่มีโมเดลแปลภาษา",
+    addPhoto: "เพิ่มรูปภาพ",
+    allWithCount: "ทั้งหมด ({{count}})",
+    permissionRequired: "ต้องการสิทธิ์",
+    galleryPermissionMsg: "ต้องการสิทธิ์เข้าถึงคลังรูปภาพ",
+    thumbnailSetFailed: "ไม่สามารถตั้งค่าภาพขนาดย่อ: {{error}}",
   },
   models: {
     speechRecognition: "การรู้จำเสียงพูด",

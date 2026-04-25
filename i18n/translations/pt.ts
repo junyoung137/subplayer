@@ -95,6 +95,11 @@
     modelBannerAction: "Baixar →",
     noModelBanner: "Modelo de voz não baixado",
     noGemmaBanner: "Modelo de tradução não baixado",
+    addPhoto: "Adicionar foto",
+    allWithCount: "Tudo ({{count}})",
+    permissionRequired: "Permissão necessária",
+    galleryPermissionMsg: "É necessária permissão para acessar a biblioteca de fotos.",
+    thumbnailSetFailed: "Não foi possível definir a miniatura: {{error}}",
   },
   models: {
     speechRecognition: "Reconhecimento de fala",

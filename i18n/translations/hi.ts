@@ -95,6 +95,11 @@
     modelBannerAction: "डाउनलोड →",
     noModelBanner: "वाक् मॉडल डाउनलोड नहीं",
     noGemmaBanner: "अनुवाद मॉडल डाउनलोड नहीं",
+    addPhoto: "फ़ोटो जोड़ें",
+    allWithCount: "सभी ({{count}})",
+    permissionRequired: "अनुमति आवश्यक",
+    galleryPermissionMsg: "फ़ोटो लाइब्रेरी तक पहुँचने की अनुमति आवश्यक है।",
+    thumbnailSetFailed: "थंबनेल सेट नहीं किया जा सका: {{error}}",
   },
   models: {
     speechRecognition: "वाक् पहचान",

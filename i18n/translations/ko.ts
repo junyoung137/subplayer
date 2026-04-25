@@ -95,6 +95,11 @@
     modelBannerAction: "다운로드 →",
     noModelBanner: "음성 인식 모델 없음",
     noGemmaBanner: "번역 모델 없음",
+    addPhoto: "사진 추가",
+    allWithCount: "전체 ({{count}})",
+    permissionRequired: "권한 필요",
+    galleryPermissionMsg: "사진 라이브러리 접근 권한이 필요합니다.",
+    thumbnailSetFailed: "썸네일을 설정할 수 없습니다: {{error}}",
   },
   models: {
     speechRecognition: "음성 인식",

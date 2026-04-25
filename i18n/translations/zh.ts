@@ -95,6 +95,11 @@
     modelBannerAction: "下载 →",
     noModelBanner: "未下载语音模型",
     noGemmaBanner: "未下载翻译模型",
+    addPhoto: "添加图片",
+    allWithCount: "全部 ({{count}})",
+    permissionRequired: "需要权限",
+    galleryPermissionMsg: "需要访问照片库的权限。",
+    thumbnailSetFailed: "无法设置缩略图: {{error}}",
   },
   models: {
     speechRecognition: "语音识别",

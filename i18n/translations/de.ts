@@ -95,6 +95,11 @@
     modelBannerAction: "Herunterladen →",
     noModelBanner: "Sprachmodell nicht heruntergeladen",
     noGemmaBanner: "Übersetzungsmodell nicht heruntergeladen",
+    addPhoto: "Foto hinzufügen",
+    allWithCount: "Alle ({{count}})",
+    permissionRequired: "Berechtigung erforderlich",
+    galleryPermissionMsg: "Zugriff auf die Fotobibliothek ist erforderlich.",
+    thumbnailSetFailed: "Vorschaubild konnte nicht gesetzt werden: {{error}}",
   },
   models: {
     speechRecognition: "Spracherkennung",

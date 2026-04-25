@@ -95,6 +95,11 @@ const en = {
     modelBannerAction: "Download →",
     noModelBanner: "Voice recognition model not downloaded",
     noGemmaBanner: "Translation model not downloaded",
+    addPhoto: "Add Photo",
+    allWithCount: "All ({{count}})",
+    permissionRequired: "Permission Required",
+    galleryPermissionMsg: "Photo library access permission is required.",
+    thumbnailSetFailed: "Could not set thumbnail: {{error}}",
   },
   models: {
     speechRecognition: "Speech Recognition",

@@ -95,6 +95,11 @@
     modelBannerAction: "Tải xuống →",
     noModelBanner: "Chưa tải mô hình giọng nói",
     noGemmaBanner: "Chưa tải mô hình dịch thuật",
+    addPhoto: "Thêm ảnh",
+    allWithCount: "Tất cả ({{count}})",
+    permissionRequired: "Yêu cầu quyền",
+    galleryPermissionMsg: "Cần quyền truy cập thư viện ảnh.",
+    thumbnailSetFailed: "Không thể đặt hình thu nhỏ: {{error}}",
   },
   models: {
     speechRecognition: "Nhận dạng giọng nói",

@@ -95,6 +95,11 @@
     modelBannerAction: "Unduh →",
     noModelBanner: "Model suara belum diunduh",
     noGemmaBanner: "Model terjemahan belum diunduh",
+    addPhoto: "Tambah Foto",
+    allWithCount: "Semua ({{count}})",
+    permissionRequired: "Izin Diperlukan",
+    galleryPermissionMsg: "Diperlukan izin untuk mengakses perpustakaan foto.",
+    thumbnailSetFailed: "Tidak dapat mengatur thumbnail: {{error}}",
   },
   models: {
     speechRecognition: "Pengenalan suara",

@@ -95,6 +95,11 @@
     modelBannerAction: "ダウンロード →",
     noModelBanner: "音声モデル未ダウンロード",
     noGemmaBanner: "翻訳モデル未ダウンロード",
+    addPhoto: "写真を追加",
+    allWithCount: "すべて ({{count}})",
+    permissionRequired: "権限が必要",
+    galleryPermissionMsg: "写真ライブラリへのアクセス許可が必要です。",
+    thumbnailSetFailed: "サムネイルを設定できませんでした: {{error}}",
   },
   models: {
     speechRecognition: "音声認識",

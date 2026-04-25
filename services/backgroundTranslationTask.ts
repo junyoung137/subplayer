@@ -5,6 +5,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { fetchYoutubeSubtitles, getProxyBaseUrl, clearProxyUrlCache } from './youtubeTimedText';
 import { loadModel, unloadModel, translateSegments, isModelBusy, debugInferenceCounters, setBgJobProtection, cancelFgInference, setAppBackgroundedHint } from './gemmaTranslationService';
 import { getLocalModelPath } from './modelDownloadService';
+import { getBgStrings } from '../utils/bgStrings';
 
 export const BG_TASK_STATUS_KEY  = 'bg_translation_status';
 export const BG_TASK_RESULT_KEY  = 'bg_translation_result';
@@ -101,6 +102,7 @@ async function sendFailureNotification(videoTitle: string, reason?: string): Pro
 
 export async function backgroundTranslationTask(taskData: BgTranslationTask): Promise<void> {
   const { videoId, videoTitle, language, genre } = taskData;
+  const s = getBgStrings(language);
   const statusBase = { videoId, updatedAt: Date.now() };
 
   // [DEBUG] If counters are 0 this task runs in a FRESH JS context (separate from FG).
@@ -134,7 +136,7 @@ export async function backgroundTranslationTask(taskData: BgTranslationTask): Pr
   // the task dies early during checkpoint read or lock acquisition.
   await saveStatus({ ...statusBase, status: 'fetching', progress: 0,
     translatedCount: 0, totalCount: 0 });
-  notifyProgress(0, '📡 자막 가져오는 중...');
+  notifyProgress(0, '📡 ' + s.fetchingSubtitles);
 
   await AsyncStorage.setItem(BG_TASK_LOCK_KEY, '1').catch(() => {});
 
@@ -253,8 +255,8 @@ export async function backgroundTranslationTask(taskData: BgTranslationTask): Pr
       );
       console.error('[BG_TASK] All subtitle fetch attempts failed — aborting');
       await saveStatus({ ...statusBase, status: 'error', progress: 0,
-        translatedCount: 0, totalCount: 0, error: '자막 없음' });
-      await sendFailureNotification(videoTitle, '자막 없음');
+        translatedCount: 0, totalCount: 0, error: s.noSubtitles });
+      await sendFailureNotification(videoTitle, s.failNoSubtitles);
       return;
     }
 
@@ -264,14 +266,14 @@ export async function backgroundTranslationTask(taskData: BgTranslationTask): Pr
       totalCount: subtitleResult.segments.length });
 
     const totalCount = subtitleResult.segments.length;
-    notifyProgress(5, `📥 자막 ${totalCount}개 로드 완료`);
+    notifyProgress(5, '📥 ' + s.subtitlesLoaded(totalCount));
 
     const modelPath = await getLocalModelPath();
     if (!modelPath) {
       console.error('[BG_TASK] Model file not found — aborting');
       await saveStatus({ ...statusBase, status: 'error', progress: 0,
-        translatedCount: 0, totalCount, error: '모델 파일 없음' });
-      await sendFailureNotification(videoTitle, '모델 파일 없음');
+        translatedCount: 0, totalCount, error: s.noModel });
+      await sendFailureNotification(videoTitle, s.failNoModel);
       return;
     }
     // Improvement 1-c: progress 0.05 — model path verified
@@ -283,8 +285,8 @@ export async function backgroundTranslationTask(taskData: BgTranslationTask): Pr
     } catch (e: any) {
       console.error('[BG_TASK] loadModel() failed:', e);
       await saveStatus({ ...statusBase, status: 'error', progress: 0,
-        translatedCount: 0, totalCount, error: '모델 로드 실패' });
-      await sendFailureNotification(videoTitle, '모델 로드 실패');
+        translatedCount: 0, totalCount, error: s.modelLoadFailed });
+      await sendFailureNotification(videoTitle, s.failModelLoad);
       return;
     }
     // Improvement 1-d: translating/0.05 — model loaded, translation about to start
@@ -475,7 +477,7 @@ export async function backgroundTranslationTask(taskData: BgTranslationTask): Pr
         if (now - lastNotifyTime > NOTIFY_THROTTLE_MS) {
           lastNotifyTime = now;
           notifyProgress(pct,
-            `🌐 번역 중... ${totalDone}/${totalCount} (${Math.round(fraction * 100)}%)`);
+            '🌐 ' + s.translating(totalDone, totalCount, Math.round(fraction * 100)));
         }
       };
 
@@ -514,8 +516,8 @@ export async function backgroundTranslationTask(taskData: BgTranslationTask): Pr
             console.warn('[BG_TASK] Aborted due to memory pressure. Checkpoint saved for resume.');
             await saveStatus({ ...statusBase, status: 'error', progress: 0,
               translatedCount: 0, totalCount,
-              error: '메모리 부족 — 재시작 시 이어서 번역됩니다' });
-            await sendFailureNotification(videoTitle, '메모리 부족 (재시작 시 재개)');
+              error: s.memoryAbort });
+            await sendFailureNotification(videoTitle, s.failMemory);
             return;
           }
           if (e?.message === 'INFERENCE_CANCELLED') {
@@ -537,13 +539,13 @@ export async function backgroundTranslationTask(taskData: BgTranslationTask): Pr
             );
             await saveStatus({ ...statusBase, status: 'error', progress: 0,
               translatedCount: 0, totalCount,
-              error: 'BG 번역 취소됨 (재시도 실패)' });
-            await sendFailureNotification(videoTitle, 'BG 번역 취소됨 (재시도 실패)');
+              error: s.bgCancelledRetry });
+            await sendFailureNotification(videoTitle, s.failCancelled);
             return;
           }
           console.error('[BG_TASK] translateSegments error:', e);
           await saveStatus({ ...statusBase, status: 'error', progress: 0,
-            translatedCount: 0, totalCount, error: e?.message ?? '번역 오류' });
+            translatedCount: 0, totalCount, error: e?.message ?? s.translationError });
           await sendFailureNotification(videoTitle, e?.message);
           return;
         }
