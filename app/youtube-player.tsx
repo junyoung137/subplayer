@@ -254,13 +254,10 @@ export default function YoutubePlayerScreen() {
   const bannerOpacity          = useRef(new Animated.Value(0.7)).current;
   const lastProgressTimestampRef = useRef<number>(0);
 
-  // ── [FIX v19] 재생 버튼 debounce 처리 ───────────────────────────────────
   // optimisticPlaying: 버튼 탭 시 UI 즉각 반응용 로컬 state
-  // debounceTimerRef:  300ms 내 중복 탭 방지 — 마지막 의도만 ref.play()/pause() 호출
   // 실제 isPlaying store 상태는 오직 onStateChange 이벤트에서만 업데이트 (단방향)
   const [optimisticPlaying, setOptimisticPlaying] = useState(false);
-  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pendingPlayRef   = useRef<boolean | null>(null);
+  const optimisticPlayingRef  = useRef(false);
 
   // Animation refs for smooth progress bar interpolation
   const animProgressRef = useRef(0);
@@ -1399,31 +1396,12 @@ export default function YoutubePlayerScreen() {
     ytPlayerRef.current?.seekTo(time);
   }, [setCurrentTime, bumpSeek]);
 
-  // ── [FIX v19] 재생 토글 핸들러 (debounce) ───────────────────────────────
-  // 1) optimisticPlaying 즉시 토글 → 버튼 아이콘 즉각 반응
-  // 2) 300ms debounce → 연속 탭 시 마지막 의도만 ref.play()/pause() 1회 호출
-  // 실제 isPlaying store 상태는 onStateChange에서만 업데이트 (단방향)
   const handlePlayToggle = useCallback(() => {
-    const next = !optimisticPlaying;
+    console.log('[TOGGLE] handlePlayToggle called, optimisticPlayingRef=', optimisticPlayingRef.current);
+    const next = !optimisticPlayingRef.current;
+    optimisticPlayingRef.current = next;
     setOptimisticPlaying(next);
-    pendingPlayRef.current = next;
-
-    if (debounceTimerRef.current) {
-      clearTimeout(debounceTimerRef.current);
-    }
-    debounceTimerRef.current = setTimeout(() => {
-      debounceTimerRef.current = null;
-      const intent = pendingPlayRef.current;
-      if (intent === null) return;
-      pendingPlayRef.current = null;
-      console.log(`[v19] debounced play intent → ${intent}`);
-      if (intent) {
-        ytPlayerRef.current?.play();
-      } else {
-        ytPlayerRef.current?.pause();
-      }
-    }, 300);
-  }, [optimisticPlaying]);
+  }, []);
 
   // ── 수동 재시도 ───────────────────────────────────────────────────────────
   const handleRetrySubtitles = useCallback(() => {
@@ -1669,12 +1647,15 @@ export default function YoutubePlayerScreen() {
           onSubtitleData={handleSubtitleData}
           onSubtitlesLoaded={handleSubtitlesLoaded}
           onSeek={handleSeek}
+          playing={optimisticPlaying}
+          onTap={handlePlayToggle}
           onFullscreenToggle={handleFullscreenToggle}
           isFullscreen={isLandscape}
           onStateChange={(state) => {
             // [FIX v19] 실제 플레이어 이벤트 기반 단방향 상태 업데이트
             if (state === "playing") {
               setPlaying(true);
+              optimisticPlayingRef.current = true;
               setOptimisticPlaying(true);
               if (subtitlePhase === "idle" && !isBgRunningRef.current) {
                 setPhase("fetching");
@@ -1682,7 +1663,12 @@ export default function YoutubePlayerScreen() {
             }
             if (state === "paused" || state === "ended") {
               setPlaying(false);
-              setOptimisticPlaying(false);
+              // Only sync optimisticPlaying to false if we WERE playing.
+              // Do NOT reset on the initial iframe load PAUSED event.
+              if (optimisticPlaying) {
+                optimisticPlayingRef.current = false;
+                setOptimisticPlaying(false);
+              }
             }
           }}
           onError={(code) => {
@@ -1882,7 +1868,7 @@ export default function YoutubePlayerScreen() {
         */}
         <TouchableOpacity
           style={styles.playBtn}
-          onPress={handlePlayToggle}
+          onPress={() => { console.log('[BTN] play button pressed'); handlePlayToggle(); }}
           activeOpacity={0.75}
         >
           <Text style={styles.playBtnText}>{optimisticPlaying ? "⏸" : "▶"}</Text>
