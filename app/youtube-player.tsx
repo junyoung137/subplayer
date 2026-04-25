@@ -133,10 +133,16 @@ function YoutubeSeekBar({
   currentTime,
   duration,
   onSeek,
+  onSeekStart,
+  onSeekMove,
+  onSeekEnd,
 }: {
   currentTime: number;
   duration: number;
   onSeek: (t: number) => void;
+  onSeekStart?: (t: number) => void;
+  onSeekMove?: (t: number) => void;
+  onSeekEnd?: (t: number) => void;
 }) {
   const barWidthRef = useRef(0);
   const getTimeRef  = useRef((x: number) => {
@@ -152,6 +158,12 @@ function YoutubeSeekBar({
 
   const onSeekRef = useRef(onSeek);
   onSeekRef.current = onSeek;
+  const onSeekStartRef = useRef(onSeekStart);
+  onSeekStartRef.current = onSeekStart;
+  const onSeekMoveRef = useRef(onSeekMove);
+  onSeekMoveRef.current = onSeekMove;
+  const onSeekEndRef = useRef(onSeekEnd);
+  onSeekEndRef.current = onSeekEnd;
 
   const pan = useRef(
     PanResponder.create({
@@ -159,9 +171,21 @@ function YoutubeSeekBar({
       onMoveShouldSetPanResponder:         () => true,
       onStartShouldSetPanResponderCapture: () => true,
       onMoveShouldSetPanResponderCapture:  () => true,
-      onPanResponderGrant:   (e) => onSeekRef.current(getTimeRef.current(e.nativeEvent.locationX)),
-      onPanResponderMove:    (e) => onSeekRef.current(getTimeRef.current(e.nativeEvent.locationX)),
-      onPanResponderRelease: (e) => onSeekRef.current(getTimeRef.current(e.nativeEvent.locationX)),
+      onPanResponderGrant: (e) => {
+        const t = getTimeRef.current(e.nativeEvent.locationX);
+        if (onSeekStartRef.current) onSeekStartRef.current(t);
+        else onSeekRef.current(t);
+      },
+      onPanResponderMove: (e) => {
+        const t = getTimeRef.current(e.nativeEvent.locationX);
+        if (onSeekMoveRef.current) onSeekMoveRef.current(t);
+        else onSeekRef.current(t);
+      },
+      onPanResponderRelease: (e) => {
+        const t = getTimeRef.current(e.nativeEvent.locationX);
+        if (onSeekEndRef.current) onSeekEndRef.current(t);
+        else onSeekRef.current(t);
+      },
     })
   ).current;
 
@@ -1439,10 +1463,10 @@ export default function YoutubePlayerScreen() {
   }, [setCurrentTime, bumpSeek]);
 
   const handleFullscreenSeek = useCallback((t: number) => {
+    // fallback for portrait seekbar (unchanged behavior)
     fsSeekValueRef.current = t;
     fsSeekingRef.current = true;
     setCurrentTime(t);
-    // Block the 500ms polling from overwriting our optimistic update
     ytPlayerRef.current?.blockTimeSync(1200);
     if (fsSeekPendingRef.current) clearTimeout(fsSeekPendingRef.current);
     fsSeekPendingRef.current = setTimeout(() => {
@@ -1451,6 +1475,33 @@ export default function YoutubePlayerScreen() {
       fsSeekPendingRef.current = null;
       setTimeout(() => { fsSeekingRef.current = false; }, 800);
     }, 200);
+  }, [setCurrentTime, bumpSeek]);
+
+  const handleFsSeekStart = useCallback((t: number) => {
+    fsSeekValueRef.current = t;
+    fsSeekingRef.current = true;
+    setCurrentTime(t);
+    // Block polling for entire drag session (will keep extending on move)
+    ytPlayerRef.current?.blockTimeSync(10000);
+    if (fsSeekPendingRef.current) clearTimeout(fsSeekPendingRef.current);
+  }, [setCurrentTime]);
+
+  const handleFsSeekMove = useCallback((t: number) => {
+    fsSeekValueRef.current = t;
+    setCurrentTime(t); // update display only, no seekTo
+  }, [setCurrentTime]);
+
+  const handleFsSeekEnd = useCallback((t: number) => {
+    fsSeekValueRef.current = t;
+    setCurrentTime(t);
+    if (fsSeekPendingRef.current) clearTimeout(fsSeekPendingRef.current);
+    // Seek only on release — smooth and accurate
+    ytPlayerRef.current?.seekTo(t);
+    bumpSeek();
+    // Release polling block after seek settles
+    ytPlayerRef.current?.blockTimeSync(800);
+    fsSeekPendingRef.current = null;
+    setTimeout(() => { fsSeekingRef.current = false; }, 800);
   }, [setCurrentTime, bumpSeek]);
 
   // ── 검색 모달용 seek 핸들러 ───────────────────────────────────────────────
@@ -1789,6 +1840,9 @@ export default function YoutubePlayerScreen() {
                   currentTime={currentTime}
                   duration={duration}
                   onSeek={handleFullscreenSeek}
+                  onSeekStart={handleFsSeekStart}
+                  onSeekMove={handleFsSeekMove}
+                  onSeekEnd={handleFsSeekEnd}
                 />
               </View>
               <Text style={{
