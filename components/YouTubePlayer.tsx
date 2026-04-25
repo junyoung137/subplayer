@@ -75,6 +75,8 @@ export interface YouTubePlayerHandle {
   pause: () => void;
   disableCaptions: () => void;
   blockTimeSync: (ms: number) => void;
+  pauseTimeSync: () => void;
+  resumeTimeSync: () => void;
 }
 
 export interface SubtitleFetchResult {
@@ -236,6 +238,7 @@ export const YouTubePlayer = React.forwardRef<
   // 시크 직후 폴링이 setCurrentTime을 덮어쓰지 않도록 800ms 보호
   const isTimeSyncBlockedRef = useRef<boolean>(false);
   const blockTimeSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isTimeSyncPausedRef = useRef<boolean>(false);
 
   // ── 탭 감지용 refs ────────────────────────────────────────────────────────
   const tapCountRef      = useRef<number>(0);
@@ -333,6 +336,8 @@ export const YouTubePlayer = React.forwardRef<
     const timer = setInterval(async () => {
       if (!isPlayingRef.current) return;
       if (isTimeSyncBlockedRef.current) return;
+      if (seekingRef.current) return;
+      if (isTimeSyncPausedRef.current) return;
       try {
         const t = await playerRef.current?.getCurrentTime();
         const d = await playerRef.current?.getDuration();
@@ -429,6 +434,8 @@ export const YouTubePlayer = React.forwardRef<
         blockTimeSyncTimerRef.current = null;
       }, ms);
     },
+    pauseTimeSync: () => { isTimeSyncPausedRef.current = true; },
+    resumeTimeSync: () => { isTimeSyncPausedRef.current = false; },
   }));
 
   // ── State change handler ──────────────────────────────────────────────────

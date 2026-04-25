@@ -1480,11 +1480,10 @@ export default function YoutubePlayerScreen() {
   }, [setCurrentTime, bumpSeek]);
 
   const handleFsSeekStart = useCallback((t: number) => {
-    fsSeekValueRef.current = t;
     fsSeekingRef.current = true;
+    fsSeekValueRef.current = t;
     setCurrentTime(t);
-    // Block polling for entire drag session (will keep extending on move)
-    ytPlayerRef.current?.blockTimeSync(10000);
+    ytPlayerRef.current?.pauseTimeSync();
     if (fsSeekPendingRef.current) clearTimeout(fsSeekPendingRef.current);
   }, [setCurrentTime]);
 
@@ -1495,9 +1494,6 @@ export default function YoutubePlayerScreen() {
 
   const handleFsSeekEnd = useCallback((t: number) => {
     fsSeekValueRef.current = t;
-    // Block BEFORE updating store — prevents any in-flight
-    // polling tick from overwriting t between now and seekTo
-    ytPlayerRef.current?.blockTimeSync(2000);
     setCurrentTime(t);
     if (fsSeekPendingRef.current) clearTimeout(fsSeekPendingRef.current);
     // Small delay before seekTo so the block is fully in place
@@ -1505,7 +1501,10 @@ export default function YoutubePlayerScreen() {
       ytPlayerRef.current?.seekTo(t);
       bumpSeek();
     }, 50);
-    setTimeout(() => { fsSeekingRef.current = false; }, 2000);
+    setTimeout(() => {
+      fsSeekingRef.current = false;
+      ytPlayerRef.current?.resumeTimeSync();
+    }, 2500);
   }, [setCurrentTime, bumpSeek]);
 
   // ── 검색 모달용 seek 핸들러 ───────────────────────────────────────────────
