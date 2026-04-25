@@ -197,7 +197,10 @@ export const YouTubePlayer = React.forwardRef<
   }, [isFullscreen]);
 
   useEffect(() => {
-    return () => { if (overlayHideTimerRef.current) clearTimeout(overlayHideTimerRef.current); };
+    return () => {
+      if (overlayHideTimerRef.current) clearTimeout(overlayHideTimerRef.current);
+      if (blockTimeSyncTimerRef.current) clearTimeout(blockTimeSyncTimerRef.current);
+    };
   }, []);
 
 
@@ -232,6 +235,7 @@ export const YouTubePlayer = React.forwardRef<
   const seekingRef           = useRef<boolean>(false);
   // 시크 직후 폴링이 setCurrentTime을 덮어쓰지 않도록 800ms 보호
   const isTimeSyncBlockedRef = useRef<boolean>(false);
+  const blockTimeSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── 탭 감지용 refs ────────────────────────────────────────────────────────
   const tapCountRef      = useRef<number>(0);
@@ -328,6 +332,7 @@ export const YouTubePlayer = React.forwardRef<
     if (!isReady) return;
     const timer = setInterval(async () => {
       if (!isPlayingRef.current) return;
+      if (isTimeSyncBlockedRef.current) return;
       try {
         const t = await playerRef.current?.getCurrentTime();
         const d = await playerRef.current?.getDuration();
@@ -390,9 +395,17 @@ export const YouTubePlayer = React.forwardRef<
   // ── Ref 메서드 노출 ───────────────────────────────────────────────────────
   React.useImperativeHandle(ref, () => ({
     seekTo: (t: number) => {
-      seekingRef.current           = true;
-      isTimeSyncBlockedRef.current = true;
-      setTimeout(() => { isTimeSyncBlockedRef.current = false; }, 800);
+      seekingRef.current = true;
+      // Do NOT touch isTimeSyncBlockedRef here —
+      // blockTimeSync manages it independently now.
+      // Only set it if blockTimeSync is not already controlling it.
+      if (!blockTimeSyncTimerRef.current) {
+        isTimeSyncBlockedRef.current = true;
+        blockTimeSyncTimerRef.current = setTimeout(() => {
+          isTimeSyncBlockedRef.current = false;
+          blockTimeSyncTimerRef.current = null;
+        }, 800);
+      }
       playerRef.current?.seekTo(t, true);
     },
     setRate: (rate: number) => { setCurrentRate(rate); },
@@ -408,7 +421,13 @@ export const YouTubePlayer = React.forwardRef<
     },
     blockTimeSync: (ms: number) => {
       isTimeSyncBlockedRef.current = true;
-      setTimeout(() => { isTimeSyncBlockedRef.current = false; }, ms);
+      if (blockTimeSyncTimerRef.current) {
+        clearTimeout(blockTimeSyncTimerRef.current);
+      }
+      blockTimeSyncTimerRef.current = setTimeout(() => {
+        isTimeSyncBlockedRef.current = false;
+        blockTimeSyncTimerRef.current = null;
+      }, ms);
     },
   }));
 
