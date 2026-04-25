@@ -69,7 +69,13 @@ function isBlankText(text: string): boolean {
 
 function cleanSubtitleText(text: string): string {
   if (!text) return "";
-  text = text.replace(/^[.!?,;:\s]+/, "");
+  // Remove leading dialogue dash (e.g. "- File goes cold." → "File goes cold.")
+  text = text.replace(/^-\s*/, "");
+  // Normalize ellipsis: "... ..." → "..."
+  text = text.replace(/\.\.\.\s*\.\.\./g, "...");
+  text = text.replace(/\.{4,}/g, "...");
+  text = text.replace(/\.\s*\.\s*\.\s*\.\s*\./g, "...");
+  text = text.replace(/^[!?,;:\s]+/, "");
   text = text.replace(/\s+[.!?,;:]$/, (m) => m.trim());
   text = text.replace(/\s+/g, " ");
   text = text.replace(/\s+([.!?,;:])/g, "$1");
@@ -240,6 +246,8 @@ function buildDisplayLines(
       ? (translatedText || originalText)
       : originalText;
 
+    displayText = displayText.replace(/\.\.\.\s*\.\.\./g, "...");
+    displayText = displayText.replace(/\.{4,}/g, "...");
     const [line1, line2] = splitIntoTwoLines(cleanSubtitleText(displayText));
     const lines = line2 ? [line1, line2] : [line1];
 

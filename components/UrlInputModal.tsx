@@ -65,8 +65,8 @@ async function ensureStableFileUri(uri: string, filename: string): Promise<strin
 interface UrlInputModalProps {
   visible: boolean;
   onClose: () => void;
-  onLocalFilePicked: (uri: string, name: string, genre: string) => void;
-  onUrlPicked: (videoId: string, title: string, isYoutube: boolean, genre?: string) => void;
+  onLocalFilePicked: (uri: string, name: string, genre: string, subtitleUri?: string) => void;
+  onUrlPicked: (videoId: string, title: string, isYoutube: boolean, genre?: string, subtitleUri?: string) => void;
 }
 
 type Tab = "local" | "url";
@@ -94,6 +94,8 @@ export function UrlInputModal({
   const [isLoading,     setIsLoading]     = useState(false);
   const [urlError,      setUrlError]      = useState<string | null>(null);
   const [selectedGenre, setSelectedGenre] = useState("general");
+  const [subtitleUri,   setSubtitleUri]   = useState<string | null>(null);
+  const [subtitleName,  setSubtitleName]  = useState<string | null>(null);
 
   const parsedId = parseYoutubeId(urlInput.trim());
 
@@ -113,7 +115,7 @@ export function UrlInputModal({
         return;
       }
       onClose();
-      onLocalFilePicked(stableUri, file.name, selectedGenre);
+      onLocalFilePicked(stableUri, file.name, selectedGenre, subtitleUri ?? undefined);
     } catch (e) {
       Alert.alert(t("url.error"), t("url.fileOpenError") + String(e));
     } finally {
@@ -130,7 +132,7 @@ export function UrlInputModal({
     if (ytId) {
       const genreSnapshot = selectedGenre;
       onClose();
-      onUrlPicked(ytId, `YouTube: ${ytId}`, true, genreSnapshot);
+      onUrlPicked(ytId, `YouTube: ${ytId}`, true, genreSnapshot, subtitleUri ?? undefined);
       setUrlInput("");
       return;
     }
@@ -141,12 +143,34 @@ export function UrlInputModal({
     setUrlError(t("url.invalidUrl"));
   }, [urlInput, selectedGenre, onClose, onUrlPicked, t]);
 
+  // ── 자막 파일 선택 ──────────────────────────────────────────────────────
+  const pickSubtitleFile = async () => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: ["application/x-subrip", "text/plain", "*/*"],
+        copyToCacheDirectory: true,
+      });
+      if (result.canceled) return;
+      const file = result.assets[0];
+      if (!file.name.toLowerCase().endsWith(".srt")) {
+        Alert.alert("지원하지 않는 형식", ".srt 파일만 지원합니다.");
+        return;
+      }
+      setSubtitleUri(file.uri);
+      setSubtitleName(file.name);
+    } catch (e) {
+      Alert.alert("오류", "자막 파일을 열 수 없습니다: " + String(e));
+    }
+  };
+
   // ── 모달 닫기 ────────────────────────────────────────────────────────────
   const handleClose = () => {
     setUrlInput("");
     setUrlError(null);
     setActiveTab("local");
     setSelectedGenre("general");
+    setSubtitleUri(null);
+    setSubtitleName(null);
     onClose();
   };
 
@@ -230,6 +254,39 @@ export function UrlInputModal({
                 </ScrollView>
               </View>
 
+              {/* Optional subtitle file */}
+              <View style={{ gap: 6 }}>
+                <Text style={styles.inputLabel}>자막 파일 (선택사항)</Text>
+                {subtitleUri ? (
+                  <View style={{
+                    flexDirection: "row", alignItems: "center",
+                    backgroundColor: "#14532d", borderRadius: 10,
+                    borderWidth: 1, borderColor: "#22c55e",
+                    paddingHorizontal: 12, paddingVertical: 10, gap: 8,
+                  }}>
+                    <Text style={{ color: "#86efac", fontSize: 13, flex: 1 }} numberOfLines={1}>
+                      ✓ {subtitleName}
+                    </Text>
+                    <TouchableOpacity onPress={() => { setSubtitleUri(null); setSubtitleName(null); }}>
+                      <X size={16} color="#86efac" />
+                    </TouchableOpacity>
+                  </View>
+                ) : (
+                  <TouchableOpacity
+                    style={{
+                      flexDirection: "row", alignItems: "center", gap: 8,
+                      backgroundColor: "#1a1a1a", borderRadius: 10,
+                      borderWidth: 1, borderColor: "#2a2a2a", borderStyle: "dashed",
+                      paddingHorizontal: 12, paddingVertical: 10,
+                    }}
+                    onPress={pickSubtitleFile}
+                    activeOpacity={0.75}
+                  >
+                    <Text style={{ color: "#555", fontSize: 13 }}>+ SRT 파일 선택 (AI 번역 건너뜀)</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+
               <TouchableOpacity
                 style={styles.bigPickBtn}
                 onPress={pickLocalFile}
@@ -272,6 +329,39 @@ export function UrlInputModal({
                     </TouchableOpacity>
                   ))}
                 </ScrollView>
+              </View>
+
+              {/* Optional subtitle file */}
+              <View style={{ gap: 6 }}>
+                <Text style={styles.inputLabel}>자막 파일 (선택사항)</Text>
+                {subtitleUri ? (
+                  <View style={{
+                    flexDirection: "row", alignItems: "center",
+                    backgroundColor: "#14532d", borderRadius: 10,
+                    borderWidth: 1, borderColor: "#22c55e",
+                    paddingHorizontal: 12, paddingVertical: 10, gap: 8,
+                  }}>
+                    <Text style={{ color: "#86efac", fontSize: 13, flex: 1 }} numberOfLines={1}>
+                      ✓ {subtitleName}
+                    </Text>
+                    <TouchableOpacity onPress={() => { setSubtitleUri(null); setSubtitleName(null); }}>
+                      <X size={16} color="#86efac" />
+                    </TouchableOpacity>
+                  </View>
+                ) : (
+                  <TouchableOpacity
+                    style={{
+                      flexDirection: "row", alignItems: "center", gap: 8,
+                      backgroundColor: "#1a1a1a", borderRadius: 10,
+                      borderWidth: 1, borderColor: "#2a2a2a", borderStyle: "dashed",
+                      paddingHorizontal: 12, paddingVertical: 10,
+                    }}
+                    onPress={pickSubtitleFile}
+                    activeOpacity={0.75}
+                  >
+                    <Text style={{ color: "#555", fontSize: 13 }}>+ SRT 파일 선택 (AI 번역 건너뜀)</Text>
+                  </TouchableOpacity>
+                )}
               </View>
 
               <View style={styles.inputWrap}>

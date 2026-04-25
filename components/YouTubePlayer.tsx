@@ -72,6 +72,7 @@ export interface YouTubePlayerHandle {
   fetchSubtitles: () => void; // 수동 재시도
   play: () => void;
   pause: () => void;
+  disableCaptions: () => void;
 }
 
 export interface SubtitleFetchResult {
@@ -333,6 +334,11 @@ export const YouTubePlayer = React.forwardRef<
     },
     play:  () => {},
     pause: () => {},
+    disableCaptions: () => {
+      playerRef.current?.injectJavaScript?.(
+        "try{player.unloadModule('captions');player.unloadModule('cc');}catch(e){}; true;"
+      );
+    },
   }));
 
   // ── State change handler ──────────────────────────────────────────────────

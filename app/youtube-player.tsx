@@ -58,6 +58,9 @@ import { useRetranslate } from "../hooks/useRetranslate";
 import { Settings, Check, CheckCircle2, XCircle, AlertTriangle, Mic, Search, Loader2, Globe, CheckCircle, AlertCircle, Radio, RotateCcw, Brain, Clock } from 'lucide-react-native';
 import { useBackgroundTranslation } from '../hooks/useBackgroundTranslation';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as FileSystem from "expo-file-system/legacy";
+import { pendingSubtitleRef } from "../utils/pendingSubtitle";
+import { parseSrt } from "../utils/srtParser";
 import {
   loadModel as loadGemma,
   unloadModel as unloadGemma,
@@ -250,6 +253,14 @@ export default function YoutubePlayerScreen() {
   const rafHandleRef           = useRef<number | null>(null);
   const bgResultApplied        = useRef(false);
   const autoFetchCompletedRef  = useRef(false);
+  const srtModeActiveRef       = useRef(false);
+
+  // Read and consume pending SRT URI synchronously at render time,
+  // before any effects or player callbacks fire.
+  const initialSrtUri = useRef<string | null>(pendingSubtitleRef.current);
+  if (pendingSubtitleRef.current) {
+    pendingSubtitleRef.current = null;
+  }
   const shimmerAnim            = useRef(new Animated.Value(0)).current;
   const bannerOpacity          = useRef(new Animated.Value(0.7)).current;
   const lastProgressTimestampRef = useRef<number>(0);
@@ -677,6 +688,7 @@ export default function YoutubePlayerScreen() {
   }, [youtubeVideoId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
+    if (srtModeActiveRef.current) return; // SRT mode — don't reset pipeline guards
     bgResultApplied.current      = false;
     autoFetchCompletedRef.current = false;
     allSegmentsRef.current    = null;
@@ -694,6 +706,7 @@ export default function YoutubePlayerScreen() {
   useEffect(() => {
     if (!youtubeVideoId) return;
     (async () => {
+      if (srtModeActiveRef.current) return; // SRT mode — skip bg result restore
       const result = await loadBgResult(youtubeVideoId);
       if (!result) return;
       if (isBgRunningRef.current) return;
@@ -1170,6 +1183,33 @@ export default function YoutubePlayerScreen() {
 
   // ── 플레이어 준비 + 캐시 체크 ─────────────────────────────────────────────
   const handlePlayerReady = useCallback(async () => {
+    // ── SRT mode: must be FIRST — skip entire AI pipeline ─────────────────
+    const srtUri = initialSrtUri.current;
+    if (srtUri) {
+      initialSrtUri.current = null;
+      srtModeActiveRef.current = true;
+      try {
+        const content = await FileSystem.readAsStringAsync(srtUri);
+        const segments = parseSrt(content);
+        if (segments.length > 0) {
+          bgResultApplied.current       = true;
+          autoFetchCompletedRef.current = true;
+          cancelledRef.current          = true;
+          jobIdRef.current++;
+          setSubtitles(segments);
+          setPhase("done");
+          setSubtitleProgress(1);
+          setTotalSegments(segments.length);
+          setTranslatedCount(segments.length);
+          setTranslationEverCompleted(true);
+          ytPlayerRef.current?.disableCaptions?.();
+        }
+      } catch (e) {
+        console.warn("[SRT] Failed to load SRT in handlePlayerReady:", e);
+      }
+      return; // unconditional — never start AI pipeline when SRT was provided
+    }
+    // ── existing pipeline code ─────────────────────────────────────────────
     if (!youtubeVideoId) return;
 
     const videoIdAtStart = youtubeVideoId;
@@ -1657,7 +1697,7 @@ export default function YoutubePlayerScreen() {
               setPlaying(true);
               optimisticPlayingRef.current = true;
               setOptimisticPlaying(true);
-              if (subtitlePhase === "idle" && !isBgRunningRef.current) {
+              if (subtitlePhase === "idle" && !isBgRunningRef.current && !srtModeActiveRef.current) {
                 setPhase("fetching");
               }
             }

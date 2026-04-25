@@ -21,6 +21,7 @@ import * as ImagePicker from "expo-image-picker";
 import * as FileSystem from "expo-file-system/legacy";
 import { router, useFocusEffect } from "expo-router";
 import { verifyModelIntegrity } from "../services/modelDownloadService";
+import { pendingSubtitleRef } from "../utils/pendingSubtitle";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { usePlayerStore } from "../store/usePlayerStore";
 import { useSettingsStore } from "../store/useSettingsStore";
@@ -851,7 +852,8 @@ export default function HomeScreen() {
   }, []);
 
   // ── 새 핸들러: 로컬 파일 선택 후 처리 ─────────────────────────────────────
-  const handleLocalFilePicked = async (stableUri: string, name: string, genre: string) => {
+  const handleLocalFilePicked = async (stableUri: string, name: string, genre: string, subtitleUri?: string) => {
+    pendingSubtitleRef.current = subtitleUri ?? null;
     const fileSize = await getFileSize(stableUri);
     const thumbUri = (await fetchThumbnail(stableUri, undefined)) ?? undefined;
     const autoCategory =
@@ -880,8 +882,9 @@ export default function HomeScreen() {
   };
 
   // ── 새 핸들러: URL (YouTube) 선택 후 처리 ─────────────────────────────────
-  const handleUrlPicked = (videoId: string, title: string, isYoutube: boolean, genre?: string) => {
+  const handleUrlPicked = (videoId: string, title: string, isYoutube: boolean, genre?: string, subtitleUri?: string) => {
     if (isYoutube) {
+      pendingSubtitleRef.current = subtitleUri ?? null;
       setPendingGenre(genre ?? 'general');
       setYoutubeVideo(videoId, title);
       router.push("/youtube-player");

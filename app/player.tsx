@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useRef } from "react";
+import React, { useState, useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import {
   View,
   Text,
@@ -19,6 +19,8 @@ import { router } from "expo-router";
 import { useTranslation } from "react-i18next";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as FileSystem from "expo-file-system/legacy";
+import { pendingSubtitleRef } from "../utils/pendingSubtitle";
+import { parseSrt } from "../utils/srtParser";
 import { usePlayerStore } from "../store/usePlayerStore";
 import { useSettingsStore } from "../store/useSettingsStore";
 import { VideoPlayer } from "../components/VideoPlayer";
@@ -133,6 +135,12 @@ export default function PlayerScreen() {
   useEffect(() => { bgStatusRef.current = bgStatus; }, [bgStatus]);
 
   const bgResultApplied = useRef(false);
+
+  // Read and consume pending SRT URI synchronously at render time.
+  const initialSrtUri = useRef<string | null>(pendingSubtitleRef.current);
+  if (pendingSubtitleRef.current) {
+    pendingSubtitleRef.current = null;
+  }
   const shimmerAnim     = useRef(new Animated.Value(0)).current;
   const bannerOpacity   = useRef(new Animated.Value(0.7)).current;
   const displayedPctRef = useRef(0);
@@ -267,6 +275,28 @@ export default function PlayerScreen() {
       setSubtitlePhase("processing");
     }
   }, [subtitles]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useLayoutEffect(() => {
+    const srtUri = initialSrtUri.current;
+    if (!srtUri || !videoUri) return;
+    initialSrtUri.current = null;
+
+    (async () => {
+      try {
+        const content = await FileSystem.readAsStringAsync(srtUri);
+        const segments = parseSrt(content);
+        if (segments.length > 0) {
+          bgResultApplied.current = true;
+          setSubtitles(segments);
+          setSubtitlePhase("done");
+          setSubtitleProgress(1);
+          setTranslationEverCompleted(true);
+        }
+      } catch (e) {
+        console.warn("[SRT] Failed to load SRT:", e);
+      }
+    })();
+  }, []); // runs once synchronously before other effects
 
   useEffect(() => {
     if (bgStatus?.status === "done" && bgStatus.videoId === cacheKey) {
