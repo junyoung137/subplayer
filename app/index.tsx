@@ -10,13 +10,11 @@ import {
   ScrollView,
   Pressable,
   TextInput,
-  Image,
   Animated,
   ActivityIndicator,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useTranslation } from "react-i18next";
-import * as DocumentPicker from "expo-document-picker";
 import * as ImagePicker from "expo-image-picker";
 import * as FileSystem from "expo-file-system/legacy";
 import { router, useFocusEffect } from "expo-router";
@@ -852,8 +850,7 @@ export default function HomeScreen() {
   }, []);
 
   // ── 새 핸들러: 로컬 파일 선택 후 처리 ─────────────────────────────────────
-  const handleLocalFilePicked = async (stableUri: string, name: string, genre: string, subtitleUri?: string) => {
-    pendingSubtitleRef.current = subtitleUri ?? null;
+  const handleLocalFilePicked = async (stableUri: string, name: string, genre: string) => {
     const fileSize = await getFileSize(stableUri);
     const thumbUri = (await fetchThumbnail(stableUri, undefined)) ?? undefined;
     const autoCategory =
@@ -884,7 +881,9 @@ export default function HomeScreen() {
   // ── 새 핸들러: URL (YouTube) 선택 후 처리 ─────────────────────────────────
   const handleUrlPicked = (videoId: string, title: string, isYoutube: boolean, genre?: string, subtitleUri?: string) => {
     if (isYoutube) {
-      pendingSubtitleRef.current = subtitleUri ?? null;
+      if (subtitleUri) {
+        pendingSubtitleRef.current = subtitleUri;
+      }
       setPendingGenre(genre ?? 'general');
       setYoutubeVideo(videoId, title);
       router.push("/youtube-player");

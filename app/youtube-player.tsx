@@ -1493,15 +1493,17 @@ export default function YoutubePlayerScreen() {
 
   const handleFsSeekEnd = useCallback((t: number) => {
     fsSeekValueRef.current = t;
+    // Block BEFORE updating store — prevents any in-flight
+    // polling tick from overwriting t between now and seekTo
+    ytPlayerRef.current?.blockTimeSync(2000);
     setCurrentTime(t);
     if (fsSeekPendingRef.current) clearTimeout(fsSeekPendingRef.current);
-    // Seek only on release — smooth and accurate
-    ytPlayerRef.current?.seekTo(t);
-    bumpSeek();
-    // Release polling block after seek settles
-    ytPlayerRef.current?.blockTimeSync(800);
-    fsSeekPendingRef.current = null;
-    setTimeout(() => { fsSeekingRef.current = false; }, 800);
+    // Small delay before seekTo so the block is fully in place
+    setTimeout(() => {
+      ytPlayerRef.current?.seekTo(t);
+      bumpSeek();
+    }, 50);
+    setTimeout(() => { fsSeekingRef.current = false; }, 2000);
   }, [setCurrentTime, bumpSeek]);
 
   // ── 검색 모달용 seek 핸들러 ───────────────────────────────────────────────
