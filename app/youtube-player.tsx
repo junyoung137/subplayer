@@ -413,6 +413,7 @@ export default function YoutubePlayerScreen() {
         cancelAnimationFrame(animFrameRef.current);
         animFrameRef.current = null;
       }
+      if (portraitSeekTimerRef.current) clearTimeout(portraitSeekTimerRef.current);
       animProgressRef.current = 0;
       animTargetRef.current   = 0;
       if (gemmaLoadedRef.current && !bgActive) {
@@ -1483,12 +1484,25 @@ export default function YoutubePlayerScreen() {
   const fsSeekPendingRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fsSeekValueRef = useRef<number>(0);
   const fsSeekingRef = useRef<boolean>(false);
+  const portraitSeekTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const portraitSeekEndRef = useRef<number>(0);
 
   const handleSeek = useCallback((t: number) => {
     if (fsSeekingRef.current) return;
     setCurrentTime(t);
-    bumpSeek();
+    if (portraitSeekTimerRef.current) clearTimeout(portraitSeekTimerRef.current);
+    portraitSeekTimerRef.current = setTimeout(() => {
+      portraitSeekTimerRef.current = null;
+      ytPlayerRef.current?.seekTo(t);
+      bumpSeek();
+    }, 200);
+  }, [setCurrentTime, bumpSeek]);
+
+  const handlePortraitSeekEnd = useCallback((t: number) => {
+    portraitSeekEndRef.current = t;
+    setCurrentTime(t);
     ytPlayerRef.current?.seekTo(t);
+    bumpSeek();
   }, [setCurrentTime, bumpSeek]);
 
   const handleFullscreenSeek = useCallback((t: number) => {
@@ -2067,7 +2081,7 @@ export default function YoutubePlayerScreen() {
               )}
             </View>
           )}
-          <YoutubeSeekBar currentTime={currentTime} duration={duration} onSeek={handleSeek} />
+          <YoutubeSeekBar currentTime={currentTime} duration={duration} onSeek={handleSeek} onSeekEnd={handlePortraitSeekEnd} />
         </View>
       )}
 

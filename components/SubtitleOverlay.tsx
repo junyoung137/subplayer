@@ -46,7 +46,7 @@ const MAX_DURATION_S = 4.5;
 const MIN_DISPLAY_S = 1.2;
 
 const MAX_HOLD_GAP_S = 0.30;     // Dynamic Hold 최대치
-const HOLD_AFTER_END = 0.2;      // 자막 종료 후 살짝 유지 시간 (부드러운 전환용)
+const HOLD_AFTER_END = 0.7;      // 자막 종료 후 살짝 유지 시간 (부드러운 전환용)
 
 const BLANK_PATTERNS = [
   "[BLANK_AUDIO]", "[BLANK_VIDEO]", "[blank_audio]", "[silence]", "[SILENCE]",
@@ -271,6 +271,7 @@ function buildDisplayLines(
 function findActiveDisplayLine(
   lines: DisplayLine[],
   currentTime: number,
+  lastSeekTime?: number,
 ): DisplayLine | null {
   if (lines.length === 0) return null;
 
@@ -285,18 +286,23 @@ function findActiveDisplayLine(
     } else if (currentTime > dl.endTime) {
       lo = mid + 1;
     } else {
-      // 현재 시간 안에 정확히 포함되는 경우
       return dl;
     }
   }
 
-  // 자막이 끝난 직후 아주 살짝만 hold (부드러운 전환용)
+  // Only hold the previous segment if we are naturally just past its
+  // end (not after a seek jump). The hold must be within HOLD_AFTER_END
+  // seconds AND the segment must have ended very recently in wall-clock
+  // terms (endTime close to currentTime).
   const prev = lines[hi];
-  if (prev && currentTime <= prev.endTime + HOLD_AFTER_END) {
+  if (
+    prev &&
+    currentTime <= prev.endTime + HOLD_AFTER_END &&
+    currentTime <= prev.endTime + 0.8
+  ) {
     return prev;
   }
 
-  // 그 외 모든 경우 → null (긴 gap에서 자막 완전 제거)
   return null;
 }
 
@@ -405,6 +411,7 @@ export function SubtitleOverlay() {
   const displayedLineRef = useRef<DisplayLine | null>(null);
   const displayedAtRef = useRef(0);
   const prevSeekVersion = useRef(0);
+  const lastSeekTimeRef = useRef<number>(0);
   const fadeAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => { renderedLineRef.current = renderedLine; }, [renderedLine]);
@@ -413,7 +420,7 @@ export function SubtitleOverlay() {
   const adjustedTime = currentTime + (timingOffset ?? 0) + 0.5;
   const candidate = useMemo(
     () => findActiveDisplayLine(displayLines, adjustedTime),
-    [displayLines, adjustedTime],
+    [displayLines, adjustedTime, seekVersion],
   );
 
   // Dynamic Hold + MIN_DISPLAY_S 적용
@@ -421,14 +428,16 @@ export function SubtitleOverlay() {
     const isSeeked = seekVersion !== prevSeekVersion.current;
     if (isSeeked) prevSeekVersion.current = seekVersion;
 
+    if (isSeeked) {
+      lastSeekTimeRef.current = adjustedTime;
+      displayedLineRef.current = null;
+      displayedAtRef.current = adjustedTime;
+    }
+
     const current = displayedLineRef.current;
     const sameId = candidate?.segmentId === current?.segmentId;
 
-    if (sameId && isSeeked) {
-      displayedAtRef.current = adjustedTime;
-      return;
-    }
-    if (sameId) return;
+    if (sameId && !isSeeked) return;
 
     const elapsed = adjustedTime - displayedAtRef.current;
 
@@ -445,13 +454,11 @@ export function SubtitleOverlay() {
       displayedAtRef.current = adjustedTime;
       setDisplayedLine(candidate);
     } else if (candidate === null) {
-      if (minMet) {
-        displayedLineRef.current = null;
-        setDisplayedLine(null);
-      }
+      displayedLineRef.current = null;
+      setDisplayedLine(null);
     } else if (minMet) {
       displayedLineRef.current = candidate;
-      displayedAtRef.current = adjustedTime;
+      displayedAtRef.current = candidate.startTime;
       setDisplayedLine(candidate);
     }
   }, [adjustedTime, candidate?.segmentId, seekVersion]);

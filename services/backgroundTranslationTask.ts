@@ -84,14 +84,12 @@ function notifyProgress(pct: number, text: string): void {
 
 async function sendFailureNotification(videoTitle: string, s: ReturnType<typeof getBgStrings>, reason?: string): Promise<void> {
   try {
-    await NativeModules.TranslationService?.sendCompletionNotification(
-      `${videoTitle} - ${s.translationFailed}${reason ? ': ' + reason : ''}`, 0
-    );
+    await NativeModules.TranslationService?.sendFailureNotification(reason ?? s.translationFailed);
   } catch {}
 }
 
 export async function backgroundTranslationTask(taskData: BgTranslationTask): Promise<void> {
-  const { videoId, videoTitle, language, genre } = taskData;
+  const { videoId, videoTitle = 'YouTube Video', language, genre } = taskData;
   const s = getBgStrings(language);
   const statusBase = { videoId, updatedAt: Date.now() };
 

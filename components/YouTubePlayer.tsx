@@ -222,6 +222,15 @@ export const YouTubePlayer = React.forwardRef<
     webViewRef.injectJavaScript(script);
   }, [playing, isReady]);
 
+  useEffect(() => {
+    if (!isReady) return;
+    const webViewRef = (playerRef.current as any)?.getWebViewRef?.();
+    if (!webViewRef) return;
+    webViewRef.injectJavaScript(
+      `window.player && window.player.setPlaybackRate(${currentRate}); true;`
+    );
+  }, [currentRate, isReady]);
+
   const setCurrentTime = usePlayerStore((s) => s.setCurrentTime);
   const setDuration    = usePlayerStore((s) => s.setDuration);
   const setPlaying     = usePlayerStore((s) => s.setPlaying);
@@ -334,25 +343,31 @@ export const YouTubePlayer = React.forwardRef<
   useEffect(() => {
     if (!isReady) return;
     const timer = setInterval(async () => {
-      if (!isPlayingRef.current) return;
-      if (isTimeSyncBlockedRef.current) return;
-      if (seekingRef.current) return;
-      if (isTimeSyncPausedRef.current) return;
       try {
         const t = await playerRef.current?.getCurrentTime();
         const d = await playerRef.current?.getDuration();
 
         if (t != null) {
-          // 시크 직후 800ms 동안은 폴링이 낙관적 업데이트를 덮어쓰지 않음
-          if (!isTimeSyncBlockedRef.current) setCurrentTime(t);
+          // Always update currentTime unless we are in the blocked window
+          // (800ms after seekTo call). isTimeSyncPaused must NOT block
+          // currentTime updates — it only guards subtitle emission.
+          if (!isTimeSyncBlockedRef.current) {
+            setCurrentTime(t);
+          }
 
           // ── timedtext 실시간 동기화 ────────────────────────────────────
           const segments = loadedSegmentsRef.current;
-          if (segments.length > 0) {
+          if (
+            isPlayingRef.current &&
+            !isTimeSyncBlockedRef.current &&
+            !seekingRef.current &&
+            !isTimeSyncPausedRef.current &&
+            segments.length > 0
+          ) {
             // 광고/버퍼링 종료 후 시간이 10초 이상 점프하면 한 사이클 건너뜀
             const timeDelta = Math.abs(t - prevTimeRef.current);
             prevTimeRef.current = t;
-            if (timeDelta > 10) return; // 불안정한 전환 구간 — 다음 폴링까지 대기
+            if (timeDelta > 10) return; // 불안정한 전환 구간 — 다음 폴링까지 대기 (prevTimeRef already updated above)
 
             // 자막 룩업만 lead offset 적용 (시크바 표시에는 미적용)
             const lookupTime = t + SUBTITLE_LEAD_S;
@@ -411,6 +426,8 @@ export const YouTubePlayer = React.forwardRef<
           blockTimeSyncTimerRef.current = null;
         }, 800);
       }
+      lastEmittedTextRef.current = "";
+      prevTimeRef.current = -9999;
       playerRef.current?.seekTo(t, true);
     },
     setRate: (rate: number) => { setCurrentRate(rate); },
