@@ -124,7 +124,7 @@
     video: "動画",
     loadingCache: "キャッシュされた字幕を読み込み中…",
     modelRequired: "モデルが必要",
-    modelNotLoaded: "Whisperモデルが読み込まれていません。モデル管理画面でダウンロードしてください。",
+    modelNotLoaded: "音声モデルが読み込まれていません。モデル管理画面でダウンロードしてください。",
     modelManage: "モデル管理",
     cancel: "キャンセル",
     noTranslationModel: "翻訳モデルなし",

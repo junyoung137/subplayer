@@ -15,23 +15,13 @@ const HF_BASE =
 export const WHISPER_MODELS: WhisperModel[] = [
   {
     id: "Standard",
-    name: "Standard(⭐Best)",
-    sizeLabel: "466 MB",
-    sizeMB: 466,
+    name: "Standard Model",
+    sizeLabel: "~233 MB",
+    sizeMB: 233,
     description: "",
-    speedLabel: "⚡⚡ fast",
-    url: `${HF_BASE}/ggml-small.bin`,
+    speedLabel: "",
+    url: `${HF_BASE}/ggml-small-q8_0.bin`,
     coreMLUrl: `${HF_BASE}/ggml-small-encoder.mlmodelc.zip`,
-  },
-  {
-    id: "Advanced",
-    name: "Advanced",
-    sizeLabel: "1.5 GB",
-    sizeMB: 1500,
-    description: "",
-    speedLabel: "⚡ Normal",
-    url: `${HF_BASE}/ggml-medium.bin`,
-    coreMLUrl: `${HF_BASE}/ggml-medium-encoder.mlmodelc.zip`,
   },
 ];
 

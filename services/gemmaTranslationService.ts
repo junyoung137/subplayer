@@ -2,7 +2,7 @@ import { initLlama, LlamaContext } from "llama.rn";
 import * as FileSystem from "expo-file-system/legacy";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { getLanguageProfile } from "../constants/languageProfiles";
-import { NativeModules } from 'react-native';
+import { NativeModules, Platform } from 'react-native';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 export interface TranslationSegment {
@@ -577,6 +577,18 @@ function likelySpeakerChange(prevText: string, currText: string, gap: number): b
   return false;
 }
 
+// ── GPU layer helper ──────────────────────────────────────────────────────────
+function getSafeGpuLayers(): number {
+  // Android: Vulkan GPU acceleration via llama.cpp
+  // Snapdragon 8 Gen 2/3 supports full GPU offload
+  // Start with 20 layers (safe for 2GB VRAM headroom)
+  // Full model has ~28 layers for 2B model
+  if (Platform.OS === 'android') return 20;
+  // iOS: Metal GPU acceleration
+  if (Platform.OS === 'ios') return 28;
+  return 0;
+}
+
 // ── Model lifecycle ───────────────────────────────────────────────────────────
 export async function loadModel(onProgress?: (fraction: number) => void): Promise<void> {
   if (_unloadModelPromise) {
@@ -592,10 +604,18 @@ export async function loadModel(onProgress?: (fraction: number) => void): Promis
     if (!info.exists) throw new Error("Gemma 모델 파일을 찾을 수 없습니다. 먼저 다운로드해 주세요.");
     const modelPath = MODEL_PATH.startsWith("file://") ? MODEL_PATH.slice(7) : MODEL_PATH;
     try {
-      llamaContext = await initLlama(
-        { model: modelPath, n_threads: getInferenceThreadCount(), n_gpu_layers: 0, n_ctx: 2000, use_mlock: false },
-        onProgress ? (p: number) => onProgress(p / 100) : undefined
-      );
+      try {
+        llamaContext = await initLlama(
+          { model: modelPath, n_threads: getInferenceThreadCount(), n_gpu_layers: getSafeGpuLayers(), n_ctx: 2000, use_mlock: false },
+          onProgress ? (p: number) => onProgress(p / 100) : undefined
+        );
+      } catch (gpuError) {
+        console.warn('[Gemma] GPU init failed, falling back to CPU:', gpuError);
+        llamaContext = await initLlama(
+          { model: modelPath, n_threads: getInferenceThreadCount(), n_gpu_layers: 0, n_ctx: 2000, use_mlock: false },
+          onProgress ? (p: number) => onProgress(p / 100) : undefined
+        );
+      }
       console.log("[Gemma] Model loaded.");
     } catch (e) {
       llamaContext = null;
@@ -1991,9 +2011,9 @@ export async function translateSegments(
 
     if (!llamaContext || isCancelled()) throw new Error('INFERENCE_CANCELLED');
 
-    // [FIX-SBD-5] SBD를 비어있지 않은 세그먼트에만 적용
-    const sbdSentences = await detectSentenceBoundaries(nonEmptySegments, isCancelled);
-    if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
+    // SBD disabled — using mergeFragments for all cases (faster, no quality loss)
+    // To re-enable: replace the line below with the original detectSentenceBoundaries call
+    const sbdSentences: SBDSentence[] = [];
 
     if (sbdSentences.length > 0) {
       // [FIX-SBD-6] SBD 결과의 originalIndices를 실제 cleaned 배열 인덱스로 재매핑

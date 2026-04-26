@@ -124,7 +124,7 @@
     video: "वीडियो",
     loadingCache: "कैश उपशीर्षक लोड हो रहे हैं…",
     modelRequired: "मॉडल आवश्यक",
-    modelNotLoaded: "Whisper मॉडल लोड नहीं है। मॉडल में जाकर डाउनलोड करें।",
+    modelNotLoaded: "आवाज़ पहचान मॉडल लोड नहीं है। मॉडल में जाकर डाउनलोड करें।",
     modelManage: "मॉडल",
     cancel: "रद्द करें",
     noTranslationModel: "कोई अनुवाद मॉडल नहीं",

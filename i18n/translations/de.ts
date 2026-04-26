@@ -124,7 +124,7 @@
     video: "Video",
     loadingCache: "Zwischengespeicherte Untertitel laden…",
     modelRequired: "Modell erforderlich",
-    modelNotLoaded: "Whisper-Modell nicht geladen. Bitte über Modelle herunterladen.",
+    modelNotLoaded: "Sprachmodell nicht geladen. Bitte über Modelle herunterladen.",
     modelManage: "Modelle",
     cancel: "Abbrechen",
     noTranslationModel: "Kein Übersetzungsmodell",

@@ -124,7 +124,7 @@
     video: "视频",
     loadingCache: "正在加载缓存字幕…",
     modelRequired: "需要模型",
-    modelNotLoaded: "Whisper模型未加载。请在模型管理界面下载。",
+    modelNotLoaded: "语音模型未加载。请在模型管理界面下载。",
     modelManage: "模型管理",
     cancel: "取消",
     noTranslationModel: "无翻译模型",

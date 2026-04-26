@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import * as FileSystem from "expo-file-system/legacy";
 import { loadModel, releaseModel, isModelLoaded } from "../services/whisperService";
 import { useSettingsStore } from "../store/useSettingsStore";
-import { getModelById } from "../constants/whisperModels";
+import { getModelById, WHISPER_MODELS } from "../constants/whisperModels";
 
 const MODEL_DIR = FileSystem.documentDirectory + "whisper-models/";
 
@@ -23,7 +23,8 @@ export function useWhisperModel() {
   });
 
   const getModelPath = useCallback((modelId: string) => {
-    return MODEL_DIR + `ggml-${modelId}.bin`;
+    const model = WHISPER_MODELS.find((m) => m.id === modelId);
+    return MODEL_DIR + (model?.url.split("/").pop() ?? `ggml-${modelId}.bin`);
   }, []);
 
   const loadSelectedModel = useCallback(async () => {

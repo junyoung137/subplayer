@@ -106,7 +106,16 @@ function mergeSegmentsIntoSentences(segments: RawSegment[]): RawSegment[] {
 // Whisper가 파일 핸들을 닫기 전에 deleteAsync를 호출하면 Android에서
 // "isn't deletable" IOException 발생 → 딜레이 후 재시도, fire-and-forget
 async function safeDeleteChunk(filePath: string): Promise<void> {
-  await sleep(200);
+  // [PERF] Reduced from 200ms to 30ms.
+  // safeDeleteChunk is called after transcribeChunkSegmented() fully
+  // resolves, meaning the Whisper promise — and the underlying native
+  // transcription — is already complete. The file handle is released
+  // before this function is even called. 30ms covers OS-level flush
+  // propagation with minimal waste.
+  // Savings: (200-30)ms × ~135 chunks ≈ 23 seconds on a 47min video.
+  // The retry sleep (500ms) is intentionally unchanged — it only fires
+  // on actual deletion failure and provides real recovery time.
+  await sleep(30);
   try {
     await FileSystem.deleteAsync(filePath, { idempotent: true });
     return;
@@ -192,13 +201,30 @@ export async function processVideo(
     let skippedChunks = 0; // extraction 실패만
     let silentChunks  = 0; // VAD skip (정상)
 
+    // Prime the pipeline: start extracting chunk 0 before entering the loop
+    // so extraction of chunk N+1 overlaps with transcription of chunk N.
+    let nextChunkPromise: Promise<ExtractionOutcome> = tryExtractChunk(
+      videoUri, offset,
+      Math.min(thermal.getTier().chunkDurationSecs, totalDuration - offset),
+      0,
+    );
+
     while (offset < totalDuration) {
       if (isCancelled()) return { subtitles: [], translationSkipped: false };
 
       const tier     = thermal.getTier();
       const chunkDur = Math.min(tier.chunkDurationSecs, totalDuration - offset);
 
-      const outcome = await tryExtractChunk(videoUri, offset, chunkDur, chunkIndex);
+      // Await the pre-fetched extraction result for this iteration
+      const outcome = await nextChunkPromise;
+
+      // Immediately kick off the next extraction so it overlaps with transcription
+      const nextOffset = offset + chunkDur;
+      if (nextOffset < totalDuration) {
+        const nextTier = thermal.getTier();
+        const nextDur  = Math.min(nextTier.chunkDurationSecs, totalDuration - nextOffset);
+        nextChunkPromise = tryExtractChunk(videoUri, nextOffset, nextDur, chunkIndex + 1);
+      }
 
       if (outcome.kind === "silent") {
         // VAD skip — 정상, 실패 카운트 안 함
@@ -259,7 +285,7 @@ export async function processVideo(
       offset += chunkDur;
       chunkIndex++;
 
-      // fire-and-forget 안전 삭제
+      // fire-and-forget 안전 삭제 (chunk N; next extraction already writing chunk N+1)
       safeDeleteChunk(chunk.filePath);
 
       onProgress({

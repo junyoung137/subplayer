@@ -22,7 +22,7 @@ export function ModelDownloader({ model, isSelected, onDownloaded, onSelect }: P
   const [downloadResumable, setDownloadResumable] =
     useState<FileSystem.DownloadResumable | null>(null);
 
-  const modelPath = MODEL_DIR + `ggml-${model.id}.bin`;
+    const modelPath = MODEL_DIR + (model.url.split("/").pop() ?? `ggml-${model.id}.bin`);
 
   useEffect(() => {
     checkExists();

@@ -124,7 +124,7 @@
     video: "Vídeo",
     loadingCache: "Carregando legendas do cache…",
     modelRequired: "Modelo necessário",
-    modelNotLoaded: "Modelo Whisper não carregado. Baixe-o em Modelos.",
+    modelNotLoaded: "Modelo de voz não carregado. Baixe-o em Modelos.",
     modelManage: "Modelos",
     cancel: "Cancelar",
     noTranslationModel: "Sem modelo de tradução",

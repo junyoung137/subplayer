@@ -123,8 +123,8 @@
   processing: {
     video: "동영상",
     loadingCache: "캐시된 자막 불러오는 중…",
-    modelRequired: "모델 필요",
-    modelNotLoaded: "Whisper 모델이 로드되지 않았습니다. 모델 관리 화면에서 다운로드해 주세요.",
+    modelRequired: "음성 모델 필요",
+    modelNotLoaded: "음성 모델이 로드되지 않았습니다. 모델 관리 화면에서 다운로드해 주세요.",
     modelManage: "모델 관리",
     cancel: "취소",
     noTranslationModel: "번역 모델 없음",

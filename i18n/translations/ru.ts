@@ -124,7 +124,7 @@
     video: "Видео",
     loadingCache: "Загрузка субтитров из кэша…",
     modelRequired: "Требуется модель",
-    modelNotLoaded: "Модель Whisper не загружена. Скачайте её в разделе Модели.",
+    modelNotLoaded: "Речевая модель не загружена. Скачайте её в разделе Модели.",
     modelManage: "Модели",
     cancel: "Отмена",
     noTranslationModel: "Нет модели перевода",

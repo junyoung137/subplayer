@@ -124,7 +124,7 @@
     video: "فيديو",
     loadingCache: "تحميل الترجمات المخزنة مؤقتاً…",
     modelRequired: "النموذج مطلوب",
-    modelNotLoaded: "لم يتم تحميل نموذج Whisper. قم بتنزيله من النماذج.",
+    modelNotLoaded: "لم يتم تحميل نموذج التعرف على الصوت. قم بتنزيله من النماذج.",
     modelManage: "النماذج",
     cancel: "إلغاء",
     noTranslationModel: "لا يوجد نموذج ترجمة",

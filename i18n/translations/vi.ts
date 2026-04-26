@@ -124,7 +124,7 @@
     video: "Video",
     loadingCache: "Đang tải phụ đề từ bộ nhớ đệm…",
     modelRequired: "Cần mô hình",
-    modelNotLoaded: "Mô hình Whisper chưa được tải. Tải xuống trong Mô hình.",
+    modelNotLoaded: "Mô hình giọng nói chưa được tải. Tải xuống trong Mô hình.",
     modelManage: "Mô hình",
     cancel: "Hủy",
     noTranslationModel: "Không có mô hình dịch",

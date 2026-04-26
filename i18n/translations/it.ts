@@ -124,7 +124,7 @@
     video: "Video",
     loadingCache: "Caricamento sottotitoli dalla cache…",
     modelRequired: "Modello richiesto",
-    modelNotLoaded: "Modello Whisper non caricato. Scaricalo dalla sezione Modelli.",
+    modelNotLoaded: "Modello vocale non caricato. Scaricalo dalla sezione Modelli.",
     modelManage: "Modelli",
     cancel: "Annulla",
     noTranslationModel: "Nessun modello di traduzione",

@@ -124,7 +124,7 @@
     video: "วิดีโอ",
     loadingCache: "กำลังโหลดคำบรรยายจากแคช…",
     modelRequired: "ต้องการโมเดล",
-    modelNotLoaded: "ยังไม่ได้โหลดโมเดล Whisper กรุณาดาวน์โหลดในส่วนโมเดล",
+    modelNotLoaded: "ยังไม่ได้โหลดโมเดลเสียง กรุณาดาวน์โหลดในส่วนโมเดล",
     modelManage: "โมเดล",
     cancel: "ยกเลิก",
     noTranslationModel: "ไม่มีโมเดลแปลภาษา",

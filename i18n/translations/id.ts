@@ -124,7 +124,7 @@
     video: "Video",
     loadingCache: "Memuat subtitle dari cache…",
     modelRequired: "Model diperlukan",
-    modelNotLoaded: "Model Whisper belum dimuat. Unduh di bagian Model.",
+    modelNotLoaded: "Model suara belum dimuat. Unduh di bagian Model.",
     modelManage: "Model",
     cancel: "Batal",
     noTranslationModel: "Tidak ada model terjemahan",
