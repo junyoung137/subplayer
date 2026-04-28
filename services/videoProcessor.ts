@@ -1,8 +1,17 @@
 import * as FileSystem from "expo-file-system/legacy";
 import { SubtitleSegment } from "../store/usePlayerStore";
 import { AudioChunk, clearChunkDir, getVideoDuration, extractSingleChunkAt } from "./audioChunker";
-import { transcribeChunkSegmented, releaseModel as releaseWhisper } from "./whisperService";
-import { loadModel as loadGemma, unloadModel as unloadGemma, translateSegments } from "./gemmaTranslationService";
+import { transcribeChunkSegmented, releaseModel as releaseWhisper, loadModel as loadWhisper, getLoadedModelPath as getWhisperModelPath } from "./whisperService";
+import {
+  loadModel as loadGemma,
+  unloadModel as unloadGemma,
+  forceUnloadModel as forceUnloadGemma,           // [THERMAL-OPT-V4]
+  setKeepLoaded as setGemmaKeepLoaded,            // [THERMAL-OPT-V4]
+  isModelLoaded as isGemmaLoaded,                 // [THERMAL-OPT-V4]
+  idleBetweenBatches,                             // [THERMAL-OPT-V4]
+  reportThermalAndMaybeUnload,                    // [THERMAL-OPT-V4]
+  translateSegments,
+} from "./gemmaTranslationService";
 import { getLocalModelPath } from "./modelDownloadService";
 import { getLanguageByCode } from "../constants/languages";
 import { createThermalController } from "./thermalMonitor";
@@ -21,9 +30,36 @@ export interface ProcessingResult {
   translationSkipped: boolean;
 }
 
-const BAND_EXTRACT_END    = 10;
-const BAND_TRANSCRIBE_END = 90;
+const BAND_EXTRACT_END    = 5;
+const BAND_TRANSCRIBE_END = 45;
 const BAND_TRANSLATE_END  = 99;
+
+// Chunks per transcription batch before each translation pass.
+// 15 chunks × 30s ≈ 7.5 minutes of audio per batch. [OPT-4]
+// Reduces model load/unload cycles from ~12 to ~8 on a 60-minute video.
+const CHUNKS_PER_BATCH = 6; // [OPT-4]
+
+// Maximum gap (seconds) between subtitles allowed inside the
+// contiguous block used for early playback.
+// 4s is permissive enough for natural speech pauses while
+// still filtering genuine content gaps.
+const EARLY_PLAYBACK_MAX_GAP_S = 4;
+
+function getEarlyPlaybackThreshold(totalDurationSecs: number): number {
+  if (totalDurationSecs <= 600) {
+    return totalDurationSecs * 0.5;
+  } else if (totalDurationSecs <= 1800) {
+    return totalDurationSecs * 0.35;
+  } else {
+    return Math.max(totalDurationSecs * 0.25, 600);
+  }
+}
+
+function makeStableSubtitleId(startSecs: number, endSecs: number): string {
+  // Use time-based ID so partial and final subtitles share the same key.
+  // This prevents React key mismatch when transitioning partial → full.
+  return `${Math.round(startSecs * 1000)}_${Math.round(endSecs * 1000)}`;
+}
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -106,16 +142,7 @@ function mergeSegmentsIntoSentences(segments: RawSegment[]): RawSegment[] {
 // Whisper가 파일 핸들을 닫기 전에 deleteAsync를 호출하면 Android에서
 // "isn't deletable" IOException 발생 → 딜레이 후 재시도, fire-and-forget
 async function safeDeleteChunk(filePath: string): Promise<void> {
-  // [PERF] Reduced from 200ms to 30ms.
-  // safeDeleteChunk is called after transcribeChunkSegmented() fully
-  // resolves, meaning the Whisper promise — and the underlying native
-  // transcription — is already complete. The file handle is released
-  // before this function is even called. 30ms covers OS-level flush
-  // propagation with minimal waste.
-  // Savings: (200-30)ms × ~135 chunks ≈ 23 seconds on a 47min video.
-  // The retry sleep (500ms) is intentionally unchanged — it only fires
-  // on actual deletion failure and provides real recovery time.
-  await sleep(30);
+  await sleep(200); // [OPT-8] was 30ms; 200ms covers Android file handle release on every chunk
   try {
     await FileSystem.deleteAsync(filePath, { idempotent: true });
     return;
@@ -164,13 +191,15 @@ export async function processVideo(
   onProgress: (p: ProcessingProgress) => void,
   isCancelled: () => boolean,
   thermalProtection: boolean = true,
+  onEarlyPlaybackReady?: (subtitles: SubtitleSegment[]) => void,
+  onPartialUpdate?: (subtitles: SubtitleSegment[]) => void,
 ): Promise<ProcessingResult> {
   const thermal = createThermalController();
   try {
-    // ── Step 1: Duration probe ────────────────────────────────────────────────
+    // ── Step 1: Duration probe ──────────────────────────────────────
     onProgress({
       step: "extracting", current: 0, total: 0,
-      percent: 5, message: "오디오 추출 중...",
+      percent: BAND_EXTRACT_END, message: "오디오 추출 중...",
     });
 
     const totalDuration = await getVideoDuration(videoUri);
@@ -179,233 +208,394 @@ export async function processVideo(
 
     if (isCancelled()) return { subtitles: [], translationSkipped: false };
 
-    // estimatedTotal: 초기 tier 기준 고정 → tier 변경 시 progress 숫자 점프 없음
-    const estimatedTotal = Math.ceil(
-      totalDuration / thermal.getTier().chunkDurationSecs,
-    );
+    // Capture Whisper model path before any release
+    const whisperModelPath = getWhisperModelPath();
 
-    onProgress({
-      step: "extracting", current: 0, total: estimatedTotal,
-      percent: BAND_EXTRACT_END, message: "오디오 추출 중...",
-    });
+    // ── Step 2: Detect Gemma availability ──────────────────────────
+    const gemmaPath      = await getLocalModelPath();
+    let   translationSkipped = !gemmaPath;
 
-    // ── Step 2: Interleaved extract-then-transcribe loop ──────────────────────
-    // [자체 개선] skipRate 경고 임계값 조정
-    // 기존: SILENT_CHUNK도 skippedChunks에 포함 → 무음 컨텐츠에서 false alarm
-    // 개선: extraction 실패만 skippedChunks++ (SILENT_CHUNK는 별도 silentChunks)
+    // [THERMAL-OPT-V4] Load Gemma once and keep resident for all batches.
+    if (!translationSkipped) { // [THERMAL-OPT-V4]
+      setGemmaKeepLoaded(true); // [THERMAL-OPT-V4]
+      try { // [THERMAL-OPT-V4]
+        await loadGemma(); // [THERMAL-OPT-V4]
+      } catch (loadErr) { // [THERMAL-OPT-V4]
+        console.warn('[VideoProcessor] Gemma pre-load failed — disabling translation:', loadErr); // [THERMAL-OPT-V4]
+        translationSkipped = true; // [THERMAL-OPT-V4]
+        setGemmaKeepLoaded(false); // [THERMAL-OPT-V4]
+      } // [THERMAL-OPT-V4]
+    } // [THERMAL-OPT-V4]
+    // [THERMAL-OPT-V4] Hint only — NOT authoritative. Always use isGemmaLoaded() for real checks.
+    let llamaContextIsLoaded = !translationSkipped; // [THERMAL-OPT-V4]
+
+    if (isCancelled()) {
+      return { subtitles: [], translationSkipped: false };
+    }
+
+    const langMeta = getLanguageByCode(targetLanguage);
+    const langName = langMeta?.name ?? targetLanguage;
+
+    // ── Step 3: Batch pipeline ──────────────────────────────────────
     const SKIP_RATE_WARN_THRESHOLD = 0.3;
 
-    const rawSegments:  RawSegment[] = [];
-    let offset        = 0;
-    let chunkIndex    = 0;
-    let skippedChunks = 0; // extraction 실패만
-    let silentChunks  = 0; // VAD skip (정상)
+    const allTranslated:     SubtitleSegment[] = [];
+    let   offset             = 0;
+    let   chunkIndex         = 0;
+    let   skippedChunks      = 0;
+    let   silentChunks       = 0;
+    let   batchIndex         = 0;
+    let   earlyPlaybackFired = false;
+    let   lastEmittedEndTime = 0;
+    let   whisperLoaded      = true; // Whisper is loaded at entry
 
-    // Prime the pipeline: start extracting chunk 0 before entering the loop
-    // so extraction of chunk N+1 overlaps with transcription of chunk N.
+    // Pre-fetch first chunk
     let nextChunkPromise: Promise<ExtractionOutcome> = tryExtractChunk(
       videoUri, offset,
       Math.min(thermal.getTier().chunkDurationSecs, totalDuration - offset),
       0,
     );
 
-    while (offset < totalDuration) {
-      if (isCancelled()) return { subtitles: [], translationSkipped: false };
+    // Unified timeline progress state
+    let fullyProcessedOffset = 0;  // video seconds where both STT+translation done
+    let lastReportedPercent  = BAND_EXTRACT_END; // monotonic guard, starts at 5
 
-      const tier     = thermal.getTier();
-      const chunkDur = Math.min(tier.chunkDurationSecs, totalDuration - offset);
-
-      // Await the pre-fetched extraction result for this iteration
-      const outcome = await nextChunkPromise;
-
-      // Immediately kick off the next extraction so it overlaps with transcription
-      const nextOffset = offset + chunkDur;
-      if (nextOffset < totalDuration) {
-        const nextTier = thermal.getTier();
-        const nextDur  = Math.min(nextTier.chunkDurationSecs, totalDuration - nextOffset);
-        nextChunkPromise = tryExtractChunk(videoUri, nextOffset, nextDur, chunkIndex + 1);
-      }
-
-      if (outcome.kind === "silent") {
-        // VAD skip — 정상, 실패 카운트 안 함
-        silentChunks++;
-        if (__DEV__) {
-          console.log(`[VideoProcessor] chunk ${chunkIndex} silent (VAD), skipping`);
-        }
-        offset += chunkDur;
-        chunkIndex++;
-        onProgress({
-          step: "transcribing", current: chunkIndex, total: estimatedTotal,
-          percent: Math.round(
-            BAND_EXTRACT_END +
-            ((offset / totalDuration) * (BAND_TRANSCRIBE_END - BAND_EXTRACT_END)),
-          ),
-          message: `음성 인식 중... (${chunkIndex}/${estimatedTotal})`,
-        });
-        continue;
-      }
-
-      if (outcome.kind === "error") {
-        // 진짜 extraction 실패
-        console.warn(`[VideoProcessor] chunk ${chunkIndex} extraction failed:`, outcome.reason);
-        skippedChunks++;
-        offset += chunkDur;
-        chunkIndex++;
-        onProgress({
-          step: "transcribing", current: chunkIndex, total: estimatedTotal,
-          percent: Math.round(
-            BAND_EXTRACT_END +
-            ((offset / totalDuration) * (BAND_TRANSCRIBE_END - BAND_EXTRACT_END)),
-          ),
-          message: `음성 인식 중... (${chunkIndex}/${estimatedTotal})`,
-        });
-        continue;
-      }
-
-      // outcome.kind === "ok"
-      const chunk = outcome.chunk;
-
-      if (isCancelled()) return { subtitles: [], translationSkipped: false };
-
-      const t0   = Date.now();
-      const segs = await transcribeChunkSegmented(
-        chunk.filePath, chunk.startTime, sourceLanguage,
+    const calcPercent = (videoPos: number): number => {
+      const safeTotal = totalDuration > 0 ? totalDuration : 1;
+      const raw = Math.round(
+        BAND_EXTRACT_END +
+        Math.min(videoPos / safeTotal, 1) * (BAND_TRANSLATE_END - BAND_EXTRACT_END)
       );
-      thermal.reportTranscriptionTime(Date.now() - t0, chunkDur);
-
-      // BLANK 필터링
-      const filteredSegs = segs.filter(seg => !isBlankSegment(seg.text));
-      if (segs.length !== filteredSegs.length) {
-        console.log(
-          `[VideoProcessor] chunk ${chunkIndex}: ${segs.length - filteredSegs.length} BLANK 세그먼트 제거`
-        );
-      }
-      rawSegments.push(...filteredSegs);
-
-      offset += chunkDur;
-      chunkIndex++;
-
-      // fire-and-forget 안전 삭제 (chunk N; next extraction already writing chunk N+1)
-      safeDeleteChunk(chunk.filePath);
-
-      onProgress({
-        step: "transcribing", current: chunkIndex, total: estimatedTotal,
-        percent: Math.round(
-          BAND_EXTRACT_END +
-          ((offset / totalDuration) * (BAND_TRANSCRIBE_END - BAND_EXTRACT_END)),
+      // Monotonic: never go backward, never jump more than 3% per call,
+      // never exceed BAND_TRANSLATE_END
+      const capped = Math.min(
+        Math.min(
+          Math.max(raw, lastReportedPercent),
+          lastReportedPercent + 3
         ),
-        message: `음성 인식 중... (${chunkIndex}/${estimatedTotal})`,
-      });
+        BAND_TRANSLATE_END
+      );
+      lastReportedPercent = capped;
+      return capped;
+    };
+
+    while (offset < totalDuration) {
+      if (isCancelled()) {
+        return { subtitles: [], translationSkipped: false };
+      }
+
+      batchIndex++;
+
+      // ── Phase A: Reload Whisper if needed ─────────────────────────
+      // Whisper was released after the previous batch's translation.
+      // Reload it explicitly before transcription starts.
+      if (!whisperLoaded) {
+        if (whisperModelPath) await loadWhisper(whisperModelPath);
+        whisperLoaded = true;
+      }
+
+      // ── Phase B: Transcribe up to CHUNKS_PER_BATCH chunks ────────
+      const batchRawSegments: RawSegment[] = [];
+      let   chunksThisBatch  = 0;
+
+      while (chunksThisBatch < CHUNKS_PER_BATCH && offset < totalDuration) {
+        // MUST be the FIRST line inside this loop body.
+        // Do NOT hoist outside the loop — thermal tier can change between
+        // chunks and must be re-read on every iteration without exception.
+        const tier = thermal.getTier();
+
+        if (isCancelled()) {
+          return { subtitles: [], translationSkipped: false };
+        }
+
+        const chunkDur = Math.min(tier.chunkDurationSecs, totalDuration - offset);
+        const outcome  = await nextChunkPromise;
+
+        // Pre-fetch next chunk immediately
+        const nextOffset = offset + chunkDur;
+        if (nextOffset < totalDuration) {
+          const nd = Math.min(
+            thermal.getTier().chunkDurationSecs,
+            totalDuration - nextOffset,
+          );
+          nextChunkPromise = tryExtractChunk(
+            videoUri, nextOffset, nd, chunkIndex + 1,
+          );
+        }
+
+        if (outcome.kind === "silent") {
+          silentChunks++;
+        } else if (outcome.kind === "error") {
+          console.warn(
+            `[VideoProcessor] chunk ${chunkIndex} failed:`, outcome.reason,
+          );
+          skippedChunks++;
+        } else {
+          const chunk = outcome.chunk;
+          const t0    = Date.now();
+          const segs  = await transcribeChunkSegmented(
+            chunk.filePath, chunk.startTime, sourceLanguage,
+          );
+          thermal.reportTranscriptionTime(Date.now() - t0, chunkDur);
+
+          const filtered = segs.filter(s => !isBlankSegment(s.text));
+          if (filtered.length < segs.length) {
+            console.log(
+              `[VideoProcessor] chunk ${chunkIndex}: ` +
+              `${segs.length - filtered.length} BLANK removed`,
+            );
+          }
+          batchRawSegments.push(...filtered);
+          safeDeleteChunk(chunk.filePath);
+        }
+
+        offset += chunkDur;
+        chunkIndex++;
+        chunksThisBatch++;
+
+        // STT credit: fully processed up to fullyProcessedOffset,
+        // plus half-credit for the current chunk's STT progress.
+        // Half-credit because each video second needs both STT and
+        // translation; STT alone earns 50% of that second's progress.
+        const sttPos = fullyProcessedOffset + (offset - fullyProcessedOffset) * 0.5;
+        onProgress({
+          step:    "transcribing",
+          current: chunkIndex,
+          total:   Math.max(chunkIndex, Math.ceil(totalDuration / tier.chunkDurationSecs)),
+          percent: calcPercent(sttPos),
+          message: `음성 인식 중... (${chunkIndex}/${Math.ceil(totalDuration / tier.chunkDurationSecs)})`,
+        });
+      }
+
+      const batchEndOffset = offset;
+
+      if (batchRawSegments.length === 0 || translationSkipped) continue;
+
+      // ── Phase C: Merge into sentences (batch-local, no cross-batch)
+      // Each batch is merged independently to avoid invalidating
+      // prior translations. Sentences split at batch boundaries
+      // appear as short fragments — acceptable trade-off for safety.
+      const batchSentences = mergeSegmentsIntoSentences(batchRawSegments);
+      if (batchSentences.length === 0) continue;
+
+      const batchInput = batchSentences.map(seg => ({
+        start:      seg.startTime,
+        end:        seg.endTime,
+        text:       seg.text,
+        translated: "",
+      }));
+
+      // ── Phase D: Release Whisper, translate ───────────────────────
+      await releaseWhisper();
+      whisperLoaded = false;
+
+      // [THERMAL-OPT-V4] No per-batch reload. isGemmaLoaded() is authoritative.
+      if (!translationSkipped) { // [THERMAL-OPT-V4]
+        if (isCancelled()) {
+          try { await forceUnloadGemma(); } catch {} // [THERMAL-OPT-V4]
+          setGemmaKeepLoaded(false); // [THERMAL-OPT-V4]
+          return { subtitles: [], translationSkipped: false };
+        }
+        if (!isGemmaLoaded() && !translationSkipped) { // [THERMAL-OPT-V4]
+          setGemmaKeepLoaded(true); // [THERMAL-OPT-V4]
+          try { // [THERMAL-OPT-V4]
+            await loadGemma(); // [THERMAL-OPT-V4]
+            llamaContextIsLoaded = true; // [THERMAL-OPT-V4]
+          } catch { // [THERMAL-OPT-V4]
+            translationSkipped = true; // [THERMAL-OPT-V4]
+            setGemmaKeepLoaded(false); // [THERMAL-OPT-V4]
+            llamaContextIsLoaded = false; // [THERMAL-OPT-V4]
+          } // [THERMAL-OPT-V4]
+        } // [THERMAL-OPT-V4]
+      } // [THERMAL-OPT-V4]
+
+      // Thermal cooldown before Gemma
+      const cooldownMs: Record<string, number> = thermalProtection
+        ? { nominal: 1000, elevated: 2200, critical: 3500 }
+        : { nominal: 400,  elevated: 400,  critical: 400  };
+      const cooldown = cooldownMs[thermal.getTier().name] ?? 800;
+      if (cooldown > 0) await sleep(cooldown);
+
+      if (isCancelled()) {
+        try { await forceUnloadGemma(); } catch {} // [THERMAL-OPT-V4]
+        setGemmaKeepLoaded(false); // [THERMAL-OPT-V4]
+        return { subtitles: [], translationSkipped: false };
+      }
+
+      // [THERMAL-OPT-V4] Separate the Whisper spike from the Gemma spike.
+      if (!translationSkipped) { // [THERMAL-OPT-V4]
+        const preTier = thermal.getTier(); // [THERMAL-OPT-V4]
+        if (preTier.name !== "nominal") { // [THERMAL-OPT-V4]
+          const preIdle = preTier.name === "critical" ? 1500 : 700; // [THERMAL-OPT-V4]
+          console.log(`[THERMAL-OPT-V4] Pre-translation idle ${preIdle}ms (tier: ${preTier.name})`); // [THERMAL-OPT-V4]
+          await sleep(preIdle); // [THERMAL-OPT-V4]
+        } // [THERMAL-OPT-V4]
+      } // [THERMAL-OPT-V4]
+
+      console.log(
+        `[VideoProcessor] batch ${batchIndex}: ` +
+        `translating ${batchInput.length} sentences`,
+      );
+
+      // Batch-specific checkpoint key prevents cross-batch collision
+      const batchCheckpointKey = `${videoUri}__batch_${batchIndex}`;
+
+      const batchTranslated = await translateSegments(
+        batchInput,
+        (completed, total) => {
+          if (isCancelled()) return;
+
+          const batchFraction = total > 0 ? completed / total : 0;
+
+          // Translation credit: from fullyProcessedOffset, advance through
+          // the batch proportionally. At batchFraction=0 this equals the
+          // STT end position (no jump). At batchFraction=1 this equals
+          // batchEndOffset (fully done).
+          // STT already earned 50% credit for this range; translation
+          // earns the remaining 50%, so we interpolate from midpoint.
+          const batchMid = fullyProcessedOffset +
+            (batchEndOffset - fullyProcessedOffset) * 0.5;
+          const translatePos = batchMid +
+            batchFraction * (batchEndOffset - batchMid);
+
+          onProgress({
+            step: 'translating',
+            current: allTranslated.length + completed,
+            total: Math.max(allTranslated.length + total, 1),
+            percent: calcPercent(translatePos),
+            message: `번역 중... (배치 ${batchIndex}, ${completed}/${total})`,
+          });
+        },
+        batchCheckpointKey,
+        langName,
+      );
+
+      fullyProcessedOffset = batchEndOffset;
+
+      if (isCancelled()) {
+        try { await forceUnloadGemma(); } catch {} // [THERMAL-OPT-V4]
+        setGemmaKeepLoaded(false); // [THERMAL-OPT-V4]
+        return { subtitles: [], translationSkipped: false };
+      }
+
+      const batchSubtitles: SubtitleSegment[] = batchTranslated
+        .filter(seg => seg.translated && seg.translated.trim().length > 5)
+        .map(seg => ({
+          id:         makeStableSubtitleId(seg.start, seg.end),
+          startTime:  seg.start,
+          endTime:    seg.end,
+          original:   seg.text,
+          translated: seg.translated,
+        }));
+
+      allTranslated.push(...batchSubtitles);
+
+      // ── Early playback: fires once after first sufficient batch ───
+      if (!earlyPlaybackFired && onEarlyPlaybackReady) {
+        const threshold = getEarlyPlaybackThreshold(totalDuration);
+        const sorted    = [...allTranslated].sort(
+          (a, b) => a.startTime - b.startTime,
+        );
+
+        // Build contiguous block from t=0.
+        // Gap tolerance: EARLY_PLAYBACK_MAX_GAP_S (4s) to handle
+        // natural speech pauses without breaking the block.
+        // Coverage = sum of individual segment durations (not
+        // wall-clock span) so gaps don't inflate the count.
+        const contiguous: SubtitleSegment[] = [];
+        let   totalCoverage = 0;
+        for (let i = 0; i < sorted.length; i++) {
+          if (i === 0) {
+            contiguous.push(sorted[i]);
+            totalCoverage += sorted[i].endTime - sorted[i].startTime;
+          } else {
+            const gap = sorted[i].startTime - sorted[i - 1].endTime;
+            if (gap > EARLY_PLAYBACK_MAX_GAP_S) break;
+            contiguous.push(sorted[i]);
+            totalCoverage += sorted[i].endTime - sorted[i].startTime;
+          }
+        }
+
+        if (totalCoverage >= threshold) {
+          earlyPlaybackFired   = true;
+          lastEmittedEndTime   =
+            contiguous[contiguous.length - 1].endTime;
+          onEarlyPlaybackReady(contiguous);
+          console.log(
+            `[VideoProcessor] Early playback fired: ` +
+            `${contiguous.length} subs, ` +
+            `coverage=${Math.round(totalCoverage)}s`,
+          );
+        }
+      }
+
+      // ── Streaming append for batches after early playback ─────────
+      if (earlyPlaybackFired && onPartialUpdate) {
+        const newSegs = batchSubtitles.filter(
+          s => s.startTime >= lastEmittedEndTime,
+        );
+        if (newSegs.length > 0) {
+          lastEmittedEndTime = newSegs[newSegs.length - 1].endTime;
+          onPartialUpdate(newSegs);
+          console.log(
+            `[VideoProcessor] Append: ${newSegs.length} new subs`,
+          );
+        }
+      }
+
+      // [THERMAL-OPT-V4] Post-translation: check streak, then idle. Unload only on 3x critical.
+      if (!translationSkipped) { // [THERMAL-OPT-V4]
+        const postTier = thermal.getTier(); // [THERMAL-OPT-V4]
+        const postTierLevel = postTier.name === "critical" ? 2 // [THERMAL-OPT-V4]
+          : postTier.name === "elevated" ? 1 : 0; // [THERMAL-OPT-V4]
+        const didUnload = await reportThermalAndMaybeUnload(postTierLevel); // [THERMAL-OPT-V4]
+        if (didUnload) { // [THERMAL-OPT-V4]
+          llamaContextIsLoaded = false; // [THERMAL-OPT-V4]
+          await sleep(3000); // [THERMAL-OPT-V4]
+        } else { // [THERMAL-OPT-V4]
+          await idleBetweenBatches(postTier.name as "nominal" | "elevated" | "critical"); // [THERMAL-OPT-V4]
+        } // [THERMAL-OPT-V4]
+      } // [THERMAL-OPT-V4]
     }
 
-    // [자체 개선] skipRate: extraction 실패만 포함, silent은 별도 로그
+    // ── Step 4: Stats and cleanup ───────────────────────────────────
     const totalChunks = chunkIndex;
     const skipRate    = totalChunks > 0 ? skippedChunks / totalChunks : 0;
 
     if (silentChunks > 0) {
       console.log(
-        `[VideoProcessor] ${silentChunks}/${totalChunks} chunks were silent (VAD) — normal`,
+        `[VideoProcessor] ${silentChunks}/${totalChunks} silent — normal`,
       );
     }
     if (skipRate >= SKIP_RATE_WARN_THRESHOLD) {
       console.warn(
-        `[VideoProcessor] high extraction failure rate: ${skippedChunks}/${totalChunks}` +
-        ` (${Math.round(skipRate * 100)}%) — translation will be skipped`,
+        `[VideoProcessor] high skip rate: ` +
+        `${skippedChunks}/${totalChunks} ` +
+        `(${Math.round(skipRate * 100)}%)`,
       );
     }
 
-    if (rawSegments.length === 0) {
+    if (allTranslated.length === 0 && !translationSkipped) {
+      try { await forceUnloadGemma(); } catch {} // [THERMAL-OPT-V4]
       onProgress({
         step: "done", current: 0, total: 0,
-        percent: 100, message: "인식 결과 없음 — 파일을 확인하세요.",
+        percent: 100,
+        message: "인식 결과 없음 — 파일을 확인하세요.",
       });
       return { subtitles: [], translationSkipped: true };
     }
 
-    if (isCancelled()) return { subtitles: [], translationSkipped: false };
-
-    const sentences = mergeSegmentsIntoSentences(rawSegments);
-
-    // ── Step 3: Translate ─────────────────────────────────────────────────────
-    const gemmaPath = await getLocalModelPath();
-    let translationSkipped = false;
-
-    const translationInput = sentences.map((seg) => ({
-      start:      seg.startTime,
-      end:        seg.endTime,
-      text:       seg.text,
-      translated: "",
-    }));
-
-    let translated = translationInput;
-
-    if (!gemmaPath) {
-      console.warn("[TRANSLATE] Gemma model not downloaded — skipping translation");
-      translationSkipped = true;
-    } else {
-      onProgress({ step: "unloading", current: 0, total: 0, percent: 91, message: "Whisper 언로드 중..." });
-      await releaseWhisper();
-
-      onProgress({ step: "unloading", current: 0, total: 0, percent: 93, message: "메모리 안정화 대기 중..." });
-
-      // thermalProtection 설정에 따라 cooldown 조정
-      const cooldownMs: Record<string, number> = thermalProtection
-        ? { nominal: 1000, elevated: 2500, critical: 4000 }
-        : { nominal: 500,  elevated: 500,  critical: 500  };
-      await sleep(cooldownMs[thermal.getTier().name] ?? (thermalProtection ? 2000 : 500));
-
-      if (isCancelled()) return { subtitles: [], translationSkipped: false };
-
-      onProgress({
-        step: "translating", current: 0, total: sentences.length,
-        percent: 94, message: "Gemma 모델 로드 중...",
-      });
-      await loadGemma();
-
-      onProgress({
-        step: "translating", current: 0, total: sentences.length,
-        percent: 95, message: "번역 시작 중...",
-      });
-
-      const langMeta = getLanguageByCode(targetLanguage);
-      const langName = langMeta?.name ?? targetLanguage;
-
-      console.log("[TRANSLATE] calling translation for segments:", translationInput.length);
-      console.log("[TRANSLATE] target language name:", langName);
-
-      try {
-        translated = await translateSegments(
-          translationInput,
-          (completed, total) => {
-            const percent = Math.round(
-              95 + ((completed / total) * (BAND_TRANSLATE_END - 95)),
-            );
-            onProgress({
-              step: "translating", current: completed, total, percent,
-              message: `번역 중... (${completed}/${total})`,
-            });
-          },
-          videoUri,
-          langName,
-        );
-      } finally {
-        await unloadGemma();
-      }
-    }
+    try { if (!translationSkipped) await forceUnloadGemma(); } catch {} // [THERMAL-OPT-V4]
 
     if (isCancelled()) return { subtitles: [], translationSkipped: false };
 
-    // ── Step 4: Assemble subtitles ────────────────────────────────────────────
-    const subtitles: SubtitleSegment[] = sentences.map((seg, i) => ({
-      id:         `sub_${i}_${Math.round(seg.startTime * 1000)}`,
-      startTime:  seg.startTime,
-      endTime:    seg.endTime,
-      original:   seg.text,
-      translated: translated[i]?.translated ?? "",
-    }));
+    // ── Step 5: Final assembly ──────────────────────────────────────
+    const subtitles = [...allTranslated].sort(
+      (a, b) => a.startTime - b.startTime,
+    );
 
     onProgress({
-      step: "done",
+      step:    "done",
       current: subtitles.length,
       total:   subtitles.length,
       percent: 100,
@@ -415,7 +605,10 @@ export async function processVideo(
     });
 
     return { subtitles, translationSkipped };
+
   } finally {
+    setGemmaKeepLoaded(false); // [THERMAL-OPT-V4]
+    try { await forceUnloadGemma(); } catch {} // [THERMAL-OPT-V4]
     thermal.dispose();
     await clearChunkDir();
   }

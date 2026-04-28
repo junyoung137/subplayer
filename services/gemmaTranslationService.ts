@@ -35,14 +35,50 @@ interface SBDSentence {
   end: number;
 }
 
+// ── [THERMAL-OPT-V4] Unified cache entry ─────────────────────────────────────
+interface UnifiedCacheEntry { // [THERMAL-OPT-V4]
+  translated: string;  // [THERMAL-OPT-V4] target-language result
+  lastUsedAt: number;  // [THERMAL-OPT-V4] ms timestamp for LRU eviction
+} // [THERMAL-OPT-V4]
+
+// ── [THERMAL-OPT-V4] Carry-over segment ──────────────────────────────────────
+interface CarryOverSegment { // [THERMAL-OPT-V4]
+  start: number;        // [THERMAL-OPT-V4] video seconds
+  end: number;          // [THERMAL-OPT-V4] video seconds
+  text: string;         // [THERMAL-OPT-V4] source English
+  translated: string;   // [THERMAL-OPT-V4] last known translation (may be empty)
+  insertedAt: number;   // [THERMAL-OPT-V4] wall-clock ms when added to carry-over
+} // [THERMAL-OPT-V4]
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 const MODEL_PATH = FileSystem.documentDirectory + "gemma-models/gemma-3n-e2b-q4.gguf";
-const BATCH_SIZE = 5;
+const BATCH_SIZE = 5; // [BUDGET-REMOVE] restored; 3 caused too many batches
 const SLEEP_BETWEEN_MS = 150;
 const SLEEP_THERMAL_MS = 1200;
 const THERMAL_EVERY_N = 5;
 const EMA_ALPHA_BG = 0.4;
 const EMA_REANCHOR_WEIGHT = 0.5;
+
+// [THERMAL-OPT-V4] Token-approximate translation budget.
+// Source is always English; ~4 chars/token. Refill uses wall-clock elapsed time.
+// Critical gets minimum refill (not 0) to ensure smooth recovery after thermal drop.
+const BUDGET_MAX             = 6000;  // [BUDGET-FIX-V1] increased from 2000
+const BUDGET_REFILL_RATE_NOMINAL  = 1000; // [THERMAL-OPT-V4] units/sec
+const BUDGET_REFILL_RATE_ELEVATED = 600;  // [THERMAL-OPT-V4] x0.7 — progressive throttle
+const BUDGET_REFILL_RATE_CRITICAL = 120;  // [THERMAL-OPT-V4] minimum — ensures recovery, not zero
+const BUDGET_COST_PER_TOKEN  = 6;    // [THERMAL-OPT-V4]
+const BUDGET_CHARS_PER_TOKEN = 4;    // [THERMAL-OPT-V4] — unchanged
+const BUDGET_COST_MIN_PER_SEG = 25;  // [THERMAL-OPT-V4] floor per segment
+// [BUDGET-V5] Hard cap: max segments entering LLM per pass regardless of
+// remaining budget. Prevents burst thermal spikes on budget recovery.
+const BUDGET_MAX_SEGMENTS_PER_PASS = 40;
+
+// [THERMAL-OPT-V4] Unified cache constants
+const UNIFIED_CACHE_MAX = 500; // [THERMAL-OPT-V4]
+
+// [THERMAL-OPT-V4] Carry-over constants
+const CARRY_OVER_MAX        = 30;           // [THERMAL-OPT-V4] hard cap
+const CARRY_OVER_MAX_AGE_MS = 30000;        // [THERMAL-OPT-V4] drop entries older than 30s wall-clock
 
 // ── Thermal management ────────────────────────────────────────────────────────
 const THERMAL_NPREDICT_SCALE = [1.0, 0.75, 0.55] as const;
@@ -50,6 +86,7 @@ const THERMAL_NPREDICT_SCALE = [1.0, 0.75, 0.55] as const;
 let _thermalLevel = 0;
 let _thermalConsecutiveHigh = 0;
 let _thermalConsecutiveLow  = 0;
+let _criticalStreak = 0; // [THERMAL-OPT-V4]
 
 const SAVE_INTERVAL_MS = 1500;
 const CHECKPOINT_TTL_MS = 24 * 60 * 60 * 1000;
@@ -278,10 +315,29 @@ let llamaContext: LlamaContext | null = null;
 let _loadModelPromise: Promise<void> | null = null;
 let _unloadModelPromise: Promise<void> | null = null;
 let _isAppBackgrounded = false;
+let _keepLoaded = false; // [THERMAL-OPT-V4]
+
+// [THERMAL-OPT-V4] Budget state
+let _budgetUnits          = BUDGET_MAX;        // [BUDGET-FIX-V1] increased from 2000; 59-seg batch needs more headroom
+let _budgetLastRefillTime = Date.now();        // [THERMAL-OPT-V4]
+
+// [THERMAL-OPT-V4] Unified cache
+const _unifiedCache = new Map<string, UnifiedCacheEntry>(); // [THERMAL-OPT-V4]
+
+// [THERMAL-OPT-V4] Carry-over state
+let _skippedCarryOver: CarryOverSegment[] = []; // [THERMAL-OPT-V4]
 
 export function setAppBackgroundedHint(val: boolean): void {
   _isAppBackgrounded = val;
 }
+
+export function setKeepLoaded(val: boolean): void { // [THERMAL-OPT-V4]
+  _keepLoaded = val; // [THERMAL-OPT-V4]
+} // [THERMAL-OPT-V4]
+
+export function isModelLoaded(): boolean { // [THERMAL-OPT-V4]
+  return llamaContext !== null; // [THERMAL-OPT-V4]
+} // [THERMAL-OPT-V4]
 
 // ── Inference serialization ───────────────────────────────────────────────────
 let _inferenceQueue: Promise<void> = Promise.resolve();
@@ -290,6 +346,7 @@ const _activeJobs   = new Set<number>();
 const _bgProtected  = new Set<number>();
 
 let _isInferenceRunning = false;
+let _inferenceLock = false; // [THERMAL-OPT-V4.2] prevents budget + cache race conditions
 
 export function setBgJobProtection(val: boolean): void {
   if (val) {
@@ -392,9 +449,9 @@ async function sleep(ms: number): Promise<void> {
 }
 
 function getInferenceThreadCount(): number {
-  if (_thermalLevel >= 2) return 2;
-  if (_thermalLevel >= 1) return 3;
-  return 4;
+  if (_thermalLevel >= 2) return 1;
+  if (_thermalLevel >= 1) return 2;
+  return 2; // nominal: 2 threads instead of 4 — leaves 2 cores for OS/cooling
 }
 
 function applyThermalNPredict(base: number): number {
@@ -409,27 +466,162 @@ function getThermalSleepMs(): number {
 }
 
 function checkThermalPressure(rawBatchMs: number, emaBatchMs: number): void {
-  if (rawBatchMs > 2500) {
+  // Ratio-based detection replaces the fixed 2500ms threshold.
+  //
+  // Problem with fixed threshold: on a CPU-only device running ~9s/batch,
+  // 2500ms is always exceeded — every batch triggers level-up, reaching
+  // critical by batch 4 regardless of actual thermal throttling.
+  //
+  // Correct signal: thermal throttling shows as a SUDDEN INCREASE relative
+  // to the device's own EMA baseline. Stable slowness (device just runs
+  // slow) must NOT trigger level-up.
+  //
+  // Upgrade: raw > EMA * 1.35 AND raw > 4000ms absolute floor.
+  //   - 1.35 ratio = 35% sudden slowdown vs baseline → real throttling
+  //   - 4000ms floor = ignore noise on fast devices (2s baseline × 1.35 = 2.7s)
+  //   - Requires 2 consecutive hits to upgrade (unchanged)
+  //
+  // Downgrade: raw < EMA * 1.15 for 3 consecutive batches → recovering.
+  //
+  // Cold start (emaBatchMs = 0): use 10000ms absolute floor as fallback.
+  //   On CPU-only ~9s/batch this will never trigger, which is correct
+  //   because a fresh run has no throttling yet.
+
+  const emaSeeded = emaBatchMs > 0;
+
+  const isSuddenSlowdown = emaSeeded
+    ? rawBatchMs > emaBatchMs * 1.28 && rawBatchMs > 3800
+    : rawBatchMs > 8500;
+
+  const isRecovering = emaSeeded
+    ? rawBatchMs < emaBatchMs * 1.12
+    : false;
+
+  if (isSuddenSlowdown) {
     _thermalConsecutiveLow = 0;
     _thermalConsecutiveHigh++;
     if (_thermalConsecutiveHigh >= 2 && _thermalLevel < 2) {
       _thermalLevel++;
       _thermalConsecutiveHigh = 0;
-      if (__DEV__) console.log(`[THERMAL] Level UP → ${_thermalLevel} (raw=${rawBatchMs}ms)`);
+      if (__DEV__) console.log(
+        `[THERMAL] Level UP → ${_thermalLevel} ` +
+        `(raw=${rawBatchMs}ms ema=${Math.round(emaBatchMs)}ms ` +
+        `ratio=${(rawBatchMs / emaBatchMs).toFixed(2)})`
+      );
     }
-  } else if (emaBatchMs < 1200) {
+  } else if (isRecovering) {
     _thermalConsecutiveHigh = 0;
     _thermalConsecutiveLow++;
     if (_thermalConsecutiveLow >= 3 && _thermalLevel > 0) {
       _thermalLevel--;
       _thermalConsecutiveLow = 0;
-      if (__DEV__) console.log(`[THERMAL] Level DOWN → ${_thermalLevel} (ema=${Math.round(emaBatchMs)}ms)`);
+      if (__DEV__) console.log(
+        `[THERMAL] Level DOWN → ${_thermalLevel} ` +
+        `(raw=${rawBatchMs}ms ema=${Math.round(emaBatchMs)}ms)`
+      );
     }
   } else {
     _thermalConsecutiveHigh = 0;
     _thermalConsecutiveLow  = 0;
   }
 }
+
+// ── [THERMAL-OPT-V4] Budget helpers ──────────────────────────────────────────
+function currentRefillRate(): number { // [THERMAL-OPT-V4]
+  if (_thermalLevel >= 2) return BUDGET_REFILL_RATE_CRITICAL; // [THERMAL-OPT-V4]
+  if (_thermalLevel >= 1) return BUDGET_REFILL_RATE_ELEVATED; // [THERMAL-OPT-V4]
+  return BUDGET_REFILL_RATE_NOMINAL; // [THERMAL-OPT-V4]
+} // [THERMAL-OPT-V4]
+
+function estimateSegmentCost(text: string): number { // [BUDGET-FIX-V1]
+  // Overhead reduced from +20 to +5. +20 was too aggressive for short
+  // conversational fragments — caused budget exhaustion on first batch.
+  const tokens = Math.ceil(text.length / BUDGET_CHARS_PER_TOKEN) + 5; // [BUDGET-FIX-V1]
+  return Math.max(BUDGET_COST_MIN_PER_SEG, tokens * BUDGET_COST_PER_TOKEN); // [BUDGET-FIX-V1]
+} // [BUDGET-FIX-V1]
+
+function refillAndGetBudget(): number { // [THERMAL-OPT-V4]
+  const now = Date.now(); // [THERMAL-OPT-V4]
+  const elapsedSecs = (now - _budgetLastRefillTime) / 1000; // [THERMAL-OPT-V4]
+  _budgetUnits = Math.min( // [THERMAL-OPT-V4]
+    BUDGET_MAX, // [THERMAL-OPT-V4]
+    _budgetUnits + elapsedSecs * currentRefillRate() // [THERMAL-OPT-V4]
+  ); // [THERMAL-OPT-V4]
+  _budgetLastRefillTime = now; // [THERMAL-OPT-V4]
+  return _budgetUnits; // [THERMAL-OPT-V4]
+} // [THERMAL-OPT-V4]
+
+// ── [THERMAL-OPT-V4] Unified cache helpers ────────────────────────────────────
+function normalizeCacheKey(text: string): string { // [THERMAL-OPT-V4]
+  // [BUDGET-V5] Strip TRAILING punctuation only — improves cache hit rate
+  // for ASR variance ("you know" / "you know," / "you know...") while
+  // preserving mid-sentence punctuation that can affect meaning.
+  return text
+    .toLowerCase()
+    .replace(/[.,!?;:'"]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim(); // [THERMAL-OPT-V4]
+} // [THERMAL-OPT-V4]
+
+function makeCacheKey(text: string, targetLang: string): string { // [THERMAL-OPT-V4]
+  // Scope by target language to prevent cross-language cache pollution.
+  // [THERMAL-OPT-V4.1] FUTURE: add ::mode suffix here if translation modes are introduced.
+  return `${targetLang}::${normalizeCacheKey(text)}`; // [THERMAL-OPT-V4]
+} // [THERMAL-OPT-V4]
+
+function unifiedCacheGet(text: string, targetLang: string): string | undefined { // [THERMAL-OPT-V4]
+  const entry = _unifiedCache.get(makeCacheKey(text, targetLang)); // [THERMAL-OPT-V4]
+  if (!entry) return undefined; // [THERMAL-OPT-V4]
+  entry.lastUsedAt = Date.now(); // [THERMAL-OPT-V4] refresh LRU on hit
+  return entry.translated; // [THERMAL-OPT-V4]
+} // [THERMAL-OPT-V4]
+
+function unifiedCacheSet(text: string, targetLang: string, translated: string): void { // [THERMAL-OPT-V4]
+  const key = makeCacheKey(text, targetLang); // [THERMAL-OPT-V4]
+  if (_unifiedCache.size >= UNIFIED_CACHE_MAX) { // [THERMAL-OPT-V4]
+    let oldestKey = ''; // [THERMAL-OPT-V4]
+    let oldestTime = Infinity; // [THERMAL-OPT-V4]
+    for (const [k, v] of _unifiedCache) { // [THERMAL-OPT-V4]
+      if (v.lastUsedAt < oldestTime) { oldestTime = v.lastUsedAt; oldestKey = k; } // [THERMAL-OPT-V4]
+    } // [THERMAL-OPT-V4]
+    if (oldestKey) _unifiedCache.delete(oldestKey); // [THERMAL-OPT-V4]
+  } // [THERMAL-OPT-V4]
+  _unifiedCache.set(key, { translated, lastUsedAt: Date.now() }); // [THERMAL-OPT-V4]
+} // [THERMAL-OPT-V4]
+
+// Best fallback for thermal skip. Priority:
+// 1. Unified cache hit (target language, text-keyed)
+// 2. Already-translated field on the segment (from a prior batch)
+// 3. Original English — absolute last resort
+function getBestFallback( // [THERMAL-OPT-V4]
+  s: { text: string; translated: string }, // [THERMAL-OPT-V4]
+  targetLang: string // [THERMAL-OPT-V4]
+): string { // [THERMAL-OPT-V4]
+  return ( // [THERMAL-OPT-V4]
+    unifiedCacheGet(s.text, targetLang) ?? // [THERMAL-OPT-V4]
+    (s.translated && s.translated !== s.text ? s.translated : undefined) ?? // [THERMAL-OPT-V4]
+    s.text // [THERMAL-OPT-V4] original English — last resort only
+  ); // [THERMAL-OPT-V4]
+} // [THERMAL-OPT-V4]
+
+// ── [THERMAL-OPT-V4] Carry-over helper ───────────────────────────────────────
+function addToCarryOver(segs: Array<{ start: number; end: number; text: string; translated: string }>): void { // [THERMAL-OPT-V4]
+  const now = Date.now(); // [THERMAL-OPT-V4]
+  _skippedCarryOver = _skippedCarryOver.filter( // [THERMAL-OPT-V4]
+    c => now - c.insertedAt < CARRY_OVER_MAX_AGE_MS // [THERMAL-OPT-V4]
+  ); // [THERMAL-OPT-V4]
+  for (const s of segs) { // [THERMAL-OPT-V4]
+    if (_skippedCarryOver.length >= CARRY_OVER_MAX) break; // [THERMAL-OPT-V4]
+    const key = normalizeCacheKey(s.text); // [THERMAL-OPT-V4]
+    // [THERMAL-OPT-V4.1] Dedup by normalized text AND 500ms start-time tolerance.
+    const isDuplicate = _skippedCarryOver.some( // [THERMAL-OPT-V4.1]
+      c => normalizeCacheKey(c.text) === key && Math.abs(c.start - s.start) < 0.5 // [THERMAL-OPT-V4.1]
+    ); // [THERMAL-OPT-V4.1]
+    if (!isDuplicate) { // [THERMAL-OPT-V4.1]
+      _skippedCarryOver.push({ ...s, insertedAt: now }); // [THERMAL-OPT-V4]
+    } // [THERMAL-OPT-V4.1]
+  } // [THERMAL-OPT-V4]
+} // [THERMAL-OPT-V4]
 
 function checkpointKey(h: string) { return `gemma_checkpoint_v4_${h}`; }
 function properNounKey(h: string) { return `proper_nouns_${h}`; }
@@ -577,17 +769,7 @@ function likelySpeakerChange(prevText: string, currText: string, gap: number): b
   return false;
 }
 
-// ── GPU layer helper ──────────────────────────────────────────────────────────
-function getSafeGpuLayers(): number {
-  // Android: Vulkan GPU acceleration via llama.cpp
-  // Snapdragon 8 Gen 2/3 supports full GPU offload
-  // Start with 20 layers (safe for 2GB VRAM headroom)
-  // Full model has ~28 layers for 2B model
-  if (Platform.OS === 'android') return 20;
-  // iOS: Metal GPU acceleration
-  if (Platform.OS === 'ios') return 28;
-  return 0;
-}
+// [THERMAL-FIX-1] removed GPU layers — mobile uses CPU only, GPU path caused unnecessary VRAM pressure checks
 
 // ── Model lifecycle ───────────────────────────────────────────────────────────
 export async function loadModel(onProgress?: (fraction: number) => void): Promise<void> {
@@ -604,18 +786,10 @@ export async function loadModel(onProgress?: (fraction: number) => void): Promis
     if (!info.exists) throw new Error("Gemma 모델 파일을 찾을 수 없습니다. 먼저 다운로드해 주세요.");
     const modelPath = MODEL_PATH.startsWith("file://") ? MODEL_PATH.slice(7) : MODEL_PATH;
     try {
-      try {
-        llamaContext = await initLlama(
-          { model: modelPath, n_threads: getInferenceThreadCount(), n_gpu_layers: getSafeGpuLayers(), n_ctx: 2000, use_mlock: false },
-          onProgress ? (p: number) => onProgress(p / 100) : undefined
-        );
-      } catch (gpuError) {
-        console.warn('[Gemma] GPU init failed, falling back to CPU:', gpuError);
-        llamaContext = await initLlama(
-          { model: modelPath, n_threads: getInferenceThreadCount(), n_gpu_layers: 0, n_ctx: 2000, use_mlock: false },
-          onProgress ? (p: number) => onProgress(p / 100) : undefined
-        );
-      }
+      llamaContext = await initLlama(
+        { model: modelPath, n_threads: getInferenceThreadCount(), n_gpu_layers: 0, n_ctx: 1500, use_mlock: false }, // [THERMAL-OPT-V4] increased from 1200; conversational segments run long
+        onProgress ? (p: number) => onProgress(p / 100) : undefined
+      );
       console.log("[Gemma] Model loaded.");
     } catch (e) {
       llamaContext = null;
@@ -630,6 +804,14 @@ export async function loadModel(onProgress?: (fraction: number) => void): Promis
 let _unloadGeneration = 0;
 
 export async function unloadModel(): Promise<void> {
+  if (_keepLoaded) { // [THERMAL-OPT-V4]
+    _thermalLevel = 0; // [THERMAL-OPT-V4]
+    _thermalConsecutiveHigh = 0; // [THERMAL-OPT-V4]
+    _thermalConsecutiveLow = 0; // [THERMAL-OPT-V4]
+    return; // [THERMAL-OPT-V4]
+  } // [THERMAL-OPT-V4]
+  _budgetUnits = BUDGET_MAX; // [THERMAL-OPT-V4]
+  _budgetLastRefillTime = Date.now(); // [THERMAL-OPT-V4]
   _thermalLevel = 0;
   _thermalConsecutiveHigh = 0;
   _thermalConsecutiveLow  = 0;
@@ -666,6 +848,41 @@ export async function unloadModel(): Promise<void> {
 
   await _unloadModelPromise;
 }
+
+export async function forceUnloadModel(): Promise<void> { // [THERMAL-OPT-V4]
+  _keepLoaded = false; // [THERMAL-OPT-V4]
+  _inferenceLock = false; // [THERMAL-OPT-V4.2] reset on force-unload; stale lock would block recovery
+  _criticalStreak = 0; // [THERMAL-OPT-V4]
+  _unifiedCache.clear(); // [THERMAL-OPT-V4]
+  _skippedCarryOver = []; // [THERMAL-OPT-V4]
+  _budgetUnits = BUDGET_MAX; // [THERMAL-OPT-V4]
+  _budgetLastRefillTime = Date.now(); // [THERMAL-OPT-V4]
+  await unloadModel(); // [THERMAL-OPT-V4]
+} // [THERMAL-OPT-V4]
+
+export async function reportThermalAndMaybeUnload(thermalLevel: number): Promise<boolean> { // [THERMAL-OPT-V4]
+  if (thermalLevel >= 2) { // [THERMAL-OPT-V4]
+    _criticalStreak++; // [THERMAL-OPT-V4]
+  } else { // [THERMAL-OPT-V4]
+    _criticalStreak = 0; // [THERMAL-OPT-V4]
+  } // [THERMAL-OPT-V4]
+  if (_criticalStreak >= 3) { // [THERMAL-OPT-V4]
+    console.warn(`[THERMAL-OPT-V4] 3 consecutive critical batches — force unloading Gemma`); // [THERMAL-OPT-V4]
+    _criticalStreak = 0; // [THERMAL-OPT-V4]
+    await forceUnloadModel(); // [THERMAL-OPT-V4]
+    return true; // [THERMAL-OPT-V4]
+  } // [THERMAL-OPT-V4]
+  return false; // [THERMAL-OPT-V4]
+} // [THERMAL-OPT-V4]
+
+export async function idleBetweenBatches( // [THERMAL-OPT-V4]
+  tierName: "nominal" | "elevated" | "critical", // [THERMAL-OPT-V4]
+): Promise<void> { // [THERMAL-OPT-V4]
+  const ms = _isAppBackgrounded // [THERMAL-OPT-V4]
+    ? (tierName === "critical" ? 800 : tierName === "elevated" ? 400 : 200) // [THERMAL-OPT-V4]
+    : (tierName === "critical" ? 2500 : tierName === "elevated" ? 1500 : 800); // [THERMAL-OPT-V4]
+  if (ms > 0) await sleep(ms); // [THERMAL-OPT-V4]
+} // [THERMAL-OPT-V4]
 
 // ── Deduplication ─────────────────────────────────────────────────────────────
 function deduplicateOverlappingSegments(segments: TranslationSegment[]): TranslationSegment[] {
@@ -841,8 +1058,8 @@ async function runSBDBatch(
         { role: "user", content: inputLines },
       ],
       n_predict: sbdNPredict,
-      temperature: 0.05,
-      top_p: 0.9,
+      temperature: 0.0, // [OPT-6]
+      top_p: 1.0,       // [OPT-6]
       stop: ["</s>", "<end_of_turn>", "<|end|>"],
     });
 
@@ -1421,8 +1638,8 @@ async function transliterateProperNouns(
       { role: "user", content: nouns.join("\n") },
     ],
     n_predict: nouns.length * 20,
-    temperature: 0.1,
-    top_p: 0.9,
+    temperature: 0.0, // [OPT-6]
+    top_p: 1.0,       // [OPT-6]
     stop: ["</s>", "<end_of_turn>", "<|end|>"],
   });
   if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
@@ -1598,6 +1815,7 @@ function parseBatchResponse(
   batch: MergedGroup[],
   patterns: CompiledNounPattern[],
   tokenMaps: MaskedToken[][],
+  targetLang: string, // [THERMAL-OPT-V4] internal only — not part of exported signature
   prevTranslations?: string[]
 ): string[] {
   const tmap = new Map<number, string>();
@@ -1627,7 +1845,9 @@ function parseBatchResponse(
     return sanitized;
   };
   if (tmap.size === batch.length) {
-    return batch.map((seg, i) => restoreAndClean(tmap.get(i + 1) ?? "", i, seg.text));
+    const _r = batch.map((seg, i) => restoreAndClean(tmap.get(i + 1) ?? "", i, seg.text)); // [THERMAL-OPT-V4]
+    _r.forEach((t, i) => { if (t) unifiedCacheSet(batch[i].text, targetLang, t); }); // [THERMAL-OPT-V4]
+    return _r; // [THERMAL-OPT-V4]
   }
 
   const contentLines = lines
@@ -1764,13 +1984,13 @@ async function validateTranslations(
           { role: 'system', content: stage1SystemPrompt },
           { role: 'user', content: batchMsg },
         ],
-        n_predict: applyThermalNPredict(Math.max(batch.length * 64, totalSegmentsInBatch * 48)),
-        temperature: 0.05,
-        top_p: 0.9,
+        n_predict: applyThermalNPredict(Math.max(batch.length * 45, totalSegmentsInBatch * 35)),
+        temperature: 0.05, // [RESTORE-FIX] restored
+        top_p: 1.0,        // [OPT-6]
         stop: ['</s>', '<end_of_turn>', '<|end|>'],
       });
       if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
-      parsed = parseBatchResponse(r.text, batchGroups, patterns, tokenMaps, prevBatchTranslations);
+      parsed = parseBatchResponse(r.text, batchGroups, patterns, tokenMaps, targetLanguage, prevBatchTranslations); // [THERMAL-OPT-V4]
     } catch (e: any) {
       if (e?.message === 'INFERENCE_CANCELLED') throw e;
       if (e?.message?.includes('Context') && e?.message?.includes('not found')) {
@@ -1859,9 +2079,9 @@ async function validateTranslations(
           { role: 'system', content: systemPrompt },
           { role: 'user', content: `${userPrompt}\n\n${maskedSrc}` },
         ],
-        n_predict: applyThermalNPredict(isFragment ? 40 : 80),
-        temperature: 0.1,
-        top_p: 0.9,
+        n_predict: applyThermalNPredict(isFragment ? 28 : 55),
+        temperature: 0.0, // [OPT-6]
+        top_p: 1.0,       // [OPT-6]
         stop: ['</s>', '<end_of_turn>', '<|end|>', '\n'],
       });
       if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
@@ -1945,6 +2165,159 @@ function buildSystemPrompt(targetLanguage: string, langRules: string, genrePerso
   ).trim();
 }
 
+// ── [OPT-1] Simple-group word map and helpers ─────────────────────────────────
+const WORD_MAP: Record<string, Record<string, string>> = {
+  ko: { yes:'네', no:'아니', yeah:'응', okay:'알겠어', right:'맞아',
+        sure:'물론', hmm:'음', oh:'오', wow:'와', bye:'잘 있어',
+        thanks:'감사해', sorry:'미안해', hello:'안녕', hey:'야', nope:'아니' },
+  ja: { yes:'はい', no:'いいえ', yeah:'うん', okay:'わかった',
+        right:'そうだ', sure:'もちろん', hmm:'うーん', oh:'あ',
+        wow:'わあ', bye:'さよなら', thanks:'ありがとう',
+        sorry:'ごめん', hello:'こんにちは', hey:'ねえ', nope:'違う' },
+  zh: { yes:'是的', no:'不', yeah:'嗯', okay:'好的', right:'对',
+        sure:'当然', hmm:'嗯', oh:'哦', wow:'哇', bye:'再见',
+        thanks:'谢谢', sorry:'对不起', hello:'你好', hey:'嘿', nope:'不对' },
+  es: { yes:'sí', no:'no', yeah:'sí', okay:'vale', right:'claro',
+        sure:'claro', hmm:'mmm', oh:'oh', wow:'vaya', bye:'adiós',
+        thanks:'gracias', sorry:'lo siento', hello:'hola',
+        hey:'oye', nope:'para nada' },
+  fr: { yes:'oui', no:'non', yeah:'ouais', okay:"d'accord",
+        right:'exact', sure:'bien sûr', hmm:'hmm', oh:'oh',
+        wow:'waouh', bye:'au revoir', thanks:'merci',
+        sorry:'désolé', hello:'bonjour', hey:'hé', nope:'non' },
+  de: { yes:'ja', no:'nein', yeah:'ja', okay:'okay', right:'genau',
+        sure:'natürlich', hmm:'hmm', oh:'oh', wow:'wow',
+        bye:'tschüss', thanks:'danke', sorry:'entschuldigung',
+        hello:'hallo', hey:'hey', nope:'nein' },
+  it: { yes:'sì', no:'no', yeah:'sì', okay:'okay', right:'esatto',
+        sure:'certo', hmm:'hmm', oh:'oh', wow:'wow',
+        bye:'arrivederci', thanks:'grazie', sorry:'scusa',
+        hello:'ciao', hey:'ehi', nope:'no' },
+  pt: { yes:'sim', no:'não', yeah:'sim', okay:'tá bem', right:'exato',
+        sure:'claro', hmm:'hmm', oh:'oh', wow:'uau', bye:'tchau',
+        thanks:'obrigado', sorry:'desculpe', hello:'olá',
+        hey:'ei', nope:'não' },
+  ru: { yes:'да', no:'нет', yeah:'ага', okay:'ладно', right:'верно',
+        sure:'конечно', hmm:'хмм', oh:'о', wow:'ого', bye:'пока',
+        thanks:'спасибо', sorry:'извини', hello:'привет',
+        hey:'эй', nope:'нет' },
+  ar: { yes:'نعم', no:'لا', yeah:'أيوه', okay:'حسناً', right:'صحيح',
+        sure:'بالطبع', hmm:'همم', oh:'أوه', wow:'واو', bye:'مع السلامة',
+        thanks:'شكراً', sorry:'آسف', hello:'مرحبا',
+        hey:'هيه', nope:'لا' },
+  hi: { yes:'हाँ', no:'नहीं', yeah:'हाँ', okay:'ठीक है', right:'सही',
+        sure:'ज़रूर', hmm:'हम्म', oh:'ओह', wow:'वाह', bye:'अलविदा',
+        thanks:'धन्यवाद', sorry:'माफ़ करना', hello:'नमस्ते',
+        hey:'अरे', nope:'नहीं' },
+  th: { yes:'ใช่', no:'ไม่', yeah:'ใช่', okay:'โอเค', right:'ถูกต้อง',
+        sure:'แน่นอน', hmm:'อืม', oh:'โอ้', wow:'ว้าว', bye:'ลาก่อน',
+        thanks:'ขอบคุณ', sorry:'ขอโทษ', hello:'สวัสดี',
+        hey:'เฮ้', nope:'ไม่' },
+  vi: { yes:'vâng', no:'không', yeah:'ừ', okay:'được rồi',
+        right:'đúng rồi', sure:'chắc chắn', hmm:'hmm', oh:'ồ',
+        wow:'ồ wow', bye:'tạm biệt', thanks:'cảm ơn',
+        sorry:'xin lỗi', hello:'xin chào', hey:'này', nope:'không' },
+  id: { yes:'ya', no:'tidak', yeah:'ya', okay:'oke', right:'betul',
+        sure:'tentu', hmm:'hmm', oh:'oh', wow:'wah', bye:'sampai jumpa',
+        thanks:'terima kasih', sorry:'maaf', hello:'halo',
+        hey:'hei', nope:'tidak' },
+  en: { yes:'yes', no:'no', yeah:'yeah', okay:'okay', right:'right',
+        sure:'sure', hmm:'hmm', oh:'oh', wow:'wow', bye:'bye',
+        thanks:'thanks', sorry:'sorry', hello:'hello',
+        hey:'hey', nope:'nope' },
+};
+
+// [OPT-1] Returns 'simple' if the group text needs no Gemma inference.
+// ALL conditions must hold for simple: wordCount<=5, no opinion/clause verbs,
+// no clause starters, no negation with wordCount>3, not purely punct/digits.
+function classifyComplexity(text: string): 'simple' | 'complex' {
+  const trimmed = text.trim();
+  const words = trimmed.split(/\s+/).filter(Boolean);
+  const wordCount = words.length;
+  if (wordCount > 5) return 'complex';
+  if (/^[\d\s.,;:!?'"()[\]-]+$/.test(trimmed)) return 'complex';
+  if (/\b(think|feel|believe|seem|suggest|should|would|could|might|wish|wonder|guess|suppose|mean|know|understand|realize)\b/i.test(trimmed)) return 'complex';
+  if (/\b(that|which|who|where|when|if|although|because|since|unless|while|after|before|though|whether)\b/i.test(trimmed)) return 'complex';
+  if (wordCount > 3 && /\b(not|never|no|don't|doesn't|didn't|won't|can't|couldn't|shouldn't|isn't|wasn't|aren't)\b/i.test(trimmed)) return 'complex';
+  // [BUDGET-FIX-V1] Segments containing capitalized mid-sentence words
+  // (potential proper nouns / brand names) must go through LLM.
+  // Simple passthrough would return them in English unchanged.
+  const midWords = text.trim().split(/\s+/).filter(Boolean);
+  if (midWords.some((w, i) => i > 0 && /^[A-Z]/.test(w) && !COMMON_WORDS.has(w))) { // [BUDGET-FIX-V1]
+    return 'complex'; // [BUDGET-FIX-V1]
+  } // [BUDGET-FIX-V1]
+  return 'simple';
+}
+
+// [OPT-1] Translates a simple group without Gemma: WORD_MAP lookup →
+// applyProperNounFixes → return original unchanged.
+// patterns must be the already-built CompiledNounPattern[] from Step A.
+function translateSimpleSegment(
+  text: string,
+  targetLanguage: string,
+  patterns: CompiledNounPattern[],
+): string {
+  const profile = getLanguageProfile(targetLanguage);
+  const map = WORD_MAP[profile.code] ?? {};
+  const trimmed = text.trim();
+  // Strip trailing punctuation for lookup, restore after match
+  const trailingMatch = trimmed.match(/([.!?,])$/);
+  const trailing = trailingMatch ? trailingMatch[1] : '';
+  const core = trailing ? trimmed.slice(0, -1) : trimmed;
+  const lower = core.toLowerCase();
+  if (lower in map) return map[lower] + trailing;
+  // Proper noun substitution only
+  const withNouns = applyProperNounFixes(trimmed, patterns);
+  if (withNouns !== trimmed) return withNouns;
+  // [BUDGET-FIX-V1] Do NOT return source text as a "translation".
+  // If WORD_MAP has no entry and proper noun substitution changed nothing,
+  // return empty string so the segment falls through to LLM inference
+  // instead of displaying untranslated English as a subtitle.
+  return ''; // [BUDGET-FIX-V1]
+}
+
+// [BUDGET-V5] Split segments longer than 180 chars to reduce per-segment
+// LLM cost and improve quality on dense ASR output.
+// Strategy order: sentence boundary → comma boundary → word midpoint.
+// Midpoint is the safe fallback — never depends on Whisper punctuation.
+function maybeSplitLongSegment(seg: TranslationSegment): TranslationSegment[] {
+  const MAX_CHARS = 180;
+  if (seg.text.length <= MAX_CHARS) return [seg];
+
+  const dur = seg.end - seg.start;
+
+  // Strategy 1: sentence boundary
+  const sentMatch = seg.text.match(/^(.{70,}?[.!?])\s+(\S.+)$/);
+  if (sentMatch) {
+    const ratio = sentMatch[1].length / seg.text.length;
+    return [
+      { ...seg, text: sentMatch[1].trim(), end: +(seg.start + dur * ratio).toFixed(3) },
+      { ...seg, text: sentMatch[2].trim(), start: +(seg.start + dur * ratio).toFixed(3) },
+    ];
+  }
+
+  // Strategy 2: comma boundary
+  const commaMatch = seg.text.match(/^(.{60,}?,)\s+(\S.+)$/);
+  if (commaMatch) {
+    const ratio = commaMatch[1].length / seg.text.length;
+    return [
+      { ...seg, text: commaMatch[1].trim(), end: +(seg.start + dur * ratio).toFixed(3) },
+      { ...seg, text: commaMatch[2].trim(), start: +(seg.start + dur * ratio).toFixed(3) },
+    ];
+  }
+
+  // Strategy 3: word midpoint — reliable fallback, no punctuation dependency
+  const words = seg.text.split(' ');
+  const mid = Math.floor(words.length / 2);
+  const part1 = words.slice(0, mid).join(' ');
+  const part2 = words.slice(mid).join(' ');
+  const ratio = part1.length / seg.text.length;
+  return [
+    { ...seg, text: part1, end: +(seg.start + dur * ratio).toFixed(3) },
+    { ...seg, text: part2, start: +(seg.start + dur * ratio).toFixed(3) },
+  ];
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // ── Main: translateSegments ───────────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1956,7 +2329,6 @@ export async function translateSegments(
   videoGenre = "general"
 ): Promise<TranslationSegment[]> {
   console.log("[TRANSLATE]", segments.length, "segs |", targetLanguage, "|", videoGenre);
-
   let emaBatchDurationMs = 0;
 
   const updateEmaAndGetBgSleepMs = (batchDurationMs: number, batchIndex: number): number => {
@@ -1974,6 +2346,63 @@ export async function translateSegments(
   const yieldToEventLoop = (): Promise<void> => new Promise<void>(r => setImmediate(r));
 
   return enqueueInference(async (isCancelled) => {
+    // [THERMAL-OPT-V4.2] Concurrency lock. If a previous inference call has not yet
+    // committed its budget deduction, return fallbacks immediately rather than
+    // running a duplicate inference that would corrupt _budgetUnits and _unifiedCache.
+    if (_inferenceLock) { // [THERMAL-OPT-V4.2]
+      console.log(`[THERMAL-OPT-V4.2] Inference already running — returning fallbacks`); // [THERMAL-OPT-V4.2]
+      return segments.map(s => ({ ...s, translated: getBestFallback(s, targetLanguage) })); // [THERMAL-OPT-V4.2]
+    } // [THERMAL-OPT-V4.2]
+    _inferenceLock = true; // [THERMAL-OPT-V4.2]
+    try { // [THERMAL-OPT-V4.2]
+
+    // [THERMAL-OPT-V4] Inject carry-over segments when thermal has recovered to nominal.
+    if (_thermalLevel === 0 && _skippedCarryOver.length > 0) { // [THERMAL-OPT-V4]
+      const now = Date.now(); // [THERMAL-OPT-V4]
+      _skippedCarryOver = _skippedCarryOver.filter( // [THERMAL-OPT-V4]
+        c => now - c.insertedAt < CARRY_OVER_MAX_AGE_MS // [THERMAL-OPT-V4]
+      ); // [THERMAL-OPT-V4]
+      const stillNeeded = _skippedCarryOver.filter( // [THERMAL-OPT-V4]
+        c => !unifiedCacheGet(c.text, targetLanguage) // [THERMAL-OPT-V4]
+      ); // [THERMAL-OPT-V4]
+      if (stillNeeded.length > 0) { // [THERMAL-OPT-V4]
+        console.log(`[THERMAL-OPT-V4] Injecting ${stillNeeded.length} carry-over segments`); // [THERMAL-OPT-V4]
+        const _merged = [...segments, ...stillNeeded] // [THERMAL-OPT-V4]
+          .sort((a, b) => a.start - b.start); // [THERMAL-OPT-V4]
+        // [THERMAL-OPT-V4.1] Dedup uses text + 500ms time tolerance — same rationale as addToCarryOver.
+        const _seen: Array<{ key: string; start: number }> = []; // [THERMAL-OPT-V4.1]
+        segments = _merged.filter(s => { // [THERMAL-OPT-V4]
+          const key = normalizeCacheKey(s.text); // [THERMAL-OPT-V4]
+          const alreadySeen = _seen.some( // [THERMAL-OPT-V4.1]
+            e => e.key === key && Math.abs(e.start - s.start) < 0.5 // [THERMAL-OPT-V4.1]
+          ); // [THERMAL-OPT-V4.1]
+          if (alreadySeen) return false; // [THERMAL-OPT-V4.1]
+          _seen.push({ key, start: s.start }); // [THERMAL-OPT-V4.1]
+          return true; // [THERMAL-OPT-V4]
+        }); // [THERMAL-OPT-V4]
+      } // [THERMAL-OPT-V4]
+      _skippedCarryOver = []; // [THERMAL-OPT-V4]
+    } // [THERMAL-OPT-V4]
+
+    // [BUDGET-REMOVE] All-cached fast path only — no segment filtering.
+    // Budget-based segment splitting was causing mass untranslated subtitles
+    // by removing segments from cleaned/merged/batch loop entirely.
+    const uncachedSegments = segments.filter( // [BUDGET-REMOVE]
+      s => !unifiedCacheGet(s.text, targetLanguage) // [BUDGET-REMOVE]
+    ); // [BUDGET-REMOVE]
+    if (uncachedSegments.length === 0) { // [BUDGET-REMOVE]
+      console.log(`[BUDGET-REMOVE] All ${segments.length} segments cached — fast path`); // [BUDGET-REMOVE]
+      return segments.map(s => ({ ...s, translated: getBestFallback(s, targetLanguage) })); // [BUDGET-REMOVE]
+    } // [BUDGET-REMOVE]
+    if (_thermalLevel >= 2) { // [BUDGET-REMOVE] critical thermal only — hard skip
+      addToCarryOver(uncachedSegments); // [BUDGET-REMOVE]
+      return segments.map(s => ({ ...s, translated: getBestFallback(s, targetLanguage) })); // [BUDGET-REMOVE]
+    } // [BUDGET-REMOVE]
+    // [BUDGET-REMOVE] All other segments proceed to LLM — no budget gate.
+    refillAndGetBudget(); // [BUDGET-REMOVE] side-effect: keep budget state fresh
+    _budgetUnits -= uncachedSegments.reduce((sum, s) => sum + estimateSegmentCost(s.text), 0); // [BUDGET-REMOVE]
+    _budgetLastRefillTime = Date.now(); // [BUDGET-REMOVE]
+
     if (!llamaContext) throw new Error("모델이 로드되지 않았습니다. loadModel()을 먼저 호출하세요.");
 
     // ── Step 0 ───────────────────────────────────────────────────────────────
@@ -2079,22 +2508,40 @@ export async function translateSegments(
       _thermalConsecutiveHigh = 0; _thermalConsecutiveLow = 0;
     }
 
+    // [OPT-1] Classify all groups once; reused in Step D and Step G.
+    const groupIsSimple: boolean[] = merged.map(g => classifyComplexity(g.text) === 'simple');
+    // [OPT-1] Pre-translate simple groups immediately — no Gemma call needed.
+    // mergedTranslations[i] for simple groups is written here; complex groups
+    // remain "" and are filled by the LLM batch loop below.
+    // CRITICAL: array length and indices are identical to merged[].
+    for (let i = 0; i < merged.length; i++) {
+      if (groupIsSimple[i]) {
+        mergedTranslations[i] = translateSimpleSegment(merged[i].text, targetLanguage, patterns);
+      }
+    }
+    // [OPT-3] Build complex-only index list. LLM batches are built from this.
+    const complexIndices = merged.map((_, i) => i).filter(i => !groupIsSimple[i]);
+    const complexBatchCount = Math.ceil(complexIndices.length / BATCH_SIZE); // [OPT-3]
+    // Clamp startBatch to new complex-batch count in case checkpoint is stale
+    if (startBatch > complexBatchCount) startBatch = complexBatchCount;
+
     // ── Step D: 배치 번역 ─────────────────────────────────────────────────────
     try {
       let lastSaveTime = 0;
-      for (let bi = startBatch; bi < totalBatches; bi++) {
+      for (let bi = startBatch; bi < complexBatchCount; bi++) { // [OPT-3]
         const batchStartTime = Date.now();
         if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
         if (!llamaContext) throw new Error('INFERENCE_CANCELLED');
 
-        const offset = bi * BATCH_SIZE;
-        const batch = merged.slice(offset, offset + BATCH_SIZE);
-        console.log(`[TRANSLATE] batch ${bi + 1}/${totalBatches} (${batch.length})`);
+        // [OPT-3] Slice complex indices for this batch; map back to merged[]
+        const complexBatchSlice = complexIndices.slice(bi * BATCH_SIZE, (bi + 1) * BATCH_SIZE);
+        const batch = complexBatchSlice.map(idx => merged[idx]);
+        console.log(`[TRANSLATE] batch ${bi + 1}/${complexBatchCount} (${batch.length} complex)`); // [OPT-3]
         if (batch.length === 0) continue;
 
         const sysPrompt = buildSystemPrompt(targetLanguage, langRules, genrePersona, nounHint, batch.length);
         const { message: batchMessage, tokenMaps } = buildBatchMessage(batch);
-        const prevBatchTranslations = batch.map((_, i) => mergedTranslations[offset + i] ?? "");
+        const prevBatchTranslations = complexBatchSlice.map(idx => mergedTranslations[idx] ?? ""); // [OPT-3]
 
         if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
         await yieldToEventLoop();
@@ -2106,7 +2553,7 @@ export async function translateSegments(
           (sum, g) => sum + g.originalIndices.length, 0
         );
         const nPredict = applyThermalNPredict(
-          Math.max(batch.length * 80, totalOriginalSegsInBatch * 60)
+          Math.max(batch.length * 50, totalOriginalSegsInBatch * 40)
         );
 
         const r = await llamaContext.completion({
@@ -2115,8 +2562,8 @@ export async function translateSegments(
             { role: "user", content: batchMessage },
           ],
           n_predict: nPredict,
-          temperature: 0.1,
-          top_p: 0.9,
+          temperature: 0.1, // [RESTORE-FIX] restored; 0.0 causes repetitive outputs on Gemma
+          top_p: 1.0,       // [OPT-6]
           stop: ["</s>", "<end_of_turn>", "<|end|>"],
         } as any);
 
@@ -2124,18 +2571,38 @@ export async function translateSegments(
         if (_isAppBackgrounded) await yieldToEventLoop();
         if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
 
-        const translations = parseBatchResponse(r.text, batch, patterns, tokenMaps, prevBatchTranslations);
+        const translations = parseBatchResponse(r.text, batch, patterns, tokenMaps, targetLanguage, prevBatchTranslations); // [THERMAL-OPT-V4]
 
         if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
         await yieldToEventLoop();
 
-        for (let i = 0; i < batch.length; i++) {
-          mergedTranslations[offset + i] = translations[i];
+        // Mini-idle: per-inference CPU rest.
+        // Strategy: prevent thermal accumulation rather than react to it.
+        // Level 1 idle is deliberately strong (320ms) so critical tier is
+        // never reached. Level 2 is emergency-only fallback (400ms).
+        // Background: only apply at critical (200ms) to avoid stalling service.
+        if (!isCancelled()) {
+          // [THERMAL-V5] Adaptive idle: scale with batch size so small batches cool
+          // quickly and large batches get proportionally more rest.
+          // Cap factor at 1.5 to prevent runaway idle on very large batches.
+          const _batchSizeFactor = Math.min(batch.length / 3, 1.5);
+          const miniIdleMs = _isAppBackgrounded
+            ? (_thermalLevel >= 2 ? 500 : _thermalLevel >= 1 ? 200 : 0)
+            : Math.round(
+                (_thermalLevel >= 2 ? 1800 : _thermalLevel >= 1 ? 1000 : 550)
+                * _batchSizeFactor
+              );
+          if (miniIdleMs > 0) await sleep(miniIdleMs);
+        }
+
+        // [OPT-3] Map translations back to mergedTranslations via complexIndices
+        for (let i = 0; i < complexBatchSlice.length; i++) {
+          mergedTranslations[complexBatchSlice[i]] = translations[i];
         }
 
         const partial = expandGroupTranslations(merged, mergedTranslations, cleaned);
         if (onProgress) {
-          const lastGroupInBatch = Math.min(offset + batch.length - 1, merged.length - 1);
+          const lastGroupInBatch = complexBatchSlice[complexBatchSlice.length - 1] ?? 0; // [OPT-3]
           const segmentsCompletedSoFar = segmentCountUpToGroup[lastGroupInBatch];
           await onProgress(segmentsCompletedSoFar, cleaned.length, mergeWithTranslations(cleaned, partial));
         }
@@ -2143,22 +2610,73 @@ export async function translateSegments(
         const now = Date.now();
         if (now - lastSaveTime >= SAVE_INTERVAL_MS) {
           lastSaveTime = now;
-          await saveCheckpoint(videoHash, { translatedTexts: mergedTranslations, lastBatchIndex: bi, properNouns, totalBatches });
+          await saveCheckpoint(videoHash, { translatedTexts: mergedTranslations, lastBatchIndex: bi, properNouns, totalBatches: complexBatchCount }); // [OPT-3]
         }
         if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
 
-        if (bi < totalBatches - 1) {
+        if (bi < complexBatchCount - 1) { // [OPT-3]
           const batchDuration = Date.now() - batchStartTime;
+
+          // Seed EMA FIRST so checkThermalPressure has a valid
+          // baseline from batch 1. Previously EMA was seeded inside
+          // updateEmaAndGetBgSleepMs which runs AFTER checkThermalPressure,
+          // causing ema=0 for first 2 batches → false level-up via
+          // cold-start fallback (raw > 10000ms).
+          if (emaBatchDurationMs === 0) {
+            // First batch is often anomalously slow (model warm-up, JIT, memory mapping).
+            // Seeding EMA with this value distorts the baseline for all subsequent batches.
+            // Instead, use a conservative fixed seed of 12000ms as a neutral starting point,
+            // then let the EMA converge naturally from batch 2 onward.
+            emaBatchDurationMs = 12000;
+            if (__DEV__) console.log(`[EMA] Cold-start seed fixed at 12000ms (actual first batch: ${batchDuration}ms)`);
+          } else {
+            // Lightweight EMA pre-update (same alpha as background path).
+            // updateEmaAndGetBgSleepMs will re-apply below for bg sleep calc;
+            // this pre-seed only ensures checkThermalPressure sees valid EMA.
+            emaBatchDurationMs = EMA_ALPHA_BG * batchDuration + (1 - EMA_ALPHA_BG) * emaBatchDurationMs;
+            if (__DEV__) console.log(`[EMA] Updated: raw=${batchDuration}ms ema=${Math.round(emaBatchDurationMs)}ms`);
+          }
+
           checkThermalPressure(batchDuration, emaBatchDurationMs);
+          // [THERMAL-FIX-4] If thermal just escalated to level 2, reload context with 1 thread
+          // This is the only effective way to reduce per-batch CPU load without stopping translation
+          if (_thermalLevel >= 2 && llamaContext) {
+            try {
+              const currentModelPath = MODEL_PATH.startsWith("file://") ? MODEL_PATH.slice(7) : MODEL_PATH;
+              const ctxToRelease = llamaContext;
+              llamaContext = null;
+              await ctxToRelease.release().catch(() => {});
+              await sleep(800);
+              llamaContext = await initLlama(
+                { model: currentModelPath, n_threads: 1, n_gpu_layers: 0, n_ctx: 1500, use_mlock: false } // [THERMAL-OPT-V4] increased from 1200; conversational segments run long
+              );
+              console.log('[THERMAL] Reloaded context with 1 thread due to critical thermal level');
+            } catch (reloadErr) {
+              console.warn('[THERMAL] Context reload failed, continuing with existing context:', reloadErr);
+            }
+          }
           const thermalSleep = getThermalSleepMs();
           const bgEmaSleep   = _isAppBackgrounded ? updateEmaAndGetBgSleepMs(batchDuration, bi) : 0;
-          const fgAdaptiveSleep = !_isAppBackgrounded ? (bi === startBatch ? 200 : Math.min(400, Math.max(200, Math.round(batchDuration * 0.18)))) : 0;
+          const fgAdaptiveSleep = !_isAppBackgrounded
+            ? (bi === startBatch
+                ? 500
+                : Math.min(900, Math.max(350, Math.round(batchDuration * 0.22))))
+            : 0;
           const sleepMs = Math.max(thermalSleep, bgEmaSleep, fgAdaptiveSleep);
           if (sleepMs > 0) await sleep(sleepMs);
           if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
+
+          // Periodic deeper cooldown: every 4 batches, insert an extra rest.
+          if (!_isAppBackgrounded && bi !== startBatch && (bi - startBatch) % 5 === 0) { // [OPT-7]
+            const periodicCooldownMs = _thermalLevel >= 2 ? 1200
+              : _thermalLevel >= 1 ? 700
+              : 450;
+            await sleep(periodicCooldownMs);
+            if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
+          }
         }
       }
-      await saveCheckpoint(videoHash, { translatedTexts: mergedTranslations, lastBatchIndex: totalBatches - 1, properNouns, totalBatches });
+      await saveCheckpoint(videoHash, { translatedTexts: mergedTranslations, lastBatchIndex: complexBatchCount - 1, properNouns, totalBatches: complexBatchCount }); // [OPT-3]
     } catch (e: any) {
       if (e?.message === 'INFERENCE_CANCELLED') throw e;
       if (e?.message === 'APP_BACKGROUNDED') throw e;
@@ -2171,6 +2689,12 @@ export async function translateSegments(
     }
 
     await deleteCheckpoint(videoHash);
+
+    // ── [THERMAL-OPT-V4] Cache write: store all successful group translations ─
+    for (let i = 0; i < merged.length; i++) { // [THERMAL-OPT-V4]
+      const t = mergedTranslations[i]; // [THERMAL-OPT-V4]
+      if (t && t.trim()) unifiedCacheSet(merged[i].text, targetLanguage, t); // [THERMAL-OPT-V4]
+    } // [THERMAL-OPT-V4]
 
     // ── Step E: postProcess (그룹 단위 번역에 직접 적용) ─────────────────────
     for (let i = 0; i < merged.length; i++) {
@@ -2195,10 +2719,41 @@ export async function translateSegments(
     const mergedForValidation: MergedGroup[] = merged.map((g) => ({ ...g }));
     const groupTranslationsForValidation = mergedTranslations.slice();
 
-    const validatedGroupTexts = await validateTranslations(
-      mergedForValidation, groupTranslationsForValidation,
-      finalPrompt, targetLanguage, patterns, isCancelled
-    );
+    // Skip validation re-inference when translation quality is already acceptable.
+    // Checks: no empty output, no corrupted headers, no untranslated (all-ASCII) output,
+    // and no placeholder leaks. If all pass, avoid the extra inference round.
+
+    const needsValidation = groupTranslationsForValidation.some((t, i) => {
+      if (groupIsSimple[i]) return false; // [OPT-2] simple groups never trigger re-inference
+      const src = mergedForValidation[i].text;
+
+      if (isFillerText(src)) return false;
+      if (!t || !t.trim()) return true;
+      const trimmed = t.trim();
+      if (trimmed.length === 1) return true;
+      if (/^##/.test(trimmed) || /^\[미번역\]/.test(trimmed) || /^---/.test(trimmed)) return true;
+      if (RE_PLACEHOLDER_LEAK.test(trimmed)) return true;
+      if (!profile.isLatinScript) {
+        const nonSpace = trimmed.replace(/\s/g, '');
+        const asciiCount = (nonSpace.match(/[a-zA-Z]/g) ?? []).length;
+        const asciiRatio = asciiCount / Math.max(nonSpace.length, 1);
+        if (nonSpace.length >= 6 && asciiRatio > 0.9) return true;
+      }
+
+      return false;
+    });
+
+    let validatedGroupTexts: string[];
+    if (!needsValidation) {
+      if (__DEV__) console.log('[TRANSLATE] Step G: quality check passed, skipping validation inference');
+      validatedGroupTexts = groupTranslationsForValidation;
+    } else {
+      if (__DEV__) console.log(`[TRANSLATE] Step G: validation needed for some groups`);
+      validatedGroupTexts = await validateTranslations(
+        mergedForValidation, groupTranslationsForValidation,
+        finalPrompt, targetLanguage, patterns, isCancelled
+      );
+    }
     if (isCancelled()) throw new Error('INFERENCE_CANCELLED');
 
     // ── Step H: expand (단 1회 실행) + postProcess ────────────────────────────
@@ -2216,5 +2771,9 @@ export async function translateSegments(
     const completed = adjustTimingsForReadability(mergeWithTranslations(cleaned, formatted));
     console.log(`[Gemma] Done: ${completed.length} segments.`);
     return completed;
+
+    } finally { // [THERMAL-OPT-V4.2]
+      _inferenceLock = false; // [THERMAL-OPT-V4.2] always release, even on throw or cancel
+    } // [THERMAL-OPT-V4.2]
   });
 }

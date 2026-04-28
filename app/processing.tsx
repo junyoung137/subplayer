@@ -12,6 +12,7 @@ import {
   Easing,
   BackHandler,
 } from "react-native";
+import { Svg, Circle, Text as SvgText } from 'react-native-svg';
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { X, Check } from 'lucide-react-native';
 import { router } from "expo-router";
@@ -28,13 +29,6 @@ import {
 } from "../services/processingServiceBridge";
 
 type CacheStatus = "checking" | "miss";
-type StageStatus = "done" | "active" | "waiting";
-
-interface StageInfo {
-  id: number;
-  label: string;
-  status: StageStatus;
-}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -52,127 +46,6 @@ async function getResumeInfo(videoUri: string): Promise<number | null> {
   }
 }
 
-// ── Stage row ─────────────────────────────────────────────────────────────────
-
-interface StageRowProps {
-  stage: StageInfo;
-  isLast: boolean;
-  /** Only provided when this stage is active */
-  animatedWidth?: Animated.Value;
-  subLabel?: string;
-  timeText?: string;
-}
-
-function StageRow({ stage, isLast, animatedWidth, subLabel, timeText }: StageRowProps) {
-  const isActive  = stage.status === "active";
-  const isDone    = stage.status === "done";
-
-  return (
-    <View style={[rowStyles.row, isActive && rowStyles.rowActive, !isLast && rowStyles.rowBorder]}>
-      {/* Status icon */}
-      <View style={rowStyles.iconWrap}>
-        {isDone ? (
-          <Check size={14} color="#22c55e" />
-        ) : isActive ? (
-          <ActivityIndicator size="small" color="#3b82f6" />
-        ) : (
-          <View style={rowStyles.iconCircle} />
-        )}
-      </View>
-
-      {/* Label + expanded content */}
-      <View style={rowStyles.content}>
-        <Text
-          style={[
-            rowStyles.label,
-            isActive  && rowStyles.labelActive,
-            isDone    && rowStyles.labelDone,
-          ]}
-        >
-          {stage.label}
-        </Text>
-
-        {isActive && animatedWidth && (
-          <>
-            {/* Sub-progress bar */}
-            <View style={rowStyles.barTrack}>
-              <Animated.View
-                style={[
-                  rowStyles.barFill,
-                  {
-                    width: animatedWidth.interpolate({
-                      inputRange:  [0, 100],
-                      outputRange: ["0%", "100%"],
-                      extrapolate: "clamp",
-                    }),
-                  },
-                ]}
-              />
-            </View>
-
-            {/* Sub-label (left) + time remaining (right) */}
-            <View style={rowStyles.barFooter}>
-              <Text style={rowStyles.subLabel} numberOfLines={1}>
-                {subLabel}
-              </Text>
-              {timeText ? (
-                <Text style={rowStyles.timeText}>{timeText}</Text>
-              ) : null}
-            </View>
-          </>
-        )}
-      </View>
-    </View>
-  );
-}
-
-const rowStyles = StyleSheet.create({
-  row: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-    paddingVertical: 14,
-    paddingHorizontal: 4,
-    gap: 12,
-  },
-  rowActive: {
-    backgroundColor: "#161616",
-    borderRadius: 10,
-    paddingHorizontal: 10,
-    marginHorizontal: -10,
-  },
-  rowBorder: { borderBottomWidth: 1, borderBottomColor: "#1c1c1c" },
-
-  iconWrap: { width: 22, height: 22, alignItems: "center", justifyContent: "center", marginTop: 1 },
-  iconCircle: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    borderWidth: 1.5,
-    borderColor: "#3a3a3a",
-  },
-
-  content: { flex: 1, gap: 6 },
-  label:        { fontSize: 14, color: "#444", fontWeight: "500" },
-  labelActive:  { color: "#fff", fontWeight: "700", fontSize: 15 },
-  labelDone:    { color: "#22c55e" },
-
-  barTrack: {
-    height: 4,
-    backgroundColor: "#202020",
-    borderRadius: 2,
-    overflow: "hidden",
-  },
-  barFill: { height: "100%", backgroundColor: "#3b82f6", borderRadius: 2 },
-
-  barFooter: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  subLabel: { color: "#666", fontSize: 11, flex: 1 },
-  timeText:  { color: "#444", fontSize: 11, textAlign: "right" },
-});
-
 // ── SmoothProgressBar ─────────────────────────────────────────────────────────
 
 type SmoothMode = 'heartbeat' | 'tween' | 'stuck' | 'done' | 'error';
@@ -181,9 +54,10 @@ interface SmoothProgressBarProps {
   percent: number;
   step:    string;
   isDone:  boolean;
+  onSmoothPercent?: (value: number) => void;
 }
 
-function SmoothProgressBar({ percent, step, isDone }: SmoothProgressBarProps) {
+function SmoothProgressBar({ percent, step, isDone, onSmoothPercent }: SmoothProgressBarProps) {
   const { t } = useTranslation();
   const smoothAnim      = useRef(new Animated.Value(0)).current;
   const smoothRef       = useRef(0);
@@ -191,17 +65,23 @@ function SmoothProgressBar({ percent, step, isDone }: SmoothProgressBarProps) {
   const [isStuck, setIsStuck]             = useState(false);
   const isStuckRef      = useRef(false);
   const animRunningRef  = useRef(false);
-  const bridgeActiveRef = useRef(false); // true during 150ms heartbeat→tween bridge
+  const bridgeActiveRef = useRef(false);
   const heartbeatRef    = useRef<ReturnType<typeof setInterval> | null>(null);
   const stuckTimerRef   = useRef<ReturnType<typeof setTimeout>  | null>(null);
   const animRef         = useRef<Animated.CompositeAnimation    | null>(null);
   const stepRef         = useRef(step);
   const prevModeRef     = useRef<SmoothMode>('tween');
 
-  // addListener: single writer of smoothRef.current
+  // addListener: single writer of smoothRef.current + onSmoothPercent callback
   useEffect(() => {
     const id = smoothAnim.addListener(({ value }) => { smoothRef.current = value; });
-    return () => smoothAnim.removeListener(id);
+    const listenerId = smoothAnim.addListener(({ value }) => {
+      onSmoothPercent?.(Math.round(value));
+    });
+    return () => {
+      smoothAnim.removeListener(id);
+      smoothAnim.removeListener(listenerId);
+    };
   }, [smoothAnim]);
 
   // Sync animated value → display text at ~5 fps to avoid 60fps re-renders
@@ -219,7 +99,6 @@ function SmoothProgressBar({ percent, step, isDone }: SmoothProgressBarProps) {
 
     const setSmooth = (v: number) => {
       smoothAnim.setValue(v);
-      // smoothRef.current is updated by the addListener callback — do NOT write here
     };
     const clearHB = () => {
       if (heartbeatRef.current !== null) { clearInterval(heartbeatRef.current); heartbeatRef.current = null; }
@@ -234,7 +113,7 @@ function SmoothProgressBar({ percent, step, isDone }: SmoothProgressBarProps) {
     const runTween = (target: number, dur: number, onDone?: () => void) => {
       animRef.current?.stop();
       animRef.current = null;
-      animRunningRef.current = true; // LOCK
+      animRunningRef.current = true;
       const a = Animated.timing(smoothAnim, {
         toValue:         target,
         duration:        dur,
@@ -243,14 +122,12 @@ function SmoothProgressBar({ percent, step, isDone }: SmoothProgressBarProps) {
       });
       animRef.current = a;
       a.start(({ finished }) => {
-        animRunningRef.current = false; // UNLOCK
-        // smoothRef.current is already synced by listener — no manual write needed
+        animRunningRef.current = false;
         if (finished) onDone?.();
       });
     };
 
     const executeMode = (mode: SmoothMode, pct: number, pm: SmoothMode) => {
-      // Fix 1: gate ALL modes except done/error when animation is running
       if (animRunningRef.current && mode !== 'done' && mode !== 'error') return;
 
       switch (mode) {
@@ -287,19 +164,18 @@ function SmoothProgressBar({ percent, step, isDone }: SmoothProgressBarProps) {
           break;
         }
         case 'tween': {
-          if (bridgeActiveRef.current) return; // Fix 3: bridge lock — yield entirely if bridge in progress
+          if (bridgeActiveRef.current) return;
           clearHB();
           const comingFromHeartbeat = pm === 'heartbeat' || pm === 'stuck';
           if (smoothRef.current > pct + 20) {
-            // Overshoot guard: snap to within 20 pp then tween
             runTween(pct, 200);
             break;
           }
           const duration = stepRef.current === 'translating' ? 1200 : 800;
           if (comingFromHeartbeat) {
-            bridgeActiveRef.current = true; // LOCK bridge
+            bridgeActiveRef.current = true;
             runTween(smoothRef.current, 150, () => {
-              bridgeActiveRef.current = false; // UNLOCK bridge
+              bridgeActiveRef.current = false;
               runTween(pct, duration);
             });
           } else {
@@ -318,18 +194,15 @@ function SmoothProgressBar({ percent, step, isDone }: SmoothProgressBarProps) {
       return 'tween';
     };
 
-    // Stuck recovery: real percent advanced while stuck
     if (isStuckRef.current && percent > 0) {
       isStuckRef.current = false;
       setIsStuck(false);
     }
 
-    // Execute current mode
     const mode = deriveModeFromState();
     executeMode(mode, percent, prevModeRef.current);
     prevModeRef.current = mode;
 
-    // Stuck detection: reset timer on every update — fires only if nothing changes for 4000 ms
     if (step === 'translating' && !isStuckRef.current && mode !== 'done' && mode !== 'error') {
       if (stuckTimerRef.current) { clearTimeout(stuckTimerRef.current); stuckTimerRef.current = null; }
       stuckTimerRef.current = setTimeout(() => {
@@ -353,7 +226,6 @@ function SmoothProgressBar({ percent, step, isDone }: SmoothProgressBarProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [percent, step, isDone]);
 
-  // ── Derived display values ───────────────────────────────────────────────────
   const isEstimate = (step === 'translating' && percent === 0) || isStuck;
   const pctText    = isDone
     ? "100%"
@@ -398,6 +270,37 @@ const smoothBarStyles = StyleSheet.create({
   statusMsg: { color: "#666", fontSize: 11, marginTop: 2 },
 });
 
+// ── CircularProgressRing ──────────────────────────────────────────────────────
+
+interface CircularRingProps {
+  percent: number;
+  isDone: boolean;
+}
+
+function CircularProgressRing({ percent, isDone }: CircularRingProps) {
+  const R = 80;
+  const circumference = 2 * Math.PI * R;
+  const dashOffset = circumference * (1 - percent / 100);
+  const strokeColor = isDone ? '#22c55e' : '#3b82f6';
+
+  return (
+    <Svg width={220} height={220} viewBox="0 0 200 200">
+      <Circle cx={100} cy={100} r={R}
+        stroke="#1e1e1e" strokeWidth={12} fill="none" />
+      <Circle cx={100} cy={100} r={R}
+        stroke={strokeColor} strokeWidth={12} fill="none"
+        strokeLinecap="round"
+        strokeDasharray={circumference}
+        strokeDashoffset={dashOffset}
+        transform="rotate(-90, 100, 100)" />
+      <SvgText x={100} y={116} textAnchor="middle"
+        fontSize={42} fontWeight="800" fill="#ffffff">
+        {isDone ? '100%' : `${percent}%`}
+      </SvgText>
+    </Svg>
+  );
+}
+
 // ── Screen ────────────────────────────────────────────────────────────────────
 
 export default function ProcessingScreen() {
@@ -405,30 +308,26 @@ export default function ProcessingScreen() {
   const videoUri           = usePlayerStore((s) => s.videoUri);
   const videoName          = usePlayerStore((s) => s.videoName);
   const setSubtitles       = usePlayerStore((s) => s.setSubtitles);
+  const appendSubtitles    = usePlayerStore((s) => s.appendSubtitles);
   const setPlaying         = usePlayerStore((s) => s.setPlaying);
   const storeIsProcessing  = usePlayerStore((s) => s.isProcessing);
   const storePercent       = usePlayerStore((s) => s.processingPercent);
-  const storeMessage       = usePlayerStore((s) => s.processingMessage);
 
   const targetLanguage = useSettingsStore((s) => s.targetLanguage);
 
   const { loaded: modelLoaded, loading: modelLoading, error: modelError } = useWhisperModel();
   const { progress, process, cancel } = useVideoProcessor();
 
-  const [cacheStatus,    setCacheStatus]  = useState<CacheStatus>("checking");
-  const [resumeCount,    setResumeCount]  = useState<number | null>(null);
-  const hasStartedRef     = useRef(false);
-  const serviceStartedRef = useRef(false);
-  const cancelledRef      = useRef(false);
+  const [cacheStatus,   setCacheStatus]   = useState<CacheStatus>("checking");
+  const [resumeCount,   setResumeCount]   = useState<number | null>(null);
+  const [earlyReady,    setEarlyReady]    = useState(false);
 
-  /** Peak values for completion detail text */
-  const peakRef = useRef({ transcribeTotal: 0, sentenceTotal: 0 });
-
-  // ── Animation + timing state ──────────────────────────────────────────────
-  const animatedProgress    = useRef(new Animated.Value(0)).current;
-  const indeterminateAnimRef = useRef<Animated.CompositeAnimation | null>(null);
-  const stageStartTimeRef   = useRef<Partial<Record<number, number>>>({});
-  const [timeText, setTimeText] = useState<string>("");
+  const hasStartedRef         = useRef(false);
+  const serviceStartedRef     = useRef(false);
+  const cancelledRef          = useRef(false);
+  const earlyPlaybackFiredRef = useRef(false);
+  const navigationDoneRef     = useRef(false);
+  const earlyReadyFiredRef    = useRef(false);
 
   // ── Effect 1: cache check + resume detection ──────────────────────────────
   useEffect(() => {
@@ -484,26 +383,68 @@ export default function ProcessingScreen() {
       hasStartedRef.current = true;
       startBackgroundProcessing();
       serviceStartedRef.current = true;
-      process(videoUri).then(({ success, translationSkipped }) => {
+
+      const handleEarlyPlayback = (
+        initialSubtitles: import('../store/usePlayerStore').SubtitleSegment[]
+      ) => {
         if (cancelledRef.current) return;
-        stopBackgroundProcessing();
-        serviceStartedRef.current = false;
-        if (success) {
-          setPlaying(true);
-          if (translationSkipped) {
-            Alert.alert(
-              t("processing.noTranslationModel"),
-              t("processing.noTranslationModelMsg"),
-              [
-                { text: t("processing.modelManage"), onPress: () => router.replace("/models") },
-                { text: t("processing.continueWithOriginal"), onPress: () => router.replace("/player") },
-              ]
-            );
-          } else {
-            setTimeout(() => router.replace("/player"), 1000);
-          }
+        if (earlyPlaybackFiredRef.current) return;
+        earlyPlaybackFiredRef.current = true;
+        navigationDoneRef.current = true;
+        setSubtitles(initialSubtitles);
+        setPlaying(true);
+        // Force ring to 100% so user sees completion before navigation
+        monotonicRef.current = 100;
+        setRingPercent(100);
+        if (!earlyReadyFiredRef.current) {
+          earlyReadyFiredRef.current = true;
+          setEarlyReady(true);
         }
-      });
+        // Delay navigation so the 100% ring renders first
+        setTimeout(() => {
+          if (!cancelledRef.current) router.replace("/player");
+        }, 400);
+      };
+
+      const handlePartialUpdate = (
+        newSubtitles: import('../store/usePlayerStore').SubtitleSegment[]
+      ) => {
+        if (cancelledRef.current) return;
+        if (!earlyPlaybackFiredRef.current) return;
+        appendSubtitles(newSubtitles);
+      };
+
+      process(videoUri, handleEarlyPlayback, handlePartialUpdate)
+        .then(({ success, translationSkipped }) => {
+          if (cancelledRef.current) return;
+          stopBackgroundProcessing();
+          serviceStartedRef.current = false;
+
+          if (navigationDoneRef.current) {
+            if (success && !translationSkipped) {
+              // Final complete subtitles are set by useVideoProcessor
+              // via setSubtitles() after processVideo() resolves.
+              // No navigation needed.
+            }
+            return;
+          }
+
+          if (success) {
+            setPlaying(true);
+            if (translationSkipped) {
+              Alert.alert(
+                t("processing.noTranslationModel"),
+                t("processing.noTranslationModelMsg"),
+                [
+                  { text: t("processing.modelManage"), onPress: () => router.replace("/models") },
+                  { text: t("processing.continueWithOriginal"), onPress: () => router.replace("/player") },
+                ]
+              );
+            } else {
+              setTimeout(() => router.replace("/player"), 1000);
+            }
+          }
+        });
     }
   }, [cacheStatus, modelLoaded, modelError, videoUri, storeIsProcessing]);
 
@@ -513,186 +454,100 @@ export default function ProcessingScreen() {
     updateBackgroundProgress(progress.percent, progress.message);
   }, [progress.percent, progress.message]);
 
-  // ── Effect 4: track peak values for completion text ───────────────────────
-  useEffect(() => {
-    if (progress.step === "transcribing" && progress.total > 0) {
-      peakRef.current.transcribeTotal = progress.total;
-    }
-    if (progress.step === "translating" && progress.total > 0) {
-      peakRef.current.sentenceTotal = progress.total;
-    }
-  }, [progress]);
-
   // ── Stage derivation ──────────────────────────────────────────────────────
   const displayPercent = progress.percent > 0 ? progress.percent : storePercent;
-  const displayMessage = progress.message || storeMessage;
 
   const isWaitingForModel = modelLoading || (!modelLoaded && !modelError);
   const isDone  = progress.step === "done";
   const isError = progress.step === "error";
 
-  // When reconnecting, derive stage from store percent
-  let effStep    = progress.step as string;
-  let effCurrent = progress.current;
-  let effTotal   = progress.total;
+  let effStep = progress.step as string;
 
   if (progress.percent === 0 && storeIsProcessing && storePercent > 0) {
-    if      (storePercent < 10) effStep = "extracting";
-    else if (storePercent < 90) effStep = "transcribing";
-    else if (storePercent < 94) effStep = "unloading";
+    if      (storePercent < 5)  effStep = "extracting";
+    else if (storePercent < 45) effStep = "transcribing";
+    else if (storePercent < 50) effStep = "unloading";
     else                        effStep = "translating";
-    effCurrent = 0;
-    effTotal   = 0;
   }
 
-  let currentStageIdx = 0;
-  if      (effStep === "extracting" && displayPercent > 0)            currentStageIdx = 1;
-  else if (effStep === "transcribing")                                 currentStageIdx = 2;
-  else if (effStep === "unloading" || (effStep === "translating" && effCurrent === 0)) currentStageIdx = 3;
-  else if (effStep === "translating" && effCurrent > 0)               currentStageIdx = 4;
-  else if (effStep === "done")                                         currentStageIdx = 5;
+  // ── Monotonic progress ──────────────────────────────────────────────────────
+  // Uses fine-grained progress.current / progress.total per step so each
+  // STT chunk and translation batch produces visible ring movement.
 
-  const translationWasSkipped = isDone && peakRef.current.sentenceTotal === 0;
+  const monotonicRef = useRef(0);
+  const ringAnimRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [ringPercent, setRingPercent] = useState(0);
 
-  const getStatus = (id: number): StageStatus => {
-    if (currentStageIdx === 0) return "waiting";
-    if (isDone) {
-      if (translationWasSkipped && id >= 3) return "waiting";
-      return "done";
-    }
-    if (id < currentStageIdx) return "done";
-    if (id === currentStageIdx) return "active";
-    return "waiting";
-  };
-
-  const stages: StageInfo[] = [
-    { id: 1, label: t("processing.extractAudio"),       status: getStatus(1) },
-    { id: 2, label: t("processing.transcribe"),         status: getStatus(2) },
-    { id: 3, label: t("processing.loadTranslationModel"), status: getStatus(3) },
-    { id: 4, label: t("processing.translating"),        status: getStatus(4) },
-  ];
-
-  const activeStageId = stages.find((s) => s.status === "active")?.id ?? null;
-
-  // ── Effect 5: animate bar + record start time when stage changes ──────────
   useEffect(() => {
-    if (currentStageIdx >= 1 && currentStageIdx <= 4) {
-      if (!stageStartTimeRef.current[currentStageIdx]) {
-        stageStartTimeRef.current[currentStageIdx] = Date.now();
-      }
+    // videoProcessor now emits unified timeline percent for all steps.
+    // Trust it directly; only apply monotonic guard here.
+    let computed: number;
+
+    if (isDone) {
+      computed = 100;
+    } else if (progress.step === 'error') {
+      computed = monotonicRef.current; // freeze on error
+    } else if (progress.percent > 0) {
+      computed = progress.percent;
+    } else {
+      computed = monotonicRef.current; // no regression if percent=0
     }
 
-    // Reset bar and stop any running indeterminate animation
-    animatedProgress.setValue(0);
-    indeterminateAnimRef.current?.stop();
-    indeterminateAnimRef.current = null;
-    setTimeText(t("processing.calculating"));
+    // Monotonic guard: never go backward
+    if (computed > monotonicRef.current) {
+      monotonicRef.current = computed;
+      setRingPercent(Math.round(computed));
+    }
 
-    // Indeterminate animation for stages 1 (fast) and 3 (slow)
-    if (currentStageIdx === 1) {
-      const anim = Animated.timing(animatedProgress, {
-        toValue: 85,
-        duration: 10_000,
-        useNativeDriver: false,
-      });
-      indeterminateAnimRef.current = anim;
-      anim.start();
-    } else if (currentStageIdx === 3) {
-      const anim = Animated.timing(animatedProgress, {
-        toValue: 70,
-        duration: 14_000,
-        useNativeDriver: false,
-      });
-      indeterminateAnimRef.current = anim;
-      anim.start();
+    // Clear any previous ticker
+    if (ringAnimRef.current !== null) {
+      clearInterval(ringAnimRef.current);
+      ringAnimRef.current = null;
+    }
+
+    // Only animate during translation phase; other phases update
+    // infrequently enough that direct setRingPercent is fine.
+    if (progress.step === 'translating' && !isDone) {
+      const target = monotonicRef.current;
+      ringAnimRef.current = setInterval(() => {
+        setRingPercent(prev => {
+          if (prev >= target) {
+            clearInterval(ringAnimRef.current!);
+            ringAnimRef.current = null;
+            return prev;
+          }
+          return Math.min(prev + 1, target);
+        });
+      }, 120);  // advance 1% every 120ms → smooth over ~0.5s per 4% step
     }
 
     return () => {
-      indeterminateAnimRef.current?.stop();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentStageIdx]);
-
-  // ── Effect 6: animate bar for determinate stages (2 and 4) ───────────────
-  useEffect(() => {
-    if (currentStageIdx !== 2 && currentStageIdx !== 4) return;
-    if (effTotal <= 0) return;
-    const sp = Math.round((effCurrent / effTotal) * 100);
-    Animated.timing(animatedProgress, {
-      toValue: sp,
-      duration: 300,
-      useNativeDriver: false,
-    }).start();
-  }, [effCurrent, effTotal, currentStageIdx]);
-
-  // ── Effect 7: compute estimated time remaining every second ───────────────
-  useEffect(() => {
-    // Only compute for stages with real sub-progress
-    if (currentStageIdx !== 2 && currentStageIdx !== 4) {
-      // Indeterminate stages — keep calculating text
-      setTimeText(t("processing.calculating"));
-      return;
-    }
-    if (effTotal <= 0) return;
-
-    const realSp = Math.round((effCurrent / effTotal) * 100);
-
-    if (realSp < 5) {
-      setTimeText(t("processing.calculating"));
-      return;
-    }
-    if (realSp >= 98) {
-      setTimeText(t("processing.completing"));
-      return;
-    }
-
-    const startTime = stageStartTimeRef.current[currentStageIdx] ?? Date.now();
-
-    const compute = () => {
-      const elapsed = (Date.now() - startTime) / 1000;
-      if (elapsed < 3) {
-        setTimeText(t("processing.calculating"));
-        return;
-      }
-      const rate = realSp / elapsed; // % per second
-      if (rate <= 0) return;
-      const remaining = Math.max(0, (100 - realSp) / rate);
-      if (remaining > 60) {
-        const m = Math.floor(remaining / 60);
-        const s = Math.round(remaining % 60);
-        setTimeText(t("processing.timeMinSec", { m, s }));
-      } else {
-        setTimeText(t("processing.timeSec", { s: Math.round(remaining) }));
+      if (ringAnimRef.current !== null) {
+        clearInterval(ringAnimRef.current);
+        ringAnimRef.current = null;
       }
     };
+  }, [progress.step, progress.percent, isDone]);
 
-    compute();
-    const interval = setInterval(compute, 1000);
-    return () => clearInterval(interval);
-  }, [currentStageIdx, effCurrent, effTotal]);
-
-  // ── Hardware back button: route through handleCancel ──────────────────────
+  // Reset on new video
   useEffect(() => {
-    const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
-      handleCancel();
-      return true;
-    });
-    return () => subscription.remove();
-  }, [handleCancel]);
-
-  // ── Sub-label for the active stage ────────────────────────────────────────
-  const activeSubLabel: string = (() => {
-    switch (activeStageId) {
-      case 1: return t("processing.convertingAudio");
-      case 2: return effTotal > 0 ? t("processing.chunk", { current: effCurrent, total: effTotal }) : t("processing.analyzing");
-      case 3:
-        if (displayMessage.includes("언로드"))  return t("processing.whisperUnloading");
-        if (displayMessage.includes("안정화"))  return t("processing.memoryStabilizing");
-        return t("processing.modelInitializing");
-      case 4: return effTotal > 0 ? t("processing.sentencesTranslated", { current: effCurrent, total: effTotal }) : t("processing.preparing");
-      default: return "";
+    monotonicRef.current = 0;
+    setRingPercent(0);
+    if (ringAnimRef.current !== null) {
+      clearInterval(ringAnimRef.current);
+      ringAnimRef.current = null;
     }
-  })();
+  }, [videoUri]);
+
+  // Force 100 on done
+  useEffect(() => {
+    if (isDone) {
+      monotonicRef.current = 100;
+      setRingPercent(100);
+    }
+  }, [isDone]);
+
+  // ── End monotonic progress ──────────────────────────────────────────────────
 
   const handleCancel = useCallback(() => {
     cancelledRef.current = true;
@@ -703,6 +558,15 @@ export default function ProcessingScreen() {
     }
     setTimeout(() => router.back(), 100);
   }, [cancel]);
+
+  // ── Hardware back button: route through handleCancel ──────────────────────
+  useEffect(() => {
+    const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
+      handleCancel();
+      return true;
+    });
+    return () => subscription.remove();
+  }, [handleCancel]);
 
   // ── Cache-checking UI ─────────────────────────────────────────────────────
   if (cacheStatus === "checking") {
@@ -760,33 +624,48 @@ export default function ProcessingScreen() {
           </View>
         )}
 
+        {/* Ring area */}
         {!isError && (
-          <>
-            {/* ── Overall progress bar ───────────────────────────────────── */}
-            <SmoothProgressBar percent={displayPercent} step={effStep} isDone={isDone} />
+          <View style={{
+            flex: 1,
+            alignItems: 'center',
+            justifyContent: 'center',
+            paddingBottom: 24,
+          }}>
+            <CircularProgressRing
+              percent={ringPercent}
+              isDone={isDone}
+            />
 
-            {/* ── Stage list ─────────────────────────────────────────────── */}
-            <View style={styles.stageCard}>
-              {stages.map((stage, idx) => (
-                <StageRow
-                  key={stage.id}
-                  stage={stage}
-                  isLast={idx === stages.length - 1}
-                  animatedWidth={stage.status === "active" ? animatedProgress : undefined}
-                  subLabel={stage.status === "active" ? activeSubLabel : undefined}
-                  timeText={stage.status === "active" ? timeText : undefined}
-                />
-              ))}
-            </View>
-          </>
-        )}
+            {/* STATUS: before earlyReady */}
+            {!earlyReady && !isDone && (
+              <View style={ringStyles.statusRow}>
+                <ActivityIndicator size="small" color="#3b82f6" />
+                <Text style={ringStyles.statusText}>앞부분 자막 준비 중...</Text>
+              </View>
+            )}
 
-        {/* Done card */}
-        {isDone && (
-          <View style={styles.doneCard}>
-            <Check size={32} color="#22c55e" />
-            <Text style={styles.doneTitle}>{t("processing.done")}</Text>
-            <Text style={styles.doneSubtitle}>{t("processing.doneSubtitle")}</Text>
+            {/* STATUS: earlyReady but still processing */}
+            {earlyReady && !isDone && (
+              <View style={{ alignItems: 'center', gap: 8, marginTop: 16 }}>
+                <View style={ringStyles.statusRow}>
+                  <Check size={16} color="#22c55e" />
+                  <Text style={ringStyles.readyText}>지금 재생 가능</Text>
+                </View>
+                <Text style={ringStyles.hintText}>뒤쪽 자막은 자동 생성 중입니다</Text>
+                <Text style={ringStyles.hintSubText}>
+                  재생 중 자막이 없는 구간은 잠시 후 자동으로 표시됩니다
+                </Text>
+              </View>
+            )}
+
+            {/* STATUS: done */}
+            {isDone && (
+              <View style={ringStyles.statusRow}>
+                <Check size={16} color="#22c55e" />
+                <Text style={ringStyles.doneText}>완료! 재생을 시작합니다...</Text>
+              </View>
+            )}
           </View>
         )}
 
@@ -801,6 +680,15 @@ export default function ProcessingScreen() {
   );
 }
 
+const ringStyles = StyleSheet.create({
+  statusRow:   { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 14 },
+  statusText:  { color: '#888', fontSize: 14 },
+  readyText:   { color: '#22c55e', fontSize: 16, fontWeight: '700' },
+  hintText:    { color: '#4ade80', fontSize: 13, textAlign: 'center' },
+  hintSubText: { color: '#555', fontSize: 11, textAlign: 'center', paddingHorizontal: 28 },
+  doneText:    { color: '#22c55e', fontSize: 14 },
+});
+
 const styles = StyleSheet.create({
   safe:  { flex: 1, backgroundColor: "#0a0a0a" },
   scroll: { flex: 1 },
@@ -811,7 +699,6 @@ const styles = StyleSheet.create({
     paddingBottom: 48,
   },
 
-  // Center layout for cache-checking screen
   centerContainer: {
     flex: 1,
     padding: 24,
@@ -867,8 +754,8 @@ const styles = StyleSheet.create({
   errorTitle:  { color: "#ef4444", fontSize: 16, fontWeight: "700" },
   errorDetail: { color: "#888", fontSize: 12, textAlign: "center" },
 
-  // Overall progress
-  overallWrap: { width: "100%" , gap: 6 },
+  // Used by SmoothProgressBar (component kept, not mounted in ProcessingScreen)
+  overallWrap: { width: "100%", gap: 6 },
   overallRow:  { flexDirection: "row", justifyContent: "space-between" },
   overallLabel:   { color: "#555", fontSize: 12 },
   overallPercent: { color: "#999", fontSize: 12, fontWeight: "600" },
@@ -882,18 +769,6 @@ const styles = StyleSheet.create({
   overallFill:     { height: "100%", backgroundColor: "#3b82f6", borderRadius: 2 },
   overallFillDone: { backgroundColor: "#22c55e" },
 
-  // Stage list card
-  stageCard: {
-    backgroundColor: "#0e0e0e",
-    borderRadius: 14,
-    paddingVertical: 4,
-    paddingHorizontal: 16,
-    width: "100%",
-    borderWidth: 1,
-    borderColor: "#1a1a1a",
-  },
-
-  // Simple card (cache-checking)
   simpleCard: {
     backgroundColor: "#111",
     borderRadius: 16,
@@ -905,20 +780,6 @@ const styles = StyleSheet.create({
     borderColor: "#1e1e1e",
   },
   simpleCardText: { color: "#fff", fontSize: 15, fontWeight: "600" },
-
-  // Done card
-  doneCard: {
-    backgroundColor: "#071510",
-    borderRadius: 14,
-    padding: 24,
-    width: "100%",
-    alignItems: "center",
-    gap: 6,
-    borderWidth: 1,
-    borderColor: "#14532d",
-  },
-  doneTitle:    { color: "#22c55e", fontSize: 17, fontWeight: "700" },
-  doneSubtitle: { color: "#4ade80", fontSize: 13 },
 
   cancelBtn: {
     marginTop: 4,

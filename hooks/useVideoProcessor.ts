@@ -50,7 +50,15 @@ export function useVideoProcessor() {
   settingsRef.current = { sourceLanguage, targetLanguage, thermalProtection };
 
   const process = useCallback(
-    async (videoUri: string): Promise<ProcessResult> => {
+    async (
+      videoUri: string,
+      onEarlyPlaybackReady?: (
+        subtitles: import('../store/usePlayerStore').SubtitleSegment[]
+      ) => void,
+      onPartialUpdate?: (
+        subtitles: import('../store/usePlayerStore').SubtitleSegment[]
+      ) => void,
+    ): Promise<ProcessResult> => {
       cancelledRef.current = false;
       clearSubtitles();
       setProcessing(true);
@@ -71,6 +79,8 @@ export function useVideoProcessor() {
           () => cancelledRef.current,
           // [FIX 5] thermalProtection 설정값 전달
           tp,
+          onEarlyPlaybackReady,
+          onPartialUpdate,
         );
 
         if (cancelledRef.current) return { success: false, translationSkipped: false };

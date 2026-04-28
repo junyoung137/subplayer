@@ -3,6 +3,9 @@ import { SubtitleSegment } from "../store/usePlayerStore";
 
 const PREFIX = "realtimesub_cache_";
 
+const MAX_SUBTITLE_CACHE_ENTRIES = 20;
+const EVICTION_TRIGGER = MAX_SUBTITLE_CACHE_ENTRIES + 5;
+
 export interface SubtitleCacheEntry {
   videoUri: string;
   subtitles: SubtitleSegment[];
@@ -77,6 +80,43 @@ export async function saveSubtitleCache(
       cacheKey(videoUri, targetLanguage),
       JSON.stringify(entry)
     );
+
+    try {
+      // WARNING: getAllKeys() scans entire AsyncStorage.
+      // Acceptable here — subtitle cache stays small (<30 entries typical).
+      // Do NOT copy this pattern for high-frequency writes elsewhere.
+      const allKeys   = await AsyncStorage.getAllKeys();
+      const cacheKeys = allKeys.filter(k => k.startsWith(PREFIX));
+
+      if (cacheKeys.length > EVICTION_TRIGGER) {
+        // Sort by timestamp in the stored value — do NOT rely on key ordering.
+        const raw = await AsyncStorage.multiGet(cacheKeys);
+        const parsed = raw
+          .map(([key, val]) => {
+            try {
+              const obj = JSON.parse(val ?? '{}');
+              return {
+                key,
+                timestamp: typeof obj.createdAt === 'number' ? obj.createdAt : 0,
+              };
+            } catch {
+              return { key, timestamp: 0 };
+            }
+          })
+          .sort((a, b) => a.timestamp - b.timestamp);  // oldest first
+
+        const toDelete = parsed
+          .slice(0, parsed.length - MAX_SUBTITLE_CACHE_ENTRIES)
+          .map(e => e.key);
+
+        if (toDelete.length > 0) {
+          await AsyncStorage.multiRemove(toDelete);
+          console.log(`[SubtitleCache] evicted ${toDelete.length} old entries`);
+        }
+      }
+    } catch (evictErr) {
+      console.warn("[subtitleCache] Eviction failed (non-fatal):", evictErr);
+    }
   } catch (e) {
     console.warn("[subtitleCache] Failed to save:", e);
   }

@@ -50,8 +50,8 @@ const TIERS: ThermalTier[] = [
 //         elevated → critical 전환이 너무 민감하게 반응하는 문제 완화.
 //         downgrade(0.35 미만) 기준도 함께 낮춰 recovery 속도 유지.
 function classify(smoothedValue: number): 0 | 1 | 2 {
-  if (smoothedValue < 0.35) return 0;
-  if (smoothedValue < 0.70) return 1;
+  if (smoothedValue < 0.28) return 0;
+  if (smoothedValue < 0.55) return 1;
   return 2;
 }
 

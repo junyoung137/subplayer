@@ -91,6 +91,10 @@ export function isModelLoaded(): boolean {
   return whisperContext !== null;
 }
 
+export function getLoadedModelPath(): string | null {
+  return loadedModelPath;
+}
+
 /**
  * 문장 부호 기준으로 텍스트를 분할.
  * 핵심: 문장 부호 없이 끝나는 마지막 조각도 반드시 포함.

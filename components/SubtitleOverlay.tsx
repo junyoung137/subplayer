@@ -5,23 +5,12 @@ import {
   Animated,
   StyleSheet,
   PanResponder,
+  ActivityIndicator,
 } from "react-native";
 import { usePlayerStore, SubtitleSegment } from "../store/usePlayerStore";
 import { useSettingsStore } from "../store/useSettingsStore";
 import { SubtitleEditModal } from "./SubtitleEditModal";
 import { getLanguageProfile } from "../constants/languageProfiles";
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Changelog (최종 완성형)
-//
-// [FINAL-OPT-1] MAX_DURATION_S = 4.5초
-// [FINAL-OPT-2] MIN_DISPLAY_S = 1.2초
-// [FINAL-OPT-3] MAX_MERGED_CHARS = 36자
-// [FINAL-OPT-4] MAX_READING_SPEED = 12.5 char/s
-// [ADVANCED-1] Dynamic Hold (짧은 자막 빠르게, 긴 자막 여유롭게)
-// [CRITICAL-FIX] findActiveDisplayLine 완전 수정
-//              → 자막 종료 후 0.2초만 hold, 이후 무조건 null (10초 유지 버그 완전 해결)
-// ─────────────────────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -35,7 +24,7 @@ interface DisplayLine {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Constants — 넷플릭스급 최적값
+// Constants
 // ─────────────────────────────────────────────────────────────────────────────
 const MAX_LINE_CHARS = 22;
 const MAX_MERGE_GAP_S = 0.4;
@@ -45,8 +34,8 @@ const MAX_READING_SPEED = 12.5;
 const MAX_DURATION_S = 4.5;
 const MIN_DISPLAY_S = 1.2;
 
-const MAX_HOLD_GAP_S = 0.30;     // Dynamic Hold 최대치
-const HOLD_AFTER_END = 0.7;      // 자막 종료 후 살짝 유지 시간 (부드러운 전환용)
+const MAX_HOLD_GAP_S = 0.30;
+const HOLD_AFTER_END = 0.7;
 
 const BLANK_PATTERNS = [
   "[BLANK_AUDIO]", "[BLANK_VIDEO]", "[blank_audio]", "[silence]", "[SILENCE]",
@@ -69,9 +58,7 @@ function isBlankText(text: string): boolean {
 
 function cleanSubtitleText(text: string): string {
   if (!text) return "";
-  // Remove leading dialogue dash (e.g. "- File goes cold." → "File goes cold.")
   text = text.replace(/^-\s*/, "");
-  // Normalize ellipsis: "... ..." → "..."
   text = text.replace(/\.\.\.\s*\.\.\./g, "...");
   text = text.replace(/\.{4,}/g, "...");
   text = text.replace(/\.\s*\.\s*\.\s*\.\s*\./g, "...");
@@ -96,7 +83,6 @@ function splitIntoTwoLines(text: string): [string, string] {
 
   const mid = Math.floor(t.length / 2);
 
-  // 1순위: 조사 앞
   {
     let bestPos = -1, bestDist = Infinity;
     RE_KO_PARTICLE.lastIndex = 0;
@@ -116,7 +102,6 @@ function splitIntoTwoLines(text: string): [string, string] {
     }
   }
 
-  // 2순위: 한국어 접속사
   {
     let bestPos = -1, bestDist = Infinity;
     RE_KO_CONJUNCT.lastIndex = 0;
@@ -136,7 +121,6 @@ function splitIntoTwoLines(text: string): [string, string] {
     }
   }
 
-  // 3순위: 영어 접속사
   {
     let bestPos = -1, bestDist = Infinity;
     RE_EN_CONJUNCT.lastIndex = 0;
@@ -156,7 +140,6 @@ function splitIntoTwoLines(text: string): [string, string] {
     }
   }
 
-  // 4순위: 중간 공백
   {
     const spaces: number[] = [];
     for (let i = 0; i < t.length; i++) {
@@ -266,7 +249,7 @@ function buildDisplayLines(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// findActiveDisplayLine — 핵심 수정 완료
+// findActiveDisplayLine
 // ─────────────────────────────────────────────────────────────────────────────
 function findActiveDisplayLine(
   lines: DisplayLine[],
@@ -290,10 +273,6 @@ function findActiveDisplayLine(
     }
   }
 
-  // Only hold the previous segment if we are naturally just past its
-  // end (not after a seek jump). The hold must be within HOLD_AFTER_END
-  // seconds AND the segment must have ended very recently in wall-clock
-  // terms (endTime close to currentTime).
   const prev = lines[hi];
   if (
     prev &&
@@ -304,6 +283,24 @@ function findActiveDisplayLine(
   }
 
   return null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// findSubtitleIndexAtTime — binary search for processing indicator
+// ─────────────────────────────────────────────────────────────────────────────
+function findSubtitleIndexAtTime(
+  subtitles: SubtitleSegment[],
+  time: number
+): number {
+  let lo = 0, hi = subtitles.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >>> 1;
+    const seg = subtitles[mid];
+    if (time < seg.startTime - 0.5)     hi = mid - 1;
+    else if (time > seg.endTime + 1.5)  lo = mid + 1;
+    else                                return mid;
+  }
+  return -1;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -323,9 +320,10 @@ export function SubtitleOverlay() {
   const positionPctRef = useRef(subtitlePositionPct);
   positionPctRef.current = subtitlePositionPct;
 
-  const subtitles = usePlayerStore((s) => s.subtitles);
+  const subtitles   = usePlayerStore((s) => s.subtitles);
   const currentTime = usePlayerStore((s) => s.currentTime);
   const seekVersion = usePlayerStore((s) => s.seekVersion);
+  const isProcessing = usePlayerStore((s) => s.isProcessing);
 
   const [containerHeight, setContainerHeight] = useState(0);
   const containerHeightRef = useRef(0);
@@ -423,7 +421,6 @@ export function SubtitleOverlay() {
     [displayLines, adjustedTime, seekVersion],
   );
 
-  // Dynamic Hold + MIN_DISPLAY_S 적용
   useEffect(() => {
     const isSeeked = seekVersion !== prevSeekVersion.current;
     if (isSeeked) prevSeekVersion.current = seekVersion;
@@ -463,7 +460,6 @@ export function SubtitleOverlay() {
     }
   }, [adjustedTime, candidate?.segmentId, seekVersion]);
 
-  // Fade Animation
   useEffect(() => {
     const prev = renderedLine;
     const next = displayedLine;
@@ -503,6 +499,15 @@ export function SubtitleOverlay() {
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [displayedLine?.segmentId]);
+
+  // ── Processing indicator logic ────────────────────────────────────────────
+  const showProcessingIndicator = useMemo(() => {
+    if (!isProcessing) return false;
+    if (subtitles.length === 0) return false;
+    const lastEnd = subtitles[subtitles.length - 1].endTime;
+    if (currentTime <= lastEnd + 2.0) return false;
+    return findSubtitleIndexAtTime(subtitles, currentTime) === -1;
+  }, [isProcessing, subtitles, currentTime]);
 
   const topStyle = containerHeight > 0
     ? { top: containerHeight * activePct }
@@ -625,6 +630,19 @@ export function SubtitleOverlay() {
       {subtitleStyle === "pill" && renderPill()}
       {subtitleStyle === "bar" && renderBar()}
 
+      {/* [C] Processing indicator — spinner mandatory */}
+      {showProcessingIndicator && !renderedLine && (
+        <View
+          style={[styles.processingIndicatorWrap, topStyle]}
+          pointerEvents="none"
+        >
+          <ActivityIndicator size="small" color="rgba(255,255,255,0.55)" />
+          <Text style={styles.processingIndicatorText}>
+            자막 생성 중 · 자동으로 이어집니다
+          </Text>
+        </View>
+      )}
+
       <SubtitleEditModal
         segment={editingSegment}
         onClose={() => setEditingSegment(null)}
@@ -702,5 +720,19 @@ const styles = StyleSheet.create({
   barTranslated: {
     fontWeight: "700",
     textAlign: "center",
+  },
+  processingIndicatorWrap: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+  },
+  processingIndicatorText: {
+    color: 'rgba(255,255,255,0.55)',
+    fontSize: 12,
+    fontWeight: '500',
   },
 });
