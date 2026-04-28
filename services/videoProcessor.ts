@@ -106,11 +106,49 @@ function mergeSegmentsIntoSentences(segments: RawSegment[]): RawSegment[] {
 
   for (let i = 1; i < segments.length; i++) {
     const next = segments[i];
+
+    // Guard: never split a decimal clock time across segments.
+    // Matches "...at 10." (current ends with \d{1,2}.) + "45." or "45" (next starts with [0-5]\d).
+    if (/\b\d{1,2}\.$/.test(current.text) && /^[0-5]\d\b/.test(next.text.trimStart())) {
+      current = {
+        startTime: current.startTime,
+        endTime:   next.endTime,
+        text:      current.text + " " + next.text,
+        language:  current.language,
+      };
+      continue;
+    }
+
     const combinedText     = current.text + " " + next.text;
     const combinedDuration = next.endTime - current.startTime;
 
     const wouldExceedDuration = combinedDuration > MAX_MERGE_DURATION;
     const wouldExceedChars    = combinedText.length > MAX_MERGE_CHARS;
+
+    // FIX 2: Dangling sentence-opener guard.
+    // If a break is about to fire but current doesn't end a sentence and next
+    // is a short dangling opener (≤3 words, starts lowercase or is a connector),
+    // merge unconditionally to avoid orphaning fragments like "with you."
+    if (wouldExceedDuration || wouldExceedChars) {
+      const currentEndsWithSentence = /[.?!。]$/.test(current.text.trimEnd());
+      if (!currentEndsWithSentence) {
+        const nextTrimmed = next.text.trim();
+        const nextWords   = nextTrimmed.split(/\s+/);
+        const isDanglingOpener =
+          nextWords.length <= 3 &&
+          (/^[a-z]/.test(nextTrimmed) ||
+           /^(with|for|and|but|or|to|in|at|of|by|the|a|an)\b/i.test(nextTrimmed));
+        if (isDanglingOpener) {
+          current = {
+            startTime: current.startTime,
+            endTime:   next.endTime,
+            text:      combinedText,
+            language:  current.language,
+          };
+          continue;
+        }
+      }
+    }
 
     if (wouldExceedDuration || wouldExceedChars) {
       merged.push({ ...current, text: cleanSegmentText(current.text) });

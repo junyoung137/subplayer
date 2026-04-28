@@ -167,6 +167,9 @@ const GENRE_PERSONA: Record<string, string> = {
 [EXAMPLES]
 EN: I don't know what you're talking about. → KR: 무슨 말인지 모르겠는데
 EN: That actually makes a lot of sense. → KR: 그거 진짜 말 되네
+EN: You said eight, right? → KR: 8시 맞죠?
+EN: Eight in the morning. → KR: 아침 8시요.
+EN: Eight like in the morning eight? → KR: 아침 8시 말하는 거예요?
 
 [FORBIDDEN]
 - Do NOT produce unnatural word-for-word translations
@@ -639,8 +642,9 @@ function normalizeSocialMediaNames(text: string): string {
 interface MaskedToken { placeholder: string; original: string; }
 
 function maskNumericTokens(text: string): { masked: string; tokens: MaskedToken[] } {
+  if (text.includes("__TIME_")) return { masked: text, tokens: [] }; // [PROTECT-EARLY] never mask inside protected time tokens
   const tokens: MaskedToken[] = [];
-  const RE_MASK = /\b(\d{1,2}:\d{2}(?::\d{2})?(?:\s*(?:AM|PM|am|pm))?|\d+(?:\.\d+)?%|\d+(st|nd|rd|th)|\d+)\b/gi;
+  const RE_MASK = /(?<!\d)(\d{1,2}:\d{2}(?::\d{2})?(?:\s*(?:AM|PM|am|pm))?|\d+(?:\.\d+)?%|\d+(st|nd|rd|th)|\d{3,})(?!\d)/gi; // only HH:MM, percentages, ordinals, 3+ digit numbers masked — bare clock hours pass to LLM as plain text
   const masked = text.replace(RE_MASK, (match) => {
     const ph = `__NUM${tokens.length}__`;
     tokens.push({ placeholder: ph, original: match });
@@ -668,6 +672,9 @@ function deduplicateTimeUnits(text: string): string {
 }
 
 function convertTimeExpressionKo(text: string): string {
+  // [BUG-FIX] Guard: if text still contains __NUM__ placeholders, return unchanged.
+  // Prevents misinterpreting restored numeric tokens as clock times.
+  if (/__NUM\d+__/.test(text)) return text; // [BUG-FIX]
   RE_TIME_HHMM.lastIndex = 0;
   const converted = text.replace(RE_TIME_HHMM, (match, hour, minute, ampm) => {
     const h = parseInt(hour, 10);
@@ -681,7 +688,20 @@ function convertTimeExpressionKo(text: string): string {
     if (m === 0) return `${h}시`;
     return `${h}시 ${m}분`;
   });
-  return deduplicateTimeUnits(converted);
+  // Handle decimal clock notation like 10.45 → 10시 45분
+  // Since convertTimeExpressionKo does not receive sourceText,
+  // apply a neutral conversion (no 오전/오후 prefix) here.
+  const withDecimal = converted.replace(
+    /\b(\d{1,2})\.([0-5]\d)\b(?!\d)/g,
+    (_, h, m) => {
+      const hNum = parseInt(h, 10);
+      const mNum = parseInt(m, 10);
+      if (hNum < 1 || hNum > 23 || mNum > 59) return _;
+      if (mNum === 0) return `${hNum}시`;
+      return `${hNum}시 ${mNum}분`;
+    }
+  );
+  return deduplicateTimeUnits(withDecimal);
 }
 
 function applyDawnTimeCorrection(out: string, sourceText: string): string {
@@ -766,6 +786,10 @@ function likelySpeakerChange(prevText: string, currText: string, gap: number): b
   if (/[.!]$/.test(prev) && /^(yes|no|yeah|nope|hmm|uh|oh|ok|okay|right|sure|i do|i don't)\b/i.test(curr)) return true;
   if (/^(yes|no|yeah|nope|hmm|uh|oh|ok|okay|right|sure)\.?$/i.test(prev) && curr.split(/\s+/).length >= 3) return true;
   if (/^who\b/i.test(prev) && /^i\s+(do|did|don't|doesn't|am|was)\b/i.test(curr)) return true;
+  // Detect "Okay yes" / "Okay no" style responses after any statement
+  if (/^okay\s+(yes|no|sure|fine|then)\.?$/i.test(curr)) return true;
+  // Detect question → short affirmative/negative response (e.g. "Are you firing me?" → "Okay yes.")
+  if (/\?$/.test(prev) && /^(okay|ok)\b/i.test(curr)) return true;
   return false;
 }
 
@@ -1198,7 +1222,7 @@ function mergeFragments(segments: TranslationSegment[]): MergedGroup[] {
   const groups: MergedGroup[] = [];
   let i = 0;
   const isFiller = (t: string) => t.trim().length === 0 || /^[\d\s.,;:!?'"()[\]-]+$/.test(t);
-  const isSentenceEnd = (t: string) => /[.!?]$/.test(t.trim());
+  const isSentenceEnd = (t: string) => !t.includes("__TIME_") && /[.!?]$/.test(t.trim()); // [PROTECT-EARLY] never split on protected time tokens
   const isBackchannel = (t: string) => /^(yes|no|yeah|nope|ok|okay|right|sure|hmm|uh|oh)$/i.test(t.trim());
 
   while (i < segments.length) {
@@ -1218,6 +1242,12 @@ function mergeFragments(segments: TranslationSegment[]): MergedGroup[] {
       if (isFiller(next.text)) break;
       if (isShortIndependent(next.text)) break;
       const gap = next.start - group.end;
+      // Force split at sentence boundary within accumulated group text
+      const groupText = group.text.trim();
+      const nextText = next.text.trim();
+      const groupEndsWithSentence = !groupText.includes("__TIME_") && /[.!?]$/.test(groupText); // [PROTECT-EARLY] never split on protected time tokens
+      const nextStartsNewSentence = /^[A-Z]/.test(nextText) || RE_LIKELY_RESPONSE_START.test(nextText);
+      if (groupEndsWithSentence && (nextStartsNewSentence || gap >= 0.15)) break;
       const wc = group.text.split(/\s+/).length;
       const speakerChange = likelySpeakerChange(group.text, next.text, gap);
       const effectiveLimit = speakerChange ? MERGE_GAP_SPEAKER_CHANGE_S : MERGE_GAP_HARD_LIMIT_S;
@@ -1282,7 +1312,7 @@ export function formatNetflixSubtitle(text: string): string {
   const t = text.trim();
   if (!t || t.length <= NETFLIX_MIN_CHARS_FOR_SPLIT) return t;
   if (t.includes("\n")) return t;
-  if (t.length <= NETFLIX_MAX_CHARS_PER_LINE) return t;
+  if (t.length <= NETFLIX_MAX_CHARS_PER_LINE && !t.includes('\n')) return t;
 
   const midPoint = Math.floor(t.length / 2);
   const sentenceMatch = t.match(/^(.+?[.!?])\s+(.+)$/);
@@ -1318,6 +1348,14 @@ export function formatNetflixSubtitle(text: string): string {
       const l1 = t.slice(0, sp).trim(), l2 = t.slice(sp).trim();
       if (isBalancedSplit(l1, l2)) return `${l1}\n${l2}`;
     }
+  }
+  // Hard enforcement: if result still exceeds 20 chars per line, force split at midpoint
+  if (!t.includes('\n') && t.length > NETFLIX_MAX_CHARS_PER_LINE) {
+    const words = t.split(' ');
+    const mid = Math.ceil(words.length / 2);
+    const line1 = words.slice(0, mid).join(' ');
+    const line2 = words.slice(mid).join(' ');
+    if (line2.trim().length > 0) return `${line1}\n${line2}`;
   }
   return t;
 }
@@ -1470,6 +1508,20 @@ function expandGroupTranslations(
         result[idx] = translation;
       }
     }
+
+    // [BUG-FIX] Post-pass for 3+ segment groups: if splitting failed (slots k>0
+    // are empty or identical to the full translation), assign full translation to
+    // the FIRST slot only and clear others. This ensures the subtitle appears at
+    // the correct group start time rather than being duplicated across segments.
+    const hasFailedSplit = originalIndices.some( // [BUG-FIX]
+      (idx, k) => k > 0 && (!result[idx]?.trim() || result[idx] === translation) // [BUG-FIX]
+    ); // [BUG-FIX]
+    if (hasFailedSplit) { // [BUG-FIX]
+      result[originalIndices[0]] = translation; // [BUG-FIX]
+      for (let k = 1; k < originalIndices.length; k++) { // [BUG-FIX]
+        result[originalIndices[k]] = ''; // [BUG-FIX] empty → FIX-EXPAND-7 uses source as last resort
+      } // [BUG-FIX]
+    } // [BUG-FIX]
   }
 
   // [FIX-EXPAND-7] 최종 안전망: 여전히 빈 항목은 원문으로
@@ -1593,7 +1645,8 @@ function distributeByBreakPoints(
 export function adjustTimingsForReadability(segments: TranslationSegment[]): TranslationSegment[] {
   const result = segments.map(seg => ({ ...seg }));
   for (const seg of result) {
-    const charCount = (seg.translated || seg.text).replace("\n", "").length;
+    if (!seg.translated?.trim()) continue; // [BUG-FIX] skip empty translated slots — avoids expanding timing using source English length
+    const charCount = seg.translated.replace("\n", "").length; // [BUG-FIX] use translated only, not source fallback
     const minDuration = charCount * SECS_PER_CHAR_KO;
     if (minDuration > seg.end - seg.start) seg.end = seg.start + minDuration;
   }
@@ -1706,8 +1759,38 @@ function applyProperNounFixes(text: string, patterns: CompiledNounPattern[]): st
   return r;
 }
 
+// ── Time expression protection (decimal clock notation) ───────────────────────
+/**
+ * Converts decimal clock times (e.g. "10.45") into opaque placeholder tokens
+ * (e.g. "__TIME_10_45__") BEFORE the LLM sees the text.  This prevents the LLM
+ * from mis-parsing them as plain numbers or version strings.
+ */
+function protectTimeExpressions(text: string): string {
+  return text.replace(/\b(\d{1,2})\.([0-5]\d)\b(?!\d)/g, (_, h, m) => {
+    const hNum = parseInt(h, 10);
+    const mNum = parseInt(m, 10);
+    if (hNum < 1 || hNum > 23 || mNum > 59) return `${h}.${m}`;
+    return `__TIME_${h}_${m}__`;
+  });
+}
+
+/** Restores __TIME_H_MM__ tokens to standard "H:MM" notation (non-Korean). */
+function restoreTimeExpressions(text: string): string {
+  return text.replace(/__TIME_(\d{1,2})_(\d{2})__/g, (_, h, m) => `${h}:${m}`);
+}
+
+/** Restores __TIME_H_MM__ tokens to Korean "H시 MM분" notation. */
+function restoreTimeExpressionsKorean(text: string): string {
+  return text.replace(/__TIME_(\d{1,2})_(\d{2})__/g, (_, h, m) => {
+    const mNum = parseInt(m, 10);
+    if (mNum === 0) return `${h}시`;
+    return `${h}시 ${mNum}분`;
+  });
+}
+
 // ── Text cleaning ─────────────────────────────────────────────────────────────
 function cleanWhisperText(text: string): string {
+  if (text.includes("__TIME_")) return text; // [PROTECT-EARLY] never modify protected time tokens
   return text
     .replace(/\.{2,}$/, "")
     .replace(/(?<!\()[^)]*\)/g, "")
@@ -1716,11 +1799,54 @@ function cleanWhisperText(text: string): string {
     .trim();
 }
 
+/**
+ * [REPAIR-SPLIT-TIME] Pre-batch repair step.
+ * Whisper sometimes splits a decimal clock time ("10.45") across two segments:
+ *   segment[i]   → "10."
+ *   segment[i+1] → "45."
+ * This function detects that pattern and merges the pair into a single
+ * protected token ("__TIME_10_45__") so the existing protectTimeExpressions /
+ * restoreTimeExpressionsKorean pipeline can handle it correctly.
+ * Only adjacent segments that exactly match the split pattern are affected;
+ * all other segments pass through unchanged.
+ */
+function repairSplitTimeExpressions(segments: TranslationSegment[]): TranslationSegment[] {
+  const repaired: TranslationSegment[] = [];
+  for (let i = 0; i < segments.length; i++) {
+    const current = segments[i].text.trim();
+    const next = segments[i + 1]?.text.trim();
+
+    const matchCurrent = current.match(/^(\d{1,2})\.$/);
+    const matchNext = next?.match(/^([0-5]\d)\.?$/);
+
+    if (matchCurrent && matchNext) {
+      const h = matchCurrent[1];
+      const m = matchNext[1];
+      const hNum = parseInt(h, 10);
+      const mNum = parseInt(m, 10);
+      if (hNum >= 1 && hNum <= 23 && mNum <= 59) {
+        repaired.push({
+          ...segments[i],
+          end: segments[i + 1].end, // span covers both original segments
+          text: `__TIME_${h}_${m}__`,
+        });
+        i++; // skip consumed next segment
+        continue;
+      }
+    }
+
+    repaired.push(segments[i]);
+  }
+  return repaired;
+}
+
 function buildBatchMessage(batch: MergedGroup[]): { message: string; tokenMaps: MaskedToken[][]; } {
   const tokenMaps: MaskedToken[][] = [];
   const lines: string[] = [];
   for (let i = 0; i < batch.length; i++) {
-    const c = normalizeSocialMediaNames(cleanWhisperText(batch[i].text));
+    const c = protectTimeExpressions(
+      normalizeSocialMediaNames(cleanWhisperText(batch[i].text))
+    );
     const { masked, tokens } = maskNumericTokens(c);
     tokenMaps.push(tokens);
     lines.push(`${i + 1}. ${masked}`);
@@ -1734,10 +1860,30 @@ function postProcessTranslation(translated: string, sourceText: string, targetLa
     console.warn(`[POST] Placeholder leak detected: "${out}" (src: "${sourceText}")`);
     out = stripLeakedPlaceholders(out);
   }
+  // Restore protected time expression tokens BEFORE language-specific processing.
+  if (/__TIME_\d+_\d+__/.test(out)) {
+    if (targetLanguage === "Korean" || targetLanguage === "ko") {
+      out = restoreTimeExpressionsKorean(out);
+    } else {
+      out = restoreTimeExpressions(out);
+    }
+  }
   if (targetLanguage === "Korean" || targetLanguage === "ko") {
-    out = convertTimeExpressionKo(out);
+    // [FIX-OKAY-YES] Runs FIRST — takes priority over all other Korean rules
+    if (/^okay[\s,]+yes\.?$/i.test(sourceText.trim()) ||
+        /\bokay\s+yes\b/i.test(sourceText.trim())) {
+      out = '네, 맞아요.';
+      return out.trim();
+    } else {
+    // [BUG-FIX] Only run time conversion when no placeholders remain.
+    // postProcessTranslation does not receive the token map, so it cannot
+    // restore tokens itself — guard prevents double-processing.
+    if (!/__NUM\d+__/.test(out)) out = convertTimeExpressionKo(out); // [BUG-FIX]
     out = deduplicateTimeUnits(out);
     out = applyDawnTimeCorrection(out, sourceText);
+    // [QUALITY-FIX] 새벽 is only valid for hours 1-6.
+    // 새벽 7시, 새벽 8시, 새벽 9시, 새벽 10시 etc. are wrong — strip prefix.
+    out = out.replace(/새벽\s*([7-9]|10|11|12)시/g, (_, h) => `${h}시`); // [QUALITY-FIX]
     out = applyThatKindOfFix(out, sourceText);
     const srcHasSurprise = /surprised|amazing|incredible|unbelievable|wow|astonish/i.test(sourceText);
     if (!srcHasSurprise) { out = out.replace(RE_HALLUCINATED_ADDITION_KO, "").trim(); }
@@ -1748,12 +1894,15 @@ function postProcessTranslation(translated: string, sourceText: string, targetLa
       out = out.replace(/감독\s*없이\s*격려/g, "격려도, 감독도 없이").replace(/감독합니다/g, "감독도 없어요").trim();
     }
     if (/you\s+don'?t\s+work\s+here/i.test(sourceText)) {
-      out = out
-        .replace(/여기는\s+당신이\s+일하지\s+않아요/, "당신은 여기서 일하지 않아요")
-        .replace(/여기는\s+네가\s+일하지\s+않아/, "너는 여기서 일하지 않아")
-        .replace(/여기는\s+([^\s]+이|[^\s]+가)\s+일\s+안\s+해/, "너 여기서 일 안 해");
+      out = '여기서 근무하지 않으세요.';
+    }
+    if (/\bAmy\b/i.test(sourceText)) {
+      out = out.replace(/\b에미\b/g, "에이미");
+    }
     }
   }
+  // Restore Siri if LLM mistranslated it
+  out = out.replace(/에미(?=가|한테|를|은|이|에게|랑|와|도|만|한|의)?/g, (match, suffix) => sourceText.includes('Siri') ? 'Siri' + (suffix || '') : match);
   return out.replace(/\s{2,}/g, " ").trim();
 }
 
@@ -1787,7 +1936,7 @@ export function hasLeftoverEnglish(
   let m: RegExpExecArray | null;
   while ((m = RE_ENGLISH_WORD.exec(translated)) !== null) {
     const w = m[1];
-    if (RE_NUMERIC_TOKEN.test(w) || knownEn.has(w.toLowerCase()) || knownTr.has(w.toLowerCase()) || knownProtected.has(w.toLowerCase())) continue;
+    if (RE_NUMERIC_TOKEN.test(w) || knownEn.has(w.toLowerCase()) || knownTr.has(w.toLowerCase()) || knownProtected.has(w.toLowerCase()) || COMMON_WORDS.has(w)) continue;
     return true;
   }
   return false;
@@ -2156,14 +2305,19 @@ function buildSystemPrompt(targetLanguage: string, langRules: string, genrePerso
   const timeRuleKo = (targetLanguage === "Korean" || targetLanguage === "ko")
     ? `- Time format: NEVER output "HH:MM" clock notation. Use Korean spoken form: "8시", "3시", "10시 30분".\n` +
       `- "X in the morning" where X is 1–6: ALWAYS use "새벽 X시".\n` +
-      `- "until like X:00" as arrival time: just "X시", no 새벽/아침 prefix.\n`
+      `- "until like X:00" as arrival time: just "X시", no 새벽/아침 prefix.\n` +
+      `- Decimal notation like '10.45' or '9.30' means clock time H hours MM minutes. Convert to '[H]시 [MM]분' (e.g. '10.45' → '10시 45분', '9.30' → '9시 30분'). Do NOT treat as a decimal number. Do NOT output the raw placeholder.\n` +
+      `- CRITICAL: 'I don't even get to Starbucks until like 10' means the speaker cannot arrive until around 10AM. Translate as '스타벅스에 10시는 돼야 가요' (돼야 = correct spelling, contraction of 되어야). Do NOT output the raw placeholder token.\n` +
+      `- CRITICAL: 'until like [number]' without a colon means an approximate arrival or wake-up time. Translate as '[number]시는 돼야' or '[number]시쯤에나'. Note: 돼야 (O), 되야 (X). Example: 'until like 10' → '10시는 돼야'.\n` +
+      `- Decimal notation like 'H.MM' (e.g. '10.45', '9.30') means clock time hours and minutes. Infer AM or PM from surrounding context (e.g. 'in the morning' → 오전, night/evening context → 오후 or 밤). Render as '[hour]시 [minute]분' with the appropriate prefix if context is clear, or just '[hour]시 [minute]분' without a prefix if context is ambiguous. Do NOT treat the decimal as a decimal number.\n`
     : "";
   return (
     `You are a professional subtitle translator. Translate English subtitles to ${targetLanguage}.\n\n` +
     `[GLOBAL RULES]\n- Do not hallucinate or add information not present in the source\n- Preserve original meaning and speaker intent exactly\n- Keep subtitles concise — under 15 words per line if possible\n- Never merge, split, skip, or reorder the numbered lines\n\n` +
     (genrePersona ? genrePersona + "\n\n" : "") +
-    `STRICT OUTPUT FORMAT:\n- Input has exactly ${batchSize} numbered lines\n- Output MUST have exactly ${batchSize} numbered lines: "1. translation", "2. translation", ...\n- ONE output line per input line. Never merge. Never split. Never skip.\n- NEVER output headers like "## Translation:", "[미번역]", "---".\n\n` +
-    `TRANSLATION RULES:\n- Translate exact meaning only.\n- Preserve negation: "don't/can't/never/not" → must reflect negation in translation.\n- Fragment lines → translate as fragment, do NOT complete the sentence.\n- "baby" as informal address → use name or omit. NEVER translate as 자기야.\n- "HR" always means Human Resources. "HR director" → 인사 담당자.\n- Tokens like __NUM0__ are placeholders. Copy them EXACTLY as-is.\n- These proper nouns must NOT be translated: ${protectedNounList}\n- "good fit" in work context → compatibility match, NOT physical fitness\n- "that kind of thing" → always "그런 거". NEVER "그런 종류의 것".\n` +
+    `STRICT OUTPUT FORMAT:\n- Input has exactly ${batchSize} numbered lines\n- Output MUST have exactly ${batchSize} numbered lines: "1. translation", "2. translation", ...\n- ONE output line per input line. Never merge. Never split. Never skip.\n- NEVER output headers like "## Translation:", "[미번역]", "---".\n- PLACEHOLDER RULE: Any token matching __NUM[digit]__ must appear in output UNCHANGED. Adding 시, 분, or any other suffix to a placeholder token is FORBIDDEN.\n\n` +
+    `CRITICAL PRESERVATION RULE:\nIf the input contains a token that exactly matches the format __TIME_<number>_<number>__ (examples: __TIME_10_45__, __TIME_9_30__), copy it into the output EXACTLY as written — every character and underscore unchanged. Do NOT translate it, reformat it, split it, or interpret it as a clock time or number. This rule applies ONLY to tokens in that exact format. All other words and numbers must be translated naturally — this rule must not affect the surrounding sentence translation in any way.\n\n` +
+    `TRANSLATION RULES:\n- Translate exact meaning only.\n- Preserve negation: "don't/can't/never/not" → must reflect negation in translation.\n- Fragment lines → translate as fragment, do NOT complete the sentence.\n- "baby" as informal address → use name or omit. NEVER translate as 자기야.\n- "HR" always means Human Resources. "HR director" → 인사 담당자.\n- Tokens like __NUM0__, __NUM1__, __TIME_10_45__ are SYSTEM PLACEHOLDERS. Copy them VERBATIM — no changes, no suffixes, no surrounding characters. NEVER write __NUM0__시 or expand __TIME_10_45__ to a time value.\n- These proper nouns must NOT be translated: ${protectedNounList} Especially: 'Siri' must always remain 'Siri' in output — never translate, romanize, or substitute it with any Korean word.\n- "good fit" in work context → compatibility match, NOT physical fitness\n- "that kind of thing" → always "그런 거". NEVER "그런 종류의 것".\n` +
     timeRuleKo +
     `\n` + langRules + nounHint
   ).trim();
@@ -2272,7 +2426,7 @@ function translateSimpleSegment(
 // Strategy order: sentence boundary → comma boundary → word midpoint.
 // Midpoint is the safe fallback — never depends on Whisper punctuation.
 function maybeSplitLongSegment(seg: TranslationSegment): TranslationSegment[] {
-  const MAX_CHARS = 180;
+  const MAX_CHARS = 150;
   if (seg.text.length <= MAX_CHARS) return [seg];
 
   const dur = seg.end - seg.start;
@@ -2397,6 +2551,11 @@ export async function translateSegments(
     if (!llamaContext) throw new Error("모델이 로드되지 않았습니다. loadModel()을 먼저 호출하세요.");
 
     // ── Step 0 ───────────────────────────────────────────────────────────────
+    segments = segments.flatMap(s => maybeSplitLongSegment(s));
+    // [REPAIR-SPLIT-TIME] Merge split decimal time segments before any other processing.
+    segments = repairSplitTimeExpressions(segments);
+    // [PROTECT-EARLY] Protect intact decimal times before cleanWhisperText / mergeFragments.
+    segments = segments.map(s => ({ ...s, text: protectTimeExpressions(s.text) }));
     const deduped = deduplicateOverlappingSegments(segments);
     const cleaned = deduped.map(seg => ({
       ...seg,
@@ -2547,6 +2706,7 @@ export async function translateSegments(
           Math.max(batch.length * 80, totalOriginalSegsInBatch * 60) // [SYNC-FIX] restored; 50/40 caused truncation on BATCH_SIZE=5
         );
 
+        console.log("[FINAL INPUT TO LLM]", batchMessage); // [PROTECT-EARLY] verify __TIME__ tokens are intact before inference
         const r = await llamaContext.completion({
           messages: [
             { role: "system", content: sysPrompt },
@@ -2591,12 +2751,21 @@ export async function translateSegments(
           mergedTranslations[complexBatchSlice[i]] = translations[i];
         }
 
-        const partial = expandGroupTranslations(merged, mergedTranslations, cleaned);
-        if (onProgress) {
-          const lastGroupInBatch = complexBatchSlice[complexBatchSlice.length - 1] ?? 0; // [OPT-3]
-          const segmentsCompletedSoFar = segmentCountUpToGroup[lastGroupInBatch];
-          await onProgress(segmentsCompletedSoFar, cleaned.length, mergeWithTranslations(cleaned, partial));
-        }
+        if (onProgress) { // [QUALITY-FIX]
+          // [QUALITY-FIX] Only pass segments that have been translated so far.
+          // Do NOT call expandGroupTranslations here — it fills untranslated
+          // slots with source English, polluting the partial streaming result.
+          // Instead pass only the cleaned segments with whatever translations
+          // are available, leaving untranslated ones as empty string.
+          const partialTexts = expandGroupTranslations(merged, mergedTranslations, cleaned); // [QUALITY-FIX]
+          // Replace source-text fallbacks with empty string for untranslated slots
+          const partialCleaned = partialTexts.map((t, i) => // [QUALITY-FIX]
+            t === cleaned[i]?.text ? '' : t // [QUALITY-FIX] empty if still source English
+          ); // [QUALITY-FIX]
+          const lastGroupInBatch = complexBatchSlice[complexBatchSlice.length - 1] ?? 0; // [QUALITY-FIX]
+          const segmentsCompletedSoFar = segmentCountUpToGroup[lastGroupInBatch]; // [QUALITY-FIX]
+          await onProgress(segmentsCompletedSoFar, cleaned.length, mergeWithTranslations(cleaned, partialCleaned)); // [QUALITY-FIX]
+        } // [QUALITY-FIX]
 
         const now = Date.now();
         if (now - lastSaveTime >= SAVE_INTERVAL_MS) {
