@@ -1420,11 +1420,15 @@ function expandGroupTranslations(
     const { originalIndices } = group;
     let translation = (groupTranslations[gi] ?? "").trim();
 
-    if (!translation) {
-      // 번역이 없으면 원문 유지
-      for (const idx of originalIndices) result[idx] = originalSegments[idx].text;
-      continue;
-    }
+    if (!translation) { // [SYNC-FIX]
+      // [SYNC-FIX] Empty translation: keep slot empty rather than filling
+      // with source English. Slots left empty will be caught by the
+      // final safety net (FIX-EXPAND-7) which also uses source as last
+      // resort, but this signals to the caller that translation failed
+      // so validation can retry it.
+      // Keep original behavior only as absolute last resort via EXPAND-7.
+      continue; // [SYNC-FIX]
+    } // [SYNC-FIX]
 
     const groupSrc = originalIndices.map(idx => originalSegments[idx].text).join(" ");
     if (!RE_HALLUCINATION_GUARD.test(groupSrc)) {
@@ -2230,24 +2234,11 @@ const WORD_MAP: Record<string, Record<string, string>> = {
 // [OPT-1] Returns 'simple' if the group text needs no Gemma inference.
 // ALL conditions must hold for simple: wordCount<=5, no opinion/clause verbs,
 // no clause starters, no negation with wordCount>3, not purely punct/digits.
-function classifyComplexity(text: string): 'simple' | 'complex' {
-  const trimmed = text.trim();
-  const words = trimmed.split(/\s+/).filter(Boolean);
-  const wordCount = words.length;
-  if (wordCount > 5) return 'complex';
-  if (/^[\d\s.,;:!?'"()[\]-]+$/.test(trimmed)) return 'complex';
-  if (/\b(think|feel|believe|seem|suggest|should|would|could|might|wish|wonder|guess|suppose|mean|know|understand|realize)\b/i.test(trimmed)) return 'complex';
-  if (/\b(that|which|who|where|when|if|although|because|since|unless|while|after|before|though|whether)\b/i.test(trimmed)) return 'complex';
-  if (wordCount > 3 && /\b(not|never|no|don't|doesn't|didn't|won't|can't|couldn't|shouldn't|isn't|wasn't|aren't)\b/i.test(trimmed)) return 'complex';
-  // [BUDGET-FIX-V1] Segments containing capitalized mid-sentence words
-  // (potential proper nouns / brand names) must go through LLM.
-  // Simple passthrough would return them in English unchanged.
-  const midWords = text.trim().split(/\s+/).filter(Boolean);
-  if (midWords.some((w, i) => i > 0 && /^[A-Z]/.test(w) && !COMMON_WORDS.has(w))) { // [BUDGET-FIX-V1]
-    return 'complex'; // [BUDGET-FIX-V1]
-  } // [BUDGET-FIX-V1]
-  return 'simple';
-}
+function classifyComplexity(text: string): 'simple' | 'complex' { // [SYNC-FIX]
+  // [SYNC-FIX] Simple path disabled — all segments go through LLM.
+  // Short fragments bypass LLM and return source English as subtitles.
+  return 'complex'; // [SYNC-FIX]
+} // [SYNC-FIX]
 
 // [OPT-1] Translates a simple group without Gemma: WORD_MAP lookup →
 // applyProperNounFixes → return original unchanged.
@@ -2273,7 +2264,7 @@ function translateSimpleSegment(
   // If WORD_MAP has no entry and proper noun substitution changed nothing,
   // return empty string so the segment falls through to LLM inference
   // instead of displaying untranslated English as a subtitle.
-  return ''; // [BUDGET-FIX-V1]
+  return ''; // [SYNC-FIX] never return source English; empty → LLM inference
 }
 
 // [BUDGET-V5] Split segments longer than 180 chars to reduce per-segment
@@ -2553,7 +2544,7 @@ export async function translateSegments(
           (sum, g) => sum + g.originalIndices.length, 0
         );
         const nPredict = applyThermalNPredict(
-          Math.max(batch.length * 50, totalOriginalSegsInBatch * 40)
+          Math.max(batch.length * 80, totalOriginalSegsInBatch * 60) // [SYNC-FIX] restored; 50/40 caused truncation on BATCH_SIZE=5
         );
 
         const r = await llamaContext.completion({
