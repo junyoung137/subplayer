@@ -1,16 +1,20 @@
-import React, { useState, useCallback, useEffect, useLayoutEffect, useRef } from "react";
+import React, { useState, useCallback, useEffect, useRef } from "react";
 import {
   View,
   Text,
   TouchableOpacity,
   StyleSheet,
-  SafeAreaView,
   StatusBar,
   Dimensions,
   ActivityIndicator,
   useWindowDimensions,
   Alert,
+  Animated,
+  Platform,
+  PermissionsAndroid,
+  NativeModules,
 } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { router } from "expo-router";
 import { useTranslation } from "react-i18next";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -25,6 +29,7 @@ import { SubtitleQuickPanel } from "../components/SubtitleQuickPanel";
 import { SubtitleSaveModal } from "../components/SubtitleSaveModal";
 import { VideoSearchModal } from "../components/VideoSearchModal";
 import { useRetranslate } from "../hooks/useRetranslate";
+import { useBackgroundTranslation } from "../hooks/useBackgroundTranslation";
 import {
   loadSubtitles,
   saveSubtitles,
@@ -37,6 +42,8 @@ import {
   Maximize2,
   Minimize2,
   Camera,
+  CheckCircle2,
+  XCircle,
   Download,
   Layers,
   Search,
@@ -56,6 +63,15 @@ const LANDSCAPE_BOTTOM_HEIGHT = 110;
 const RECENT_KEY = "realtimesub_recent_files_v2";
 
 type SubtitlePhase = "idle" | "processing" | "translating" | "done" | "error";
+
+function formatRemaining(secs: number): string {
+  if (secs <= 0) return "";
+  if (secs <= 3) return "거의 완료";
+  if (secs < 60) return `약 ${Math.ceil(secs)}초 남음`;
+  const m = Math.floor(secs / 60);
+  const s = Math.ceil(secs % 60);
+  return s > 0 ? `약 ${m}분 ${s}초 남음` : `약 ${m}분 남음`;
+}
 
 async function saveThumbnailToFileList(videoUri: string, thumbUri: string) {
   try {
@@ -93,7 +109,6 @@ export default function PlayerScreen() {
   const clearSubtitles = usePlayerStore((s) => s.clearSubtitles);
   const setCurrentTime = usePlayerStore((s) => s.setCurrentTime);
   const bumpSeek       = usePlayerStore((s) => s.bumpSeek);
-  const storeIsProcessing = usePlayerStore((s) => s.isProcessing);
 
   const subtitleMode   = useSettingsStore((s) => s.subtitleMode);
   const targetLanguage = useSettingsStore((s) => s.targetLanguage);
@@ -104,14 +119,33 @@ export default function PlayerScreen() {
 
   const cacheKey = videoUri ? localCacheKey(videoUri) : null;
 
-  // Read and consume pending SRT URI synchronously at render time.
-  const initialSrtUri = useRef<string | null>(pendingSubtitleRef.current);
-  const hasSrtRef = useRef<boolean>(pendingSubtitleRef.current !== null);
-  if (pendingSubtitleRef.current) {
-    pendingSubtitleRef.current = null;
-  }
+  const {
+    status:              bgStatus,
+    isBackgroundRunning: isBgRunning,
+    enqueueTranslation,
+    cancelTranslation,
+    loadResult:          loadBgResult,
+    clearResult:         clearBgResult,
+  } = useBackgroundTranslation(cacheKey ?? undefined);
 
-  const subtitleLoadedRef = useRef<string | null>(null);
+  const isBgRunningRef  = useRef(false);
+  useEffect(() => { isBgRunningRef.current = isBgRunning; }, [isBgRunning]);
+
+  const bgStatusRef = useRef<typeof bgStatus>(bgStatus);
+  useEffect(() => { bgStatusRef.current = bgStatus; }, [bgStatus]);
+
+  const bgResultApplied = useRef(false);
+  const shimmerAnim     = useRef(new Animated.Value(0)).current;
+  const bannerOpacity   = useRef(new Animated.Value(0.7)).current;
+  const displayedPctRef = useRef(0);
+  const rafIdRef        = useRef<number | null>(null);
+  const heartbeatRef    = useRef<ReturnType<typeof setInterval> | null>(null);
+  const bgDoneTimerRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const bgPrevProgressRef  = useRef<number>(0);
+  const bgPrevTimestampRef = useRef<number>(0);
+  const bgSecsPerPctRef    = useRef<number>(0);
+  const bgUpdateCountRef   = useRef<number>(0);
 
   const [subtitlePanelVisible, setSubtitlePanelVisible] = useState(false);
   const [saveModalVisible,     setSaveModalVisible]     = useState(false);
@@ -124,19 +158,9 @@ export default function PlayerScreen() {
   const [subtitlePhase,    setSubtitlePhase]    = useState<SubtitlePhase>("idle");
   const [subtitleProgress, setSubtitleProgress] = useState(0);
   const [translationEverCompleted, setTranslationEverCompleted] = useState(false);
-
-  // ── Entry toast (TASK 3) ──────────────────────────────────────────────────
-  const entryToastShownRef = useRef(false);
-  const [showEntryToast, setShowEntryToast] = useState(false);
-
-  useEffect(() => {
-    if (storeIsProcessing && !entryToastShownRef.current) {
-      entryToastShownRef.current = true;
-      setShowEntryToast(true);
-      const timer = setTimeout(() => setShowEntryToast(false), 3000);
-      return () => clearTimeout(timer);
-    }
-  }, []); // empty deps — mount only
+  const [showBgDoneBanner, setShowBgDoneBanner] = useState(false);
+  const [displayedPct,     setDisplayedPct]     = useState(0);
+  const [bgRemainingSecs,  setBgRemainingSecs]  = useState<number | null>(null);
 
   const playbackRate = SPEEDS[speedIdx];
   const speedLabel = Number.isInteger(playbackRate) ? `${playbackRate}.0x` : `${playbackRate}x`;
@@ -154,24 +178,50 @@ export default function PlayerScreen() {
     return () => {
       StatusBar.setHidden(false, "none");
       cancelRetranslation();
+      if (rafIdRef.current !== null) cancelAnimationFrame(rafIdRef.current);
+      if (heartbeatRef.current) clearInterval(heartbeatRef.current);
     };
   }, []);
 
-  // ── cacheKey reset ────────────────────────────────────────────────────────
+  const subtitleLoadedRef = useRef<string | null>(null);
+
   useEffect(() => {
+    bgResultApplied.current = false;
     setTranslationEverCompleted(false);
     setSubtitlePhase("idle");
     setSubtitleProgress(0);
+    displayedPctRef.current = 0;
+    setDisplayedPct(0);
+    bgPrevProgressRef.current = 0; bgPrevTimestampRef.current = 0;
+    bgSecsPerPctRef.current = 0; bgUpdateCountRef.current = 0;
+    setBgRemainingSecs(null);
     subtitleLoadedRef.current = null;
   }, [cacheKey]);
 
-  // ── Load from SQLite on mount ─────────────────────────────────────────────
   useEffect(() => {
     if (!cacheKey) return;
     if (subtitleLoadedRef.current === cacheKey) return;
-    if (hasSrtRef.current) return;
 
     (async () => {
+      const bgResult = await loadBgResult(cacheKey);
+      if (bgResult && !isBgRunningRef.current) {
+        if (Date.now() - bgResult.completedAt > 86400000) {
+          await clearBgResult(cacheKey);
+        } else {
+          const restored: SubtitleSegment[] = bgResult.segments.map((seg, i) => ({
+            id: `local_bg_${i}_${Math.round(seg.startTime * 1000)}`,
+            startTime: seg.startTime, endTime: seg.endTime,
+            original: seg.original, translated: seg.translated,
+          }));
+          bgResultApplied.current = true;
+          subtitleLoadedRef.current = cacheKey;
+          setSubtitles(restored);
+          setSubtitlePhase("done"); setSubtitleProgress(1); setTranslationEverCompleted(true);
+          saveSubtitles(cacheKey, targetLanguage, "local", restored).catch(() => {});
+          await clearBgResult(cacheKey);
+          return;
+        }
+      }
       const cached = await loadSubtitles(cacheKey, targetLanguage, "local");
       if (!cached) return;
       subtitleLoadedRef.current = cacheKey;
@@ -185,23 +235,30 @@ export default function PlayerScreen() {
     })();
   }, [cacheKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Subtitle phase tracking (TASK 4) ─────────────────────────────────────
   useEffect(() => {
-    if (hasSrtRef.current) return;
-    if (!cacheKey || subtitles.length === 0) return;
+    if (bgStatus?.status !== "done" || !cacheKey || bgResultApplied.current) return;
+    (async () => {
+      const result = await loadBgResult(cacheKey);
+      if (!result) return;
+      const restored: SubtitleSegment[] = result.segments.map((seg, i) => ({
+        id: `local_bg_${i}_${Math.round(seg.startTime * 1000)}`,
+        startTime: seg.startTime, endTime: seg.endTime,
+        original: seg.original, translated: seg.translated,
+      }));
+      bgResultApplied.current = true;
+      subtitleLoadedRef.current = cacheKey;
+      setSubtitles(restored);
+      setSubtitlePhase("done"); setSubtitleProgress(1); setTranslationEverCompleted(true);
+      saveSubtitles(cacheKey, targetLanguage, "local", restored).catch(() => {});
+      await clearBgResult(cacheKey);
+    })();
+  }, [bgStatus?.status, cacheKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    const translatedCount = subtitles.filter(
-      (s) => s.translated && s.translated.trim() !== ""
-    ).length;
-
-    if (
-      translatedCount === subtitles.length &&
-      subtitles.length > 0 &&
-      !storeIsProcessing
-    ) {
-      setSubtitlePhase("done");
-      setSubtitleProgress(1);
-      setTranslationEverCompleted(true);
+  useEffect(() => {
+    if (!cacheKey || subtitles.length === 0 || isBgRunningRef.current) return;
+    const translatedCount = subtitles.filter((s) => s.translated && s.translated.trim() !== "").length;
+    if (translatedCount === subtitles.length && subtitles.length > 0) {
+      setSubtitlePhase("done"); setSubtitleProgress(1); setTranslationEverCompleted(true);
       saveSubtitles(cacheKey, targetLanguage, "local", subtitles).catch(() => {});
     } else if (translatedCount > 0) {
       setSubtitlePhase("translating");
@@ -210,37 +267,159 @@ export default function PlayerScreen() {
     } else if (subtitles.length > 0) {
       setSubtitlePhase("processing");
     }
-  }, [subtitles, storeIsProcessing]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [subtitles]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── SRT loading ───────────────────────────────────────────────────────────
-  useLayoutEffect(() => {
-    const srtUri = initialSrtUri.current;
-    if (!srtUri || !videoUri) return;
-    initialSrtUri.current = null;
+  useEffect(() => {
+    if (bgStatus?.status === "done" && bgStatus.videoId === cacheKey) {
+      setShowBgDoneBanner(true);
+      if (bgDoneTimerRef.current) clearTimeout(bgDoneTimerRef.current);
+      bgDoneTimerRef.current = setTimeout(() => setShowBgDoneBanner(false), 5000);
+    }
+    return () => { if (bgDoneTimerRef.current) clearTimeout(bgDoneTimerRef.current); };
+  }, [bgStatus?.status, bgStatus?.videoId, cacheKey]);
 
-    (async () => {
-      try {
-        const content = await FileSystem.readAsStringAsync(srtUri);
-        const segments = parseSrt(content);
-        if (segments.length > 0) {
-          setSubtitles(segments);
-          setSubtitlePhase("done");
-          setSubtitleProgress(1);
-          setTranslationEverCompleted(true);
-        }
-      } catch (e) {
-        console.warn("[SRT] Failed to load SRT:", e);
+  useEffect(() => {
+    const bgProgress = bgStatus?.progress ?? 0;
+    const isActive = isBgRunning || subtitlePhase === "processing" || subtitlePhase === "translating";
+    const noProgress = isBgRunning ? bgProgress === 0 : subtitleProgress === 0;
+    if (isActive && noProgress) {
+      const anim = Animated.loop(Animated.timing(shimmerAnim, { toValue: 1, duration: 1200, useNativeDriver: true }));
+      anim.start();
+      return () => anim.stop();
+    } else { shimmerAnim.setValue(0); }
+  }, [isBgRunning, subtitlePhase, subtitleProgress, bgStatus?.progress, shimmerAnim]);
+
+  useEffect(() => {
+    if (!isBgRunning) { bannerOpacity.setValue(0.7); return; }
+    const anim = Animated.loop(Animated.sequence([
+      Animated.timing(bannerOpacity, { toValue: 1.0, duration: 750, useNativeDriver: true }),
+      Animated.timing(bannerOpacity, { toValue: 0.7, duration: 750, useNativeDriver: true }),
+    ]));
+    anim.start();
+    return () => anim.stop();
+  }, [isBgRunning, bannerOpacity]);
+
+  const bgAnimateTo = useCallback((targetFraction: number, durationMs: number, options?: { ignoreCap?: boolean }) => {
+    if (rafIdRef.current !== null) { cancelAnimationFrame(rafIdRef.current); rafIdRef.current = null; }
+    const real = bgStatusRef.current?.progress ?? 0;
+    const clampedTarget = options?.ignoreCap ? targetFraction : Math.min(targetFraction, real + 0.03);
+    const start = displayedPctRef.current;
+    const diff = clampedTarget - start;
+    if (Math.abs(diff) < 0.001) return;
+    const startTime = performance.now();
+    const frame = (now: number) => {
+      if (Math.abs(clampedTarget - displayedPctRef.current) < 0.001) {
+        displayedPctRef.current = clampedTarget; setDisplayedPct(clampedTarget); rafIdRef.current = null; return;
       }
-    })();
-  }, []); // runs once synchronously before other effects
+      const elapsed = now - startTime;
+      const t = Math.min(elapsed / durationMs, 1);
+      const eased = 1 - Math.pow(1 - t, 3);
+      const maxAllowed = options?.ignoreCap ? clampedTarget : Math.min(clampedTarget, (bgStatusRef.current?.progress ?? 0) + 0.03);
+      const next = Math.min(start + diff * eased, maxAllowed);
+      if (next > displayedPctRef.current) { displayedPctRef.current = next; setDisplayedPct(next); }
+      if (t < 1) { rafIdRef.current = requestAnimationFrame(frame); } else { rafIdRef.current = null; }
+    };
+    rafIdRef.current = requestAnimationFrame(frame);
+  }, []);
 
-  // ── Search seek handler ───────────────────────────────────────────────────
+  useEffect(() => {
+    const target = bgStatus?.progress ?? 0;
+    if (target <= displayedPctRef.current) return;
+    bgAnimateTo(target, 800);
+  }, [bgStatus?.progress, bgAnimateTo]);
+
+  useEffect(() => {
+    if (heartbeatRef.current) clearInterval(heartbeatRef.current);
+    const status = bgStatus?.status;
+    if (!status || status === "done" || status === "error" || status === "idle") return;
+    heartbeatRef.current = setInterval(() => {
+      const realProgress = bgStatusRef.current?.progress ?? 0;
+      const cap = Math.max(0, realProgress - 0.02);
+      if (displayedPctRef.current < cap) {
+        const next = Math.min(displayedPctRef.current + 0.012, cap);
+        displayedPctRef.current = next; setDisplayedPct(next);
+      }
+    }, 600);
+    return () => { if (heartbeatRef.current) { clearInterval(heartbeatRef.current); heartbeatRef.current = null; } };
+  }, [bgStatus?.status]);
+
+  useEffect(() => {
+    if (bgStatus?.status === "done") {
+      if (heartbeatRef.current) { clearInterval(heartbeatRef.current); heartbeatRef.current = null; }
+      if (rafIdRef.current !== null) { cancelAnimationFrame(rafIdRef.current); rafIdRef.current = null; }
+      bgAnimateTo(1, 350, { ignoreCap: true });
+    }
+    if (bgStatus?.status === "error" || bgStatus?.status === "idle") {
+      if (heartbeatRef.current) { clearInterval(heartbeatRef.current); heartbeatRef.current = null; }
+      if (rafIdRef.current !== null) { cancelAnimationFrame(rafIdRef.current); rafIdRef.current = null; }
+      displayedPctRef.current = 0; setDisplayedPct(0);
+    }
+  }, [bgStatus?.status, bgAnimateTo]);
+
+  useEffect(() => {
+    if (!isBgRunning || !bgStatus || bgStatus.status !== "translating") {
+      setBgRemainingSecs(null); bgSecsPerPctRef.current = 0;
+      bgPrevProgressRef.current = 0; bgPrevTimestampRef.current = 0; return;
+    }
+    bgUpdateCountRef.current += 1;
+    const p = bgStatus.progress ?? 0;
+    const now = Date.now();
+    if (bgPrevProgressRef.current > 0 && p > bgPrevProgressRef.current) {
+      const deltaPct = p - bgPrevProgressRef.current;
+      const elapsedS = (now - bgPrevTimestampRef.current) / 1000;
+      if (elapsedS >= 0.05 && deltaPct >= 0.001) {
+        const secPerPct = 1 / (deltaPct / elapsedS);
+        bgSecsPerPctRef.current = bgSecsPerPctRef.current === 0 ? secPerPct : 0.7 * bgSecsPerPctRef.current + 0.3 * secPerPct;
+      }
+    }
+    bgPrevProgressRef.current = p; bgPrevTimestampRef.current = now;
+    if (bgSecsPerPctRef.current > 0 && p > 0.06) {
+      const rem = Math.ceil((1 - p) * bgSecsPerPctRef.current);
+      if (bgUpdateCountRef.current >= 3 && rem > 3) setBgRemainingSecs(rem);
+      else if (rem <= 3) setBgRemainingSecs(rem);
+    }
+  }, [bgStatus, isBgRunning]);
+
+  const startBgTranslation = useCallback(async () => {
+    if (!cacheKey || !videoName) return;
+    isBgRunningRef.current = true;
+    bgResultApplied.current = false;
+    setSubtitleProgress(0);
+    setTranslationEverCompleted(false);
+    clearSubtitles();
+    try {
+      await enqueueTranslation({ videoId: cacheKey, videoTitle: videoName, language: targetLanguage, genre: "local" });
+    } catch (e: any) {
+      isBgRunningRef.current = false;
+      Alert.alert("오류", e?.message ?? "백그라운드 서비스를 시작할 수 없습니다.");
+    }
+  }, [cacheKey, videoName, targetLanguage, enqueueTranslation, clearSubtitles]);
+
+  const handleSendToBackground = useCallback(async () => {
+    if (Platform.OS === "android" && Platform.Version >= 33) {
+      const granted = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS,
+        { title: "알림 권한", message: "번역 완료 시 알림을 받으려면 권한이 필요합니다.", buttonPositive: "허용", buttonNegative: "거부" }
+      );
+      if (granted !== PermissionsAndroid.RESULTS.GRANTED) return;
+    }
+    if (Platform.OS === "android") {
+      NativeModules.TranslationService?.checkAndRequestBatteryOptimization?.().catch(() => {});
+    }
+    if (isBgRunning) {
+      Alert.alert("백그라운드 번역 중", "현재 번역이 진행 중입니다.\n취소하고 새로 시작할까요?", [
+        { text: "계속 유지", style: "cancel" },
+        { text: "취소하고 새로 시작", style: "destructive", onPress: async () => { await cancelTranslation(); await startBgTranslation(); } },
+      ]);
+      return;
+    }
+    await startBgTranslation();
+  }, [isBgRunning, cancelTranslation, startBgTranslation]);
+
   const handleSearchSeek = useCallback((time: number) => {
     setCurrentTime(time);
     bumpSeek();
   }, [setCurrentTime, bumpSeek]);
 
-  // ── Capture frame ─────────────────────────────────────────────────────────
   const captureFrame = useCallback(async () => {
     if (!videoUri || !getThumbnailAsync || isCapturing) return;
     setIsCapturing(true);
@@ -268,9 +447,17 @@ export default function PlayerScreen() {
 
   const videoHeight = Math.max(screenWidth * (9 / 16), screenHeight * 0.5);
 
-  const showSaveBtn = subtitlePhase === "done" && subtitles.length > 0 && translationEverCompleted;
+  const getBarColor = (): string => {
+    if (isBgRunning) return "#6366f1";
+    if (subtitlePhase === "done") return "#22c55e";
+    if (subtitlePhase === "translating") return "#3b82f6";
+    return "#3b82f6";
+  };
 
-  // ── 가로 모드 오버레이 컴포넌트 ──────────────────────────────────────────
+  const barProgress = isBgRunning ? displayedPct : subtitleProgress;
+  const showShimmer = barProgress < 0.02 && (isBgRunning || (subtitlePhase !== "idle" && subtitlePhase !== "done"));
+  const showSaveBtn = subtitlePhase === "done" && !isBgRunning && subtitles.length > 0 && translationEverCompleted;
+
   const landscapeHeader = (
     <View style={styles.lsHeader}>
       <TouchableOpacity onPress={() => router.back()} style={styles.headerBtn}>
@@ -311,12 +498,6 @@ export default function PlayerScreen() {
             : <Camera size={14} color="#ccc" />}
         </TouchableOpacity>
       )}
-      {showSaveBtn && (
-        <TouchableOpacity style={[styles.chipBtn, styles.chipBtnSave]} onPress={() => setSaveModalVisible(true)}>
-          <Download size={13} color="#86efac" />
-          <Text style={[styles.chipBtnText, styles.chipBtnSaveText]}>{t("player.save")}</Text>
-        </TouchableOpacity>
-      )}
     </View>
   );
 
@@ -328,12 +509,6 @@ export default function PlayerScreen() {
       <View style={{ width: screenWidth, height: screenHeight, backgroundColor: "#000" }}>
         <VideoPlayer rate={playbackRate} overlayHeader={landscapeHeader} overlayControls={landscapeControls} />
         <SubtitleOverlay />
-        {showEntryToast && (
-          <View style={styles.entryToast} pointerEvents="none">
-            <Text style={styles.entryToastLine1}>앞부분 자막부터 재생됩니다</Text>
-            <Text style={styles.entryToastLine2}>뒤쪽은 곧 채워집니다</Text>
-          </View>
-        )}
         {isRetranslating && (
           <View style={styles.lsRetranslateBanner}>
             <ActivityIndicator size="small" color="#2563eb" />
@@ -382,29 +557,87 @@ export default function PlayerScreen() {
       <View style={isFullscreen ? styles.videoWrapperFullscreen : [styles.videoWrapper, { height: videoHeight }]}>
         <VideoPlayer rate={playbackRate} />
         <SubtitleOverlay />
-        {/* [B] Entry toast */}
-        {showEntryToast && (
-          <View style={styles.entryToast} pointerEvents="none">
-            <Text style={styles.entryToastLine1}>앞부분 자막부터 재생됩니다</Text>
-            <Text style={styles.entryToastLine2}>뒤쪽은 곧 채워집니다</Text>
-          </View>
-        )}
       </View>
 
-      {/* 번역 진행 바 */}
-      {(subtitlePhase !== "idle" && subtitlePhase !== "done") && (
-        <View style={styles.progressBarTrack}>
-          <View
-            style={[styles.progressBarFill, {
-              width: `${Math.min(subtitleProgress * 100, 100)}%` as any,
-              backgroundColor: "#3b82f6",
-            }]}
-          />
+      {/* BG 번역 진행 카드 */}
+      {isBgRunning && (
+        <Animated.View style={[progressCard.card, { opacity: bannerOpacity }]}>
+          <Text style={progressCard.pct}>{Math.round(displayedPct * 100)}%</Text>
+          <View style={{ flex: 1 }}>
+            <Text style={progressCard.title}>{t("player.bgTranslating")}</Text>
+            <Text style={progressCard.sub} numberOfLines={1}>
+              {(() => {
+                const p = bgStatus?.progress ?? 0;
+                const st = bgStatus?.status;
+                if (!st || st === "fetching") return p < 0.02 ? "번역 준비 중..." : "모델 로딩 중...";
+                if (st === "saving") return "결과 저장 중...";
+                if (st === "translating" && (bgStatus?.totalCount ?? 0) > 0) return `${bgStatus!.translatedCount} / ${bgStatus!.totalCount}`;
+                return "번역 준비 중...";
+              })()}
+            </Text>
+            {bgRemainingSecs !== null && bgRemainingSecs > 0 && (
+              <Text style={progressCard.eta}>{formatRemaining(bgRemainingSecs)}</Text>
+            )}
+          </View>
+          <TouchableOpacity onPress={cancelTranslation} style={progressCard.cancelBtn}>
+            <Text style={progressCard.cancelBtnText}>{t("common.cancel")}</Text>
+          </TouchableOpacity>
+        </Animated.View>
+      )}
+
+      {/* FG 번역 진행 카드 */}
+      {!isBgRunning && (subtitlePhase === "processing" || subtitlePhase === "translating") && (
+        <View style={progressCard.card}>
+          <Text style={progressCard.pct}>{subtitleProgress > 0 ? `${Math.round(subtitleProgress * 100)}%` : "--"}</Text>
+          <View style={{ flex: 1 }}>
+            <Text style={progressCard.title}>{subtitlePhase === "processing" ? "🎙 음성 인식 중..." : t("player.translatingProgress")}</Text>
+            <Text style={progressCard.sub} numberOfLines={1}>
+              {subtitlePhase === "processing" ? "Whisper 처리 중..." : `${subtitles.filter((s) => s.translated).length} / ${subtitles.length}`}
+            </Text>
+          </View>
         </View>
       )}
 
-      {/* 컨트롤 바 (단일 행) */}
+      {/* BG 완료 배너 */}
+      {showBgDoneBanner && (
+        <View style={[progressCard.card, { backgroundColor: "#0a1f0a", borderTopColor: "#22c55e" }]}>
+          <CheckCircle2 size={16} color="#22c55e" />
+          <Text style={[progressCard.title, { color: "#22c55e", marginLeft: 8 }]}>{t("player.bgDone")}</Text>
+        </View>
+      )}
+
+      {/* BG 오류 배너 */}
+      {bgStatus?.status === "error" && (
+        <View style={[progressCard.card, { backgroundColor: "#1a0a0a", borderTopColor: "#ef4444" }]}>
+          <View style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: 6 }}>
+            <XCircle size={14} color="#ef4444" />
+            <Text style={{ color: "#ef4444", fontSize: 11 }}>{bgStatus.error ?? "번역 실패"}</Text>
+          </View>
+          <TouchableOpacity onPress={handleSendToBackground} style={progressCard.cancelBtn}>
+            <Text style={progressCard.cancelBtnText}>{t("common.retry")}</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {/* 번역 진행 바 */}
+      {(isBgRunning || (subtitlePhase !== "idle" && subtitlePhase !== "done")) && (
+        <View style={styles.progressBarTrack}>
+          {showShimmer ? (
+            <Animated.View
+              style={[styles.progressBarShimmer, {
+                backgroundColor: getBarColor(),
+                transform: [{ translateX: shimmerAnim.interpolate({ inputRange: [0, 1], outputRange: [-screenWidth * 0.4, screenWidth] }) }],
+              }]}
+            />
+          ) : (
+            <View style={[styles.progressBarFill, { width: `${Math.min(barProgress * 100, 100)}%` as any, backgroundColor: getBarColor() }]} />
+          )}
+        </View>
+      )}
+
+      {/* 컨트롤 바 (2행) */}
       <View style={styles.controlBar}>
+        {/* 행 1 */}
         <View style={styles.controlRow}>
           <TouchableOpacity style={styles.playBtn} onPress={() => setPlaying(!isPlaying)} activeOpacity={0.75}>
             <Text style={styles.playBtnText}>{isPlaying ? "⏸" : "▶"}</Text>
@@ -435,13 +668,29 @@ export default function PlayerScreen() {
                 : <Camera size={14} color="#ccc" />}
             </TouchableOpacity>
           )}
-          {showSaveBtn && (
-            <TouchableOpacity style={[styles.chipBtn, styles.chipBtnSave]} onPress={() => setSaveModalVisible(true)}>
-              <Download size={13} color="#86efac" />
-              <Text style={[styles.chipBtnText, styles.chipBtnSaveText]}>{t("player.save")}</Text>
-            </TouchableOpacity>
-          )}
         </View>
+
+        {/* 행 2 (조건부) */}
+        {(Platform.OS === "android" || showSaveBtn) && (
+          <View style={styles.controlRow2}>
+            {Platform.OS === "android" && (
+              <TouchableOpacity
+                style={[styles.chipBtn, styles.chipBtnFlex, isBgRunning && styles.chipBtnBgActive]}
+                onPress={handleSendToBackground} activeOpacity={0.75}
+              >
+                <Text style={styles.chipBtnText} numberOfLines={1}>
+                  {isBgRunning ? t("player.bgInProgress") : t("player.background")}
+                </Text>
+              </TouchableOpacity>
+            )}
+            {showSaveBtn && (
+              <TouchableOpacity style={[styles.chipBtn, styles.chipBtnSave]} onPress={() => setSaveModalVisible(true)}>
+                <Download size={13} color="#86efac" />
+                <Text style={[styles.chipBtnText, styles.chipBtnSaveText]}>{t("player.save")}</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        )}
       </View>
 
       {isRetranslating && (
@@ -499,10 +748,12 @@ const styles = StyleSheet.create({
   },
 
   progressBarTrack: { width: "100%", height: 3, backgroundColor: "rgba(255,255,255,0.08)", overflow: "hidden" },
+  progressBarShimmer: { position: "absolute", top: 0, left: 0, height: 3, width: "40%", opacity: 0.85 },
   progressBarFill: { height: 3, borderRadius: 0 },
 
   controlBar: { backgroundColor: "#111", paddingHorizontal: 10, paddingTop: 8, paddingBottom: 10, gap: 6 },
   controlRow:  { flexDirection: "row", alignItems: "center", gap: 6 },
+  controlRow2: { flexDirection: "row", alignItems: "center", gap: 6 },
 
   playBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: "#2563eb", justifyContent: "center", alignItems: "center", flexShrink: 0 },
   playBtnText: { fontSize: 16, color: "#fff" },
@@ -515,6 +766,7 @@ const styles = StyleSheet.create({
   chipBtnFlex: { flex: 1 },
   chipBtnText: { color: "#ccc", fontSize: 12 },
   chipBtnDisabled: { opacity: 0.4 },
+  chipBtnBgActive: { borderWidth: 1, borderColor: "#6366f1", backgroundColor: "#1e1b4b" },
   chipBtnSave: { backgroundColor: "#14532d", borderWidth: 1, borderColor: "#22c55e", gap: 4 },
   chipBtnSaveText: { color: "#86efac" },
 
@@ -523,21 +775,6 @@ const styles = StyleSheet.create({
 
   captureToast: { position: "absolute", bottom: 90, alignSelf: "center", backgroundColor: "rgba(0,0,0,0.75)", borderRadius: 20, paddingHorizontal: 18, paddingVertical: 9, borderWidth: 1, borderColor: "#22c55e44" },
   captureToastText: { color: "#22c55e", fontSize: 13, fontWeight: "700" },
-
-  entryToast: {
-    position: 'absolute', top: 12, left: 16, right: 16,
-    backgroundColor: 'rgba(0,0,0,0.72)', borderRadius: 20,
-    paddingHorizontal: 16, paddingVertical: 10,
-    alignItems: 'center', zIndex: 10, gap: 2,
-  },
-  entryToastLine1: {
-    color: 'rgba(255,255,255,0.92)', fontSize: 13,
-    fontWeight: '600', textAlign: 'center',
-  },
-  entryToastLine2: {
-    color: 'rgba(255,255,255,0.60)', fontSize: 11,
-    fontWeight: '400', textAlign: 'center',
-  },
 
   lsHeader: { flexDirection: "row", alignItems: "center", paddingHorizontal: 12, paddingVertical: 8, backgroundColor: "rgba(0,0,0,0.55)", gap: 4 },
   lsTitle: { flex: 1, color: "#fff", fontSize: 14, fontWeight: "600", marginHorizontal: 8 },
