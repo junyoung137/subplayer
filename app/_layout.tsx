@@ -14,6 +14,8 @@ import { setProxyBaseUrl, PROXY_BASE_URL_DEFAULT } from "../services/youtubeTime
 import { onAuthStateChanged } from "../services/authService";
 import { firestore } from "../services/firebase";
 import { useAuthStore } from "../store/useAuthStore";
+import { usePlanStore } from '../store/usePlanStore';
+import { hydrateUsageDedup } from '../services/serverBridgeService';
 
 export default function RootLayout() {
   const { t } = useTranslation();
@@ -26,7 +28,19 @@ export default function RootLayout() {
   const isLoading  = useAuthStore((s) => s.isLoading);
 
   useEffect(() => {
-    hydrate();
+    hydrate().then(() => {
+      // Warming order — do not reorder:
+      // 1. hydrateUsageDedup: restore dedup Map from disk (fire-and-forget).
+      //    safeRecordUsage joins the in-progress Promise if called before completion (RULE 12).
+      // 2. syncFromSettings: load plan tier/usedMinutes/resetAt into usePlanStore.
+      //    Must run after hydrate() (AsyncStorage order guarantee).
+      // 3. [DEV] DevConfig.hydrate(): restore dev overrides (no-op in production).
+      hydrateUsageDedup().catch(() => {});
+      usePlanStore.getState().syncFromSettings();
+      if (__DEV__) {
+        import('../utils/devConfig').then(m => m.DevConfig.hydrate()).catch(() => {});
+      }
+    });
 
     // [FIX BUG1] Persist resolved proxy URL for BG (HeadlessJS) context.
     setProxyBaseUrl(PROXY_BASE_URL_DEFAULT);

@@ -23,6 +23,10 @@ export interface Settings {
   subtitleStyle: SubtitleStyleType;
   /** UI display language code, e.g. "ko", "en", "ja". */
   interfaceLanguage: string;
+  plan: 'free' | 'standard' | 'pro';
+  planExpiresAt: number | null;
+  monthlyUsedMinutes: number;
+  monthlyResetAt: number | null;
 }
 
 interface SettingsStore extends Settings {
@@ -53,6 +57,10 @@ const DEFAULTS: Settings = {
   thermalProtection: true,
   subtitleStyle: "pill",  // 기본값: 갈매기형
   interfaceLanguage: defaultInterfaceLang,
+  plan: 'free',
+  planExpiresAt: null,
+  monthlyUsedMinutes: 0,
+  monthlyResetAt: null,
 };
 
 const STORAGE_KEY = "realtimesub_settings";
@@ -93,6 +101,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       thermalProtection: current.thermalProtection,
       subtitleStyle: current.subtitleStyle,
       interfaceLanguage: current.interfaceLanguage,
+      plan: current.plan,
+      planExpiresAt: current.planExpiresAt,
+      monthlyUsedMinutes: current.monthlyUsedMinutes,
+      monthlyResetAt: current.monthlyResetAt,
     };
     AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ ...toSave, ...partial }));
   },

@@ -75,6 +75,19 @@ import {
   savePartialSubtitles,
   makeSegmentId,
 } from "../services/subtitleDB";
+import { usePlanStore } from '../store/usePlanStore';
+import {
+  serverTranslate,
+  fetchCompletedBatches,
+  loadServerBridgeConfig,
+  makeStableVideoId,
+  makeDeterministicYtKey,
+  classifyServerError,
+  safeRecordUsage,
+  _usageRecorded,
+} from '../services/serverBridgeService';
+import type { ServerCompletedBatchesResponse } from '../services/serverBridgeService';
+import { recordGpuSeconds } from '../services/usageTracker';
 
 // ── 상수 ─────────────────────────────────────────────────────────────────────
 
@@ -256,6 +269,9 @@ export default function YoutubePlayerScreen() {
   } = useMediaProjectionProcessor();
 
   const { isRetranslating } = useRetranslate();
+  const planTier    = usePlanStore((s) => s.tier);
+  const canProcess  = usePlanStore((s) => s.canProcess);
+  const recordUsage = usePlanStore((s) => s.recordUsage);
 
   const {
     status:              bgStatus,
@@ -929,6 +945,18 @@ export default function YoutubePlayerScreen() {
       return;
     }
 
+    // ── Plan gate ──────────────────────────────────────────────────────────────
+    const estimatedMinutes = Math.ceil((result.segments.length * 3) / 60);
+    const { allowed, reason: planReason } = canProcess(estimatedMinutes);
+    if (!allowed) {
+      setPhase('error');
+      console.warn('[YT_SCREEN] Plan limit reached:', planReason);
+      return;
+    }
+
+    // ── Plan routing ───────────────────────────────────────────────────────────
+    const useServer = planTier === 'standard' || planTier === 'pro';
+
     const myJobId = ++jobIdRef.current;
     cancelledRef.current = false;
 
@@ -1052,87 +1080,231 @@ export default function YoutubePlayerScreen() {
     }));
 
     try {
-      const translated = await translateSegments(
-        translateInput,
-        (completed, total, partial) => {
-          if (loadingSubLabelRef.current !== '') {
-            setLoadingLabel('');
+      let translated: typeof translateInput;
+
+      if (useServer) {
+        // ── Server path (Standard/Pro) ────────────────────────────────────────
+        try {
+          const serverConfig = await loadServerBridgeConfig();
+          if (!serverConfig) throw new Error('Server not configured');
+
+          const stableId = makeStableVideoId(youtubeVideoId ?? 'yt_default');
+          // RULE 13: compute batchKey ONCE before try — never regenerate on retry
+          const batchKey = makeDeterministicYtKey(stableId, translateInput);
+
+          const serverResult = await serverTranslate({
+            segments: translateInput.map(s => ({ start: s.start, end: s.end, text: s.text })),
+            targetLanguage: langName,
+            videoId: batchKey, // idempotency key — same on any retry
+          });
+
+          // ── [BILLING] safeRecordUsage ─────────────────────────────────────
+          if (serverResult.completed) {
+            safeRecordUsage(batchKey, serverResult.usageSeconds, recordUsage, recordGpuSeconds, planTier).catch(e => {
+              console.error('[YT_SCREEN] safeRecordUsage error:', e);
+            });
           }
-          if (myJobId !== jobIdRef.current) return;
-          if (isBgRunningRef.current) return;
 
-          const totalDone = alreadyDoneCount + completed;
-          const totalAll  = total;
-          setTranslatedCount(totalDone);
-          const newProgress = totalAll > 0 ? totalDone / totalAll : 0;
-          if (newProgress > animProgressRef.current) animateTo(newProgress);
+          // RULE 8: ±300ms tolerance matching (NOT index-based)
+          translated = translateInput.map((item) => {
+            const match = serverResult.segments.find(
+              s => Math.abs(s.start - item.start) < 0.3 && Math.abs(s.end - item.end) < 0.3
+            );
+            return { ...item, translated: match?.translated ?? item.text };
+          });
 
-          const now = performance.now();
-          if (lastCompletedRef.current > 0 && completed > lastCompletedRef.current) {
-            const delta   = completed - lastCompletedRef.current;
-            const elapsed = (now - batchStartTimeRef.current) / 1000;
-            if (elapsed >= 0.05) {
-              const rate = delta / elapsed;
-              const secPerSeg = 1 / rate;
-              if (secsPerSegmentRef.current === 0) {
-                secsPerSegmentRef.current = secPerSeg;
-              } else {
-                secsPerSegmentRef.current =
-                  0.7 * secsPerSegmentRef.current + 0.3 * secPerSeg;
+        } catch (serverErr: any) {
+          console.warn('[YT_SCREEN] Server translate failed:', serverErr);
+
+          if (planTier === 'pro') throw serverErr; // Pro: no fallback (RULE 6)
+
+          // RULE 6: Standard fallback decision tree
+          const errClass = classifyServerError(serverErr);
+          if (errClass === 'auth' || errClass === 'validation') throw serverErr; // fatal
+
+          const stableId = makeStableVideoId(youtubeVideoId ?? 'yt_default');
+          // RULE 13: same deterministic inputs → same batchKey as above — no new generation
+          const batchKey = makeDeterministicYtKey(stableId, translateInput);
+
+          // fetchCompletedBatches: 3-state (RULE 6)
+          let checkResult = await fetchCompletedBatches(stableId);
+
+          // RULE 6 + RULE 13: UNKNOWN → retry ONCE (2s backoff, same stableId/batchKey)
+          // Server honors idempotency key → no GPU recompute on retry
+          if (checkResult.state === 'UNKNOWN') {
+            console.log('[YT_SCREEN] fetchCompletedBatches UNKNOWN — retrying in 2s (same key, no recompute)');
+            await new Promise(r => setTimeout(r, 2000));
+            checkResult = await fetchCompletedBatches(stableId);
+          }
+
+          if (checkResult.state === 'COMPLETED') {
+            console.log('[YT_SCREEN] Server completed (checkpoint). Using checkpoint result.');
+            const serverBatch = checkResult.batches[0];
+            if (serverBatch?.usageSeconds > 0) {
+              safeRecordUsage(batchKey, serverBatch.usageSeconds, recordUsage, recordGpuSeconds, planTier).catch(e => {
+                console.error('[YT_SCREEN] Checkpoint billing error:', e);
+              });
+            }
+            translated = translateInput.map((item) => {
+              const match = serverBatch?.segments.find(
+                s => Math.abs(s.start - item.start) < 0.3 && Math.abs(s.end - item.end) < 0.3
+              );
+              return { ...item, translated: match?.translated ?? item.text };
+            });
+
+          } else {
+            // NOT_COMPLETED or still UNKNOWN → Standard: Gemma fallback, no billing, no GPU recompute
+            console.log(`[YT_SCREEN] Server ${checkResult.state} — Standard fallback to Gemma (no billing)`);
+            const hasGemma = await ensureGemma();
+            if (!hasGemma) throw serverErr;
+
+            // Gemma fallback — VERBATIM copy of Free path below
+            translated = await translateSegments(
+              translateInput,
+              (completed, total, partial) => {
+                if (loadingSubLabelRef.current !== '') { setLoadingLabel(''); }
+                if (myJobId !== jobIdRef.current) return;
+                if (isBgRunningRef.current) return;
+
+                const totalDone = alreadyDoneCount + completed;
+                const totalAll  = total;
+                setTranslatedCount(totalDone);
+                const newProgress = totalAll > 0 ? totalDone / totalAll : 0;
+                if (newProgress > animProgressRef.current) animateTo(newProgress);
+
+                const now = performance.now();
+                if (lastCompletedRef.current > 0 && completed > lastCompletedRef.current) {
+                  const delta   = completed - lastCompletedRef.current;
+                  const elapsed = (now - batchStartTimeRef.current) / 1000;
+                  if (elapsed >= 0.05) {
+                    const rate = delta / elapsed;
+                    const secPerSeg = 1 / rate;
+                    if (secsPerSegmentRef.current === 0) {
+                      secsPerSegmentRef.current = secPerSeg;
+                    } else {
+                      secsPerSegmentRef.current = 0.7 * secsPerSegmentRef.current + 0.3 * secPerSeg;
+                    }
+                  }
+                }
+                batchStartTimeRef.current = now;
+                lastCompletedRef.current  = completed;
+
+                const remaining = totalAll - totalDone;
+                if (secsPerSegmentRef.current > 0.02 && remaining > 0 && completed > 5) {
+                  const nextEstimate = remaining * secsPerSegmentRef.current;
+                  setRemainingSecs(prev => {
+                    if (prev === null) return Math.ceil(nextEstimate);
+                    const clamped = Math.min(prev * 1.3, Math.max(prev * 0.7, nextEstimate));
+                    return Math.ceil(clamped);
+                  });
+                } else {
+                  setRemainingSecs(null);
+                }
+
+                const shouldUpdateUI = (completed % 3 === 0) || (completed === total);
+                if (shouldUpdateUI) {
+                  const newTranslatedMap = new Map<string, string>();
+                  partial?.forEach((p, idx) => {
+                    const item = inputFiltered[idx];
+                    if (p?.translated && item) newTranslatedMap.set(item.id, p.translated);
+                  });
+                  const updatedSubs: SubtitleSegment[] = originalOnly.map((sub) => ({
+                    ...sub,
+                    translated: newTranslatedMap.get(sub.id) ?? sub.translated ?? "",
+                  }));
+                  setPhase("translating");
+                  scheduleSetSubtitles(updatedSubs, myJobId);
+                  savePartialSubtitles(
+                    youtubeVideoId ?? "default", useLang, useGenre, updatedSubs, totalDone,
+                  ).catch(() => {});
+                }
+              },
+              youtubeVideoId ?? "default",
+              langName,
+              useGenre,
+            );
+          }
+        }
+
+      } else {
+        // ── Free path (on-device Gemma) — COMPLETELY UNCHANGED ───────────────
+        translated = await translateSegments(
+          translateInput,
+          (completed, total, partial) => {
+            if (loadingSubLabelRef.current !== '') {
+              setLoadingLabel('');
+            }
+            if (myJobId !== jobIdRef.current) return;
+            if (isBgRunningRef.current) return;
+
+            const totalDone = alreadyDoneCount + completed;
+            const totalAll  = total;
+            setTranslatedCount(totalDone);
+            const newProgress = totalAll > 0 ? totalDone / totalAll : 0;
+            if (newProgress > animProgressRef.current) animateTo(newProgress);
+
+            const now = performance.now();
+            if (lastCompletedRef.current > 0 && completed > lastCompletedRef.current) {
+              const delta   = completed - lastCompletedRef.current;
+              const elapsed = (now - batchStartTimeRef.current) / 1000;
+              if (elapsed >= 0.05) {
+                const rate = delta / elapsed;
+                const secPerSeg = 1 / rate;
+                if (secsPerSegmentRef.current === 0) {
+                  secsPerSegmentRef.current = secPerSeg;
+                } else {
+                  secsPerSegmentRef.current =
+                    0.7 * secsPerSegmentRef.current + 0.3 * secPerSeg;
+                }
               }
             }
-          }
-          batchStartTimeRef.current = now;
-          lastCompletedRef.current  = completed;
+            batchStartTimeRef.current = now;
+            lastCompletedRef.current  = completed;
 
-          const remaining = totalAll - totalDone;
-          if (
-            secsPerSegmentRef.current > 0.02 &&
-            remaining > 0 &&
-            completed > 5
-          ) {
-            const nextEstimate = remaining * secsPerSegmentRef.current;
-            setRemainingSecs(prev => {
-              if (prev === null) return Math.ceil(nextEstimate);
-              const clamped = Math.min(prev * 1.3, Math.max(prev * 0.7, nextEstimate));
-              return Math.ceil(clamped);
-            });
-          } else {
-            setRemainingSecs(null);
-          }
+            const remaining = totalAll - totalDone;
+            if (secsPerSegmentRef.current > 0.02 && remaining > 0 && completed > 5) {
+              const nextEstimate = remaining * secsPerSegmentRef.current;
+              setRemainingSecs(prev => {
+                if (prev === null) return Math.ceil(nextEstimate);
+                const clamped = Math.min(prev * 1.3, Math.max(prev * 0.7, nextEstimate));
+                return Math.ceil(clamped);
+              });
+            } else {
+              setRemainingSecs(null);
+            }
 
-          const shouldUpdateUI = (completed % 3 === 0) || (completed === total);
+            const shouldUpdateUI = (completed % 3 === 0) || (completed === total);
+            if (shouldUpdateUI) {
+              const newTranslatedMap = new Map<string, string>();
+              partial?.forEach((p, idx) => {
+                const item = inputFiltered[idx];
+                if (p?.translated && item) newTranslatedMap.set(item.id, p.translated);
+              });
+              const updatedSubs: SubtitleSegment[] = originalOnly.map((sub) => ({
+                ...sub,
+                translated: newTranslatedMap.get(sub.id) ?? sub.translated ?? "",
+              }));
+              setPhase("translating");
+              scheduleSetSubtitles(updatedSubs, myJobId);
+              savePartialSubtitles(
+                youtubeVideoId ?? "default",
+                useLang,
+                useGenre,
+                updatedSubs,
+                totalDone,
+              ).catch(() => {});
+            }
+          },
+          youtubeVideoId ?? "default",
+          langName,
+          useGenre,
+        );
+      }
 
-          if (shouldUpdateUI) {
-            const newTranslatedMap = new Map<string, string>();
-            partial?.forEach((p, idx) => {
-              const item = inputFiltered[idx];
-              if (p?.translated && item) {
-                newTranslatedMap.set(item.id, p.translated);
-              }
-            });
-
-            const updatedSubs: SubtitleSegment[] = originalOnly.map((sub) => ({
-              ...sub,
-              translated: newTranslatedMap.get(sub.id) ?? sub.translated ?? "",
-            }));
-
-            setPhase("translating");
-            scheduleSetSubtitles(updatedSubs, myJobId);
-
-            savePartialSubtitles(
-              youtubeVideoId ?? "default",
-              useLang,
-              useGenre,
-              updatedSubs,
-              totalDone,
-            ).catch(() => {});
-          }
-        },
-        youtubeVideoId ?? "default",
-        langName,
-        useGenre,
-      );
+      // ── ALL POST-TRANSLATION LOGIC BELOW IS UNCHANGED ────────────────────────
+      // finalMap, finalSubs, setSubtitles, setPhase, animateTo,
+      // setTranslatedCount, setTranslationEverCompleted, saveSubtitles
+      // remain exactly as-is from the original file.
 
       if (isBgRunningRef.current || myJobId !== jobIdRef.current) return;
 

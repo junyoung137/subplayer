@@ -21,6 +21,7 @@ import { useAuthStore } from "../store/useAuthStore";
 import { signOut } from "../services/authService";
 import { auth } from "../services/firebase";
 import { KeyRound, LogOut, Trash2, Eye, EyeOff, Check } from 'lucide-react-native';
+import { DevModePanel } from '../components/DevModePanel';
 
 export default function SettingsScreen() {
   const settings = useSettingsStore();
@@ -425,6 +426,9 @@ export default function SettingsScreen() {
           </Pressable>
         </Pressable>
       </Modal>
+
+      {/* [DEV] Developer Test Mode Panel — renders null in production */}
+      <DevModePanel />
 
     </ScrollView>
   );

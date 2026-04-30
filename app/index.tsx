@@ -26,10 +26,11 @@ import { usePlayerStore } from "../store/usePlayerStore";
 import { useSettingsStore } from "../store/useSettingsStore";
 import { LANGUAGES } from "../constants/languages";
 import { UrlInputModal } from "../components/UrlInputModal";
+import { DirectPlayModal } from "../components/DirectPlayModal";
 import {
   Camera, Film, Settings, FolderOpen, Folder, Package,
   Clock, CaseSensitive, Search, Star, Check, X,
-  AlertTriangle, Mic, Pencil,
+  AlertTriangle, Mic, Pencil, Play,
 } from 'lucide-react-native';
 
 // ── Thumbnail helper (graceful fallback if expo-video-thumbnails not installed) ──
@@ -53,15 +54,15 @@ export type SortOrder = "recent" | "name" | "size";
 export interface RecentFile {
   uri: string;
   name: string;
-  category?: string;       // category id
-  addedAt: number;         // timestamp ms
-  duration?: number;       // seconds
-  fileSize?: number;       // bytes
+  category?: string;
+  addedAt: number;
+  duration?: number;
+  fileSize?: number;
   thumbnailUri?: string;
   subtitleStatus?: SubtitleStatus;
   subtitlePercent?: number;
-  language?: string;       // detected lang code e.g. "en"
-  targetLanguage?: string; // translated lang code e.g. "ko"
+  language?: string;
+  targetLanguage?: string;
   isFavorite?: boolean;
   lastPlayedAt?: number;
 }
@@ -69,7 +70,7 @@ export interface RecentFile {
 export interface Category {
   id: string;
   name: string;
-  parentId?: string;       // undefined = root category
+  parentId?: string;
 }
 
 // ── Persistence ───────────────────────────────────────────────────────────────
@@ -119,9 +120,6 @@ async function getFileSize(uri: string): Promise<number | undefined> {
 
 async function deleteFileFromDisk(uri: string): Promise<void> {
   try {
-    // Only delete files stored in our app's own directories
-    // (documentDirectory or cacheDirectory). Never delete external URIs
-    // like content:// or original user-picked files outside our scope.
     const ownedPrefixes = [
       FileSystem.documentDirectory ?? "",
       FileSystem.cacheDirectory ?? "",
@@ -156,7 +154,6 @@ function localCacheKey(uri: string): string {
 async function deleteSubtitleCacheForUri(uri: string): Promise<void> {
   try {
     const cacheKey = localCacheKey(uri);
-    // Remove AsyncStorage keys for this URI
     const allKeys = await AsyncStorage.getAllKeys();
     const toRemove = allKeys.filter(
       (k) =>
@@ -167,7 +164,6 @@ async function deleteSubtitleCacheForUri(uri: string): Promise<void> {
     if (toRemove.length > 0) {
       await AsyncStorage.multiRemove(toRemove);
     }
-    // Remove SQLite subtitle cache entries
     await deleteSubtitleCache(cacheKey);
     console.log("[CACHE] Cleaned subtitle cache for:", cacheKey);
   } catch (e) {
@@ -205,11 +201,6 @@ function flagEmoji(code?: string): string {
 
 const thumbCache: Record<string, string> = {};
 
-/**
- * Smart thumbnail extraction — avoids black opening frames.
- * Tries: 10% of duration → 10s → 5s → 3s → 1s
- * Android: ensures uri starts with file:// before calling getThumbnailAsync
- */
 async function fetchThumbnail(
   uri: string,
   durationSec?: number,
@@ -217,7 +208,6 @@ async function fetchThumbnail(
   if (!getThumbnailAsync) return null;
   if (thumbCache[uri]) return thumbCache[uri];
 
-  // Android requires file:// scheme — content:// URIs will fail
   const safeUri = uri.startsWith("file://") || uri.startsWith("http")
     ? uri
     : "file://" + uri;
@@ -227,7 +217,6 @@ async function fetchThumbnail(
     const tenPct = Math.max(Math.floor(durationSec * 0.1) * 1000, 3000);
     candidates.push(tenPct);
   }
-  // Fixed fallbacks — avoids black intro frames
   candidates.push(10000, 5000, 3000, 1000, 500);
 
   for (const timeMs of candidates) {
@@ -244,15 +233,6 @@ async function fetchThumbnail(
 
 // ── Sub-components ────────────────────────────────────────────────────────────
 
-/**
- * FileThumbnail
- * - Auto-extracts on mount (smart multi-point, avoids black frames)
- * - Fades in smoothly once ready
- * - Shows camera edit-overlay badge so user knows it's tappable
- * - Empty state: clean placeholder with camera icon
- * - Tap (empty) or tap camera badge (filled) → onPickManual
- * - All images: center crop via resizeMode="cover"
- */
 function FileThumbnail({
   uri,
   thumbUri,
@@ -294,7 +274,6 @@ function FileThumbnail({
     return () => { cancelled = true; };
   }, [uri, thumbUri, duration]);
 
-  // ── Skeleton / loading state ──────────────────────────────────────────────
   if (loading) {
     return (
       <View style={thumbStyles.wrap}>
@@ -304,21 +283,17 @@ function FileThumbnail({
     );
   }
 
-  // ── Filled: thumbnail present ─────────────────────────────────────────────
   if (thumb) {
     return (
       <View style={thumbStyles.wrap}>
-        {/* Center-crop image with fade-in */}
         <Animated.Image
           source={{ uri: thumb }}
           style={[thumbStyles.img, { opacity: fadeAnim }]}
           resizeMode="cover"
         />
-        {/* Subtle play overlay */}
         <View style={thumbStyles.playOverlay} pointerEvents="none">
           <Text style={thumbStyles.playIcon}>▶</Text>
         </View>
-        {/* Camera badge — bottom-right corner — signals "tap to change" */}
         <TouchableOpacity
           style={thumbStyles.camBadge}
           onPress={onPickManual}
@@ -331,7 +306,6 @@ function FileThumbnail({
     );
   }
 
-  // ── Empty: no thumbnail yet ───────────────────────────────────────────────
   return (
     <TouchableOpacity
       style={[thumbStyles.wrap, thumbStyles.wrapEmpty]}
@@ -366,7 +340,6 @@ const thumbStyles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     backgroundColor: "#1e1e1e",
   },
-  // center-crop: fill the container completely
   img: {
     width: "100%",
     height: "100%",
@@ -380,7 +353,6 @@ const thumbStyles = StyleSheet.create({
     justifyContent: "center",
   },
   playIcon: { color: "#fff", fontSize: 13, opacity: 0.85 },
-  // Camera badge — bottom-right corner
   camBadge: {
     position: "absolute",
     bottom: 3,
@@ -390,11 +362,9 @@ const thumbStyles = StyleSheet.create({
     paddingHorizontal: 3,
     paddingVertical: 1,
   },
-  // Empty placeholder
   emptyLabel: { color: "#444", fontSize: 9, fontWeight: "600", letterSpacing: 0.2 },
 });
 
-// Subtitle status badge
 function SubBadge({ status, percent }: { status?: SubtitleStatus; percent?: number }) {
   const { t } = useTranslation();
   if (!status || status === "none") return null;
@@ -628,7 +598,9 @@ export default function HomeScreen() {
   const [categories,       setCategories]       = useState<Category[]>([]);
   const [selectedCat,      setSelectedCat]      = useState<string>(DEFAULT_CATEGORY);
   const [langModalVisible, setLangModalVisible] = useState(false);
-  const [filePickerVisible, setFilePickerVisible] = useState(false); // ← 추가
+  const [filePickerVisible,  setFilePickerVisible]  = useState(false);
+  // ── 새로 추가: 바로보기 모드 모달 ─────────────────────────────────────────
+  const [directPlayVisible, setDirectPlayVisible] = useState(false);
   const [searchQuery,      setSearchQuery]      = useState("");
   const [searchActive,     setSearchActive]     = useState(false);
   const [sortOrder,        setSortOrder]        = useState<SortOrder>("recent");
@@ -654,7 +626,7 @@ export default function HomeScreen() {
   }>({ visible: false });
   const [moveModal, setMoveModal] = useState<{ visible: boolean; file?: RecentFile }>({ visible: false });
 
-  const [hasWhisperModel, setHasWhisperModel] = useState(true); // true = no banner on first render
+  const [hasWhisperModel, setHasWhisperModel] = useState(true);
   const [hasGemmaModel,   setHasGemmaModel]   = useState(true);
 
   const checkModels = useCallback(async () => {
@@ -686,7 +658,7 @@ export default function HomeScreen() {
   );
 
   const setVideo = usePlayerStore((s) => s.setVideo);
-  const setYoutubeVideo = usePlayerStore((s) => s.setYoutubeVideo); // ← 추가
+  const setYoutubeVideo = usePlayerStore((s) => s.setYoutubeVideo);
   const setPendingGenre = usePlayerStore((s) => s.setPendingGenre);
   const pendingFileRef = useRef<{ uri: string; name: string } | null>(null);
 
@@ -711,7 +683,6 @@ export default function HomeScreen() {
         const raw = await AsyncStorage.getItem('bg_translation_pending_task');
         if (!raw) return;
         const task = JSON.parse(raw);
-        // Only show resume if task was enqueued within the last 24 hours
         if (!task.videoId || Date.now() - (task.enqueuedAt ?? 0) > 86400000) {
           await AsyncStorage.removeItem('bg_translation_pending_task');
           return;
@@ -736,7 +707,6 @@ export default function HomeScreen() {
       if (selectedCat === DEFAULT_CATEGORY) return true;
       if (selectedCat === "__uncat__") return !f.category;
       if (selectedCat === "__fav__") return f.isFavorite;
-      // check if selectedCat or its sub-cats match
       const subCatIds = categories
         .filter((c) => c.parentId === selectedCat)
         .map((c) => c.id);
@@ -758,7 +728,6 @@ export default function HomeScreen() {
     return files;
   }, [recentFiles, categories, selectedCat, searchQuery, sortOrder]);
 
-  // Recent played (last 5, has lastPlayedAt)
   const recentlyPlayed = useMemo(() => {
     return [...recentFiles]
       .filter((f) => f.lastPlayedAt)
@@ -788,7 +757,6 @@ export default function HomeScreen() {
   };
 
   const deleteCategory = (id: string) => {
-    // also delete all sub-categories
     const toDelete = new Set<string>([id]);
     categories.filter((c) => c.parentId === id).forEach((c) => toDelete.add(c.id));
     Alert.alert(t("home.folderDelete"), t("home.folderDeleteMsg"), [
@@ -848,12 +816,11 @@ export default function HomeScreen() {
               const result = await ImagePicker.launchImageLibraryAsync({
                 mediaTypes: ['images'],
                 allowsEditing: true,
-                aspect: [3, 2],   // enforce 3:2 crop — matches thumbStyles wrap ratio
+                aspect: [3, 2],
                 quality: 0.8,
               });
               if (result.canceled || !result.assets[0]) return;
               const picked = result.assets[0].uri;
-              // Persist to cache dir so uri survives app restarts
               const cacheDir = FileSystem.cacheDirectory + "thumbs/";
               await FileSystem.makeDirectoryAsync(cacheDir, { intermediates: true });
               const dest = cacheDir + Date.now() + ".jpg";
@@ -888,7 +855,7 @@ export default function HomeScreen() {
     pendingSubtitleRef.current = null;
   }, []);
 
-  // ── 새 핸들러: 로컬 파일 선택 후 처리 ─────────────────────────────────────
+  // ── 번역 모드: 로컬 파일 선택 후 처리 ────────────────────────────────────
   const handleLocalFilePicked = async (stableUri: string, name: string, genre: string, subtitleUri?: string) => {
     const fileSize = await getFileSize(stableUri);
     const thumbUri = (await fetchThumbnail(stableUri, undefined)) ?? undefined;
@@ -915,10 +882,10 @@ export default function HomeScreen() {
     setPendingGenre(genre);
     setVideo(stableUri, name);
     pendingFileRef.current = { uri: stableUri, name };
-    setLangModalVisible(true); // 기존 언어 선택 모달 그대로 사용
+    setLangModalVisible(true);
   };
 
-  // ── 새 핸들러: URL (YouTube) 선택 후 처리 ─────────────────────────────────
+  // ── 번역 모드: URL(YouTube) 선택 후 처리 ─────────────────────────────────
   const handleUrlPicked = (videoId: string, title: string, isYoutube: boolean, genre?: string, subtitleUri?: string) => {
     if (isYoutube) {
       if (subtitleUri) {
@@ -928,13 +895,65 @@ export default function HomeScreen() {
       setYoutubeVideo(videoId, title);
       setTimeout(() => router.push("/youtube-player"), 0);
     }
-    // 일반 URL은 향후 확장 가능
+  };
+
+  // ── 바로보기 모드: 로컬 파일 선택 후 번역 없이 바로 플레이어 진입 ────────
+  const handleDirectLocalFilePicked = async (
+    stableUri: string,
+    name: string,
+    subtitleUri?: string,
+  ) => {
+    const fileSize = await getFileSize(stableUri);
+    const thumbUri = (await fetchThumbnail(stableUri, undefined)) ?? undefined;
+    const autoCategory =
+      selectedCat !== DEFAULT_CATEGORY &&
+      selectedCat !== "__uncat__" &&
+      selectedCat !== "__fav__"
+        ? selectedCat
+        : undefined;
+
+    const entry: RecentFile = {
+      uri: stableUri,
+      name,
+      category: autoCategory,
+      addedAt: Date.now(),
+      fileSize,
+      thumbnailUri: thumbUri,
+      subtitleStatus: "none",
+    };
+
+    setRecentFiles((prev) => {
+      const filtered = prev.filter((f) => f.uri !== stableUri);
+      return [entry, ...filtered].slice(0, 50);
+    });
+
+    // 자막이 있으면 적용, 없으면 null (번역 없이 그냥 재생)
+    pendingSubtitleRef.current = subtitleUri ?? null;
+    setVideo(stableUri, name);
+    pendingFileRef.current = { uri: stableUri, name };
+
+    // 번역 과정(processing) 없이 바로 플레이어로
+    router.push("/player");
+  };
+
+  // ── 바로보기 모드: URL(YouTube) 선택 후 번역 없이 바로 플레이어 진입 ─────
+  const handleDirectUrlPicked = (
+    videoId: string,
+    title: string,
+    subtitleUri?: string,
+  ) => {
+    if (subtitleUri) {
+      pendingSubtitleRef.current = subtitleUri;
+    } else {
+      pendingSubtitleRef.current = null;
+    }
+    setYoutubeVideo(videoId, title);
+    setTimeout(() => router.push("/youtube-player"), 0);
   };
 
   const handleResume = useCallback(() => {
     if (!resumeDialog) return;
     setResumeDialog(null);
-    // Restore store state so youtube-player screen can load
     setYoutubeVideo(resumeDialog.videoId, resumeDialog.videoTitle);
     router.push('/youtube-player');
   }, [resumeDialog, setYoutubeVideo]);
@@ -943,14 +962,6 @@ export default function HomeScreen() {
     setResumeDialog(null);
     await AsyncStorage.removeItem('bg_translation_pending_task').catch(() => {});
   }, []);
-
-  // pickVideo 함수는 더 이상 버튼에서 직접 호출되지 않지만,
-  // UrlInputModal 내부에서 로컬 파일 선택 시에도 동일한 로직을 사용하므로 유지
-  const pickVideo = async () => {
-    // 실제로는 UrlInputModal이 대신 처리하므로 빈 함수로 두거나,
-    // 필요 시 내부에서 DocumentPicker를 호출할 수도 있음 (현재는 모달이 담당)
-    // 여기서는 모달이 모든 파일/URL 입력을 담당하므로 단순히 모달을 여는 용도로만 사용
-  };
 
   const openRecent = async (file: RecentFile) => {
     const stableUri = await ensureFileUri(file.uri, file.name);
@@ -1018,8 +1029,7 @@ export default function HomeScreen() {
   };
 
   const handleLongPress = useCallback((file: RecentFile) => {
-    if (multiSelect) return; // already in multi-select
-    // Enter multi-select and select this file
+    if (multiSelect) return;
     setMultiSelect(true);
     setSelectedUris(new Set([file.uri]));
   }, [multiSelect]);
@@ -1039,10 +1049,7 @@ export default function HomeScreen() {
     ? categories.find((c) => c.id === currentCatObj.parentId)
     : undefined;
 
-  // Sub-categories of selected
   const subCategories = categories.filter((c) => c.parentId === selectedCat);
-
-  // Root categories
   const rootCategories = categories.filter((c) => !c.parentId);
 
   // ── Render file item ───────────────────────────────────────────────────────
@@ -1063,14 +1070,12 @@ export default function HomeScreen() {
         delayLongPress={400}
         activeOpacity={0.75}
       >
-        {/* Multi-select checkbox */}
         {multiSelect && (
           <View style={[styles.checkbox, isSelected && styles.checkboxSelected]}>
             {isSelected && <Check size={14} color="#fff" />}
           </View>
         )}
 
-        {/* Thumbnail — auto-extracted (smart), tap camera badge to change */}
         <FileThumbnail
           uri={item.uri}
           thumbUri={item.thumbnailUri}
@@ -1078,14 +1083,12 @@ export default function HomeScreen() {
           onPickManual={() => pickManualThumbnail(item.uri)}
         />
 
-        {/* Info */}
         <View style={{ flex: 1, gap: 2 }}>
           <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
             {item.isFavorite && <Star size={14} color="#f59e0b" fill="#f59e0b" />}
             <Text style={styles.recentName} numberOfLines={1}>{item.name}</Text>
           </View>
 
-          {/* Duration + Size */}
           <View style={styles.metaRow}>
             {item.duration ? <Text style={styles.metaText}>⏱ {formatDuration(item.duration)}</Text> : null}
             {item.fileSize ? <Text style={styles.metaText}>· {formatSize(item.fileSize)}</Text> : null}
@@ -1097,10 +1100,8 @@ export default function HomeScreen() {
             ) : null}
           </View>
 
-          {/* Subtitle badge */}
           <SubBadge status={item.subtitleStatus} percent={item.subtitlePercent} />
 
-          {/* Category badge in 전체 view */}
           {catName && selectedCat === DEFAULT_CATEGORY && (
             <View style={{ flexDirection: "row", alignItems: "center", gap: 3 }}>
               <Folder size={16} color="#aaa" />
@@ -1109,7 +1110,6 @@ export default function HomeScreen() {
           )}
         </View>
 
-        {/* Right actions — ☆ 즐겨찾기 + ⋯ 이동/삭제 메뉴 */}
         {!multiSelect && (
           <View style={styles.itemActions}>
             <TouchableOpacity
@@ -1137,304 +1137,321 @@ export default function HomeScreen() {
     <View style={styles.container}>
       <View style={{ flex: 1, justifyContent: "space-between" }}>
 
+        {/* ── 분할 버튼: 번역 모드 / 바로보기 모드 ─────────────────────────── */}
+        <View style={styles.pickButtonRow}>
 
-      {/* File open button — 이제 UrlInputModal을 통해 열림 */}
-      <TouchableOpacity 
-        style={styles.pickButton} 
-        onPress={() => setFilePickerVisible(true)}
-      >
-        <FolderOpen size={20} color="#aaa" />
-        <Text style={styles.pickText}>{t("home.pickText")}</Text>
-        <Text style={styles.pickSub}>{t("home.pickSub")}</Text>
-      </TouchableOpacity>
+          {/* 왼쪽: 번역 모드 */}
+          <TouchableOpacity
+            style={[styles.pickButtonHalf, styles.pickButtonLeft]}
+            onPress={() => setFilePickerVisible(true)}
+            activeOpacity={0.8}
+          >
+            <CaseSensitive size={20} color="#60a5fa" />
+            <Text style={styles.pickTextHalf}>{t("home.translateMode")}</Text>
+            <Text style={styles.pickSubHalf}>{t("home.translateModeDesc")}</Text>
+          </TouchableOpacity>
 
-      {/* ── Missing-model combined card ────────────────────────────────────── */}
-      {(!hasWhisperModel || !hasGemmaModel) && (
-        <TouchableOpacity
-          style={bannerStyles.modelCard}
-          onPress={() => router.push("/models")}
-          activeOpacity={0.8}
-        >
-          <View style={bannerStyles.modelCardHeader}>
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-              <AlertTriangle size={16} color="#f59e0b" />
-              <Text style={bannerStyles.modelCardTitle}>{t("home.modelBannerTitle")}</Text>
-            </View>
-            <Text style={bannerStyles.modelCardAction}>{t("home.modelBannerAction")}</Text>
-          </View>
-          <View style={bannerStyles.modelCardDivider} />
-          {!hasWhisperModel && (
-            <View style={bannerStyles.modelCardRow}>
-              <Mic size={14} color="#aaa" />
-              <Text style={[bannerStyles.modelCardRowText, { marginLeft: 6 }]}>{t("home.noModelBanner")}</Text>
-            </View>
-          )}
-          {!hasGemmaModel && (
-            <View style={bannerStyles.modelCardRow}>
-              <CaseSensitive size={14} color="#aaa" />
-              <Text style={[bannerStyles.modelCardRowText, { marginLeft: 6 }]}>{t("home.noGemmaBanner")}</Text>
-            </View>
-          )}
-        </TouchableOpacity>
-      )}
+          {/* 오른쪽: 바로보기 모드 */}
+          <TouchableOpacity
+            style={[styles.pickButtonHalf, styles.pickButtonRight]}
+            onPress={() => setDirectPlayVisible(true)}
+            activeOpacity={0.8}
+          >
+            <Play size={20} color="#a78bfa" />
+            <Text style={styles.pickTextHalf}>{t("home.directMode")}</Text>
+            <Text style={styles.pickSubHalf}>{t("home.directModeDesc")}</Text>
+          </TouchableOpacity>
 
-      {/* ── Recently played horizontal scroll ──────────────────────────────── */}
-      {recentlyPlayed.length > 0 && (
-        <View style={styles.recentPlaySection}>
-          <Text style={styles.recentPlayTitle}>{t("home.recentPlay")}</Text>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.recentPlayRow}>
-            {recentlyPlayed.map((file) => (
-              <TouchableOpacity
-                key={file.uri}
-                style={styles.recentPlayCard}
-                onPress={() => openRecent(file)}
-                activeOpacity={0.75}
-              >
-                <FileThumbnail uri={file.uri} thumbUri={file.thumbnailUri} duration={file.duration} />
-                <Text style={styles.recentPlayName} numberOfLines={2}>{file.name}</Text>
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
         </View>
-      )}
 
-      {/* ── Search bar ─────────────────────────────────────────────────────── */}
-      <View style={styles.searchRow}>
-        {searchActive ? (
-          <View style={styles.searchBar}>
-            <Search size={16} color="#555" />
-            <TextInput
-              style={styles.searchInput}
-              value={searchQuery}
-              onChangeText={setSearchQuery}
-              placeholder={t("home.searchPlaceholder")}
-              placeholderTextColor="#444"
-              autoFocus
-              selectionColor="#2563eb"
-            />
-            <TouchableOpacity onPress={() => { setSearchQuery(""); setSearchActive(false); }}>
-              <X size={14} color="#888" />
-            </TouchableOpacity>
-          </View>
-        ) : (
-          <TouchableOpacity style={styles.searchBarInactive} onPress={() => setSearchActive(true)}>
-            <Search size={16} color="#555" />
-            <Text style={styles.searchPlaceholder}>{t("home.searchPlaceholder")}</Text>
+        {/* ── Missing-model combined card ────────────────────────────────────── */}
+        {(!hasWhisperModel || !hasGemmaModel) && (
+          <TouchableOpacity
+            style={bannerStyles.modelCard}
+            onPress={() => router.push("/models")}
+            activeOpacity={0.8}
+          >
+            <View style={bannerStyles.modelCardHeader}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                <AlertTriangle size={16} color="#f59e0b" />
+                <Text style={bannerStyles.modelCardTitle}>{t("home.modelBannerTitle")}</Text>
+              </View>
+              <Text style={bannerStyles.modelCardAction}>{t("home.modelBannerAction")}</Text>
+            </View>
+            <View style={bannerStyles.modelCardDivider} />
+            {!hasWhisperModel && (
+              <View style={bannerStyles.modelCardRow}>
+                <Mic size={14} color="#aaa" />
+                <Text style={[bannerStyles.modelCardRowText, { marginLeft: 6 }]}>{t("home.noModelBanner")}</Text>
+              </View>
+            )}
+            {!hasGemmaModel && (
+              <View style={bannerStyles.modelCardRow}>
+                <CaseSensitive size={14} color="#aaa" />
+                <Text style={[bannerStyles.modelCardRowText, { marginLeft: 6 }]}>{t("home.noGemmaBanner")}</Text>
+              </View>
+            )}
           </TouchableOpacity>
         )}
-        <TouchableOpacity style={styles.sortBtn} onPress={() => setSortModalVisible(true)}>
-          {sortOrder === "recent"
-            ? <Clock size={14} color="#aaa" />
-            : sortOrder === "name"
-            ? <CaseSensitive size={14} color="#aaa" />
-            : <Package size={14} color="#aaa" />}
-        </TouchableOpacity>
-      </View>
 
-      {/* ── Category tab bar ───────────────────────────────────────────────── */}
-      <View style={styles.catBarWrap}>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.catBar}>
-          {/* 전체 */}
-          <TouchableOpacity
-            style={[styles.catTab, selectedCat === DEFAULT_CATEGORY && styles.catTabActive]}
-            onPress={() => setSelectedCat(DEFAULT_CATEGORY)}
-          >
-            <Text style={[styles.catTabText, selectedCat === DEFAULT_CATEGORY && styles.catTabTextActive]}>{t("home.allFolders")}</Text>
-          </TouchableOpacity>
-
-          {/* 즐겨찾기 */}
-          <TouchableOpacity
-            style={[styles.catTab, selectedCat === "__fav__" && styles.catTabActive]}
-            onPress={() => setSelectedCat("__fav__")}
-          >
-            <Text style={[styles.catTabText, selectedCat === "__fav__" && styles.catTabTextActive]}>{t("home.favorites")}</Text>
-          </TouchableOpacity>
-
-          {/* 미분류 */}
-          <TouchableOpacity
-            style={[styles.catTab, selectedCat === "__uncat__" && styles.catTabActive]}
-            onPress={() => setSelectedCat("__uncat__")}
-          >
-            <Text style={[styles.catTabText, selectedCat === "__uncat__" && styles.catTabTextActive]}>{t("home.uncat")}</Text>
-          </TouchableOpacity>
-
-          {/* Root categories */}
-          {rootCategories.map((cat) => (
-            <TouchableOpacity
-              key={cat.id}
-              style={[styles.catTab, selectedCat === cat.id && styles.catTabActive]}
-              onPress={() => setSelectedCat(cat.id)}
-              onLongPress={() =>
-                Alert.alert(cat.name, undefined, [
-                  { text: t("home.createSubfolder"), onPress: () => setCatNameModal({ visible: true, parentId: cat.id }) },
-                  { text: t("home.rename"),           onPress: () => setCatNameModal({ visible: true, editId: cat.id }) },
-                  { text: t("home.folderDelete"),     style: "destructive", onPress: () => deleteCategory(cat.id) },
-                  { text: t("common.cancel"),         style: "cancel" },
-                ])
-              }
-              delayLongPress={400}
-            >
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
-                <Folder size={16} color="#aaa" />
-                <Text style={[styles.catTabText, selectedCat === cat.id && styles.catTabTextActive]}>{cat.name}</Text>
-              </View>
-            </TouchableOpacity>
-          ))}
-
-          {/* New folder button */}
-          <TouchableOpacity style={styles.catTabNew} onPress={() => setCatNameModal({ visible: true })}>
-          <Text style={styles.catTabNewText}>＋</Text>
-          </TouchableOpacity>
-        </ScrollView>
-      </View>
-
-      {/* ── Sub-category tabs (shown when a root folder is selected) ───────── */}
-      {currentCatObj && !currentCatObj.parentId && subCategories.length > 0 && (
-        <View style={styles.subCatBarWrap}>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.subCatBar}>
-            {/* Show parent-only files option */}
-            <TouchableOpacity
-              style={[styles.subCatTab, selectedCat === currentCatObj.id && styles.subCatTabActive]}
-              onPress={() => setSelectedCat(currentCatObj.id)}
-            >
-              <Text style={[styles.subCatText, selectedCat === currentCatObj.id && styles.subCatTextActive]}>
-                {t("home.allWithCount", { count: recentFiles.filter((f) => {
-                  const ids = [currentCatObj.id, ...subCategories.map((c) => c.id)];
-                  return ids.includes(f.category ?? "");
-                }).length })}
-              </Text>
-            </TouchableOpacity>
-            {subCategories.map((sub) => {
-              const count = recentFiles.filter((f) => f.category === sub.id).length;
-              return (
+        {/* ── Recently played horizontal scroll ──────────────────────────────── */}
+        {recentlyPlayed.length > 0 && (
+          <View style={styles.recentPlaySection}>
+            <Text style={styles.recentPlayTitle}>{t("home.recentPlay")}</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.recentPlayRow}>
+              {recentlyPlayed.map((file) => (
                 <TouchableOpacity
-                  key={sub.id}
-                  style={[styles.subCatTab, selectedCat === sub.id && styles.subCatTabActive]}
-                  onPress={() => setSelectedCat(sub.id)}
-                  onLongPress={() =>
-                    Alert.alert(sub.name, undefined, [
-                      { text: t("home.rename"),       onPress: () => setCatNameModal({ visible: true, editId: sub.id }) },
-                      { text: t("home.folderDelete"), style: "destructive", onPress: () => deleteCategory(sub.id) },
-                      { text: t("common.cancel"),     style: "cancel" },
-                    ])
-                  }
-                  delayLongPress={400}
+                  key={file.uri}
+                  style={styles.recentPlayCard}
+                  onPress={() => openRecent(file)}
+                  activeOpacity={0.75}
                 >
-                  <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
-                    <FolderOpen size={20} color="#aaa" />
-                    <Text style={[styles.subCatText, selectedCat === sub.id && styles.subCatTextActive]}>{sub.name} ({count})</Text>
-                  </View>
+                  <FileThumbnail uri={file.uri} thumbUri={file.thumbnailUri} duration={file.duration} />
+                  <Text style={styles.recentPlayName} numberOfLines={2}>{file.name}</Text>
                 </TouchableOpacity>
-              );
-            })}
-            {/* Add sub-folder button */}
+              ))}
+            </ScrollView>
+          </View>
+        )}
+
+        {/* ── Search bar ─────────────────────────────────────────────────────── */}
+        <View style={styles.searchRow}>
+          {searchActive ? (
+            <View style={styles.searchBar}>
+              <Search size={16} color="#555" />
+              <TextInput
+                style={styles.searchInput}
+                value={searchQuery}
+                onChangeText={setSearchQuery}
+                placeholder={t("home.searchPlaceholder")}
+                placeholderTextColor="#444"
+                autoFocus
+                selectionColor="#2563eb"
+              />
+              <TouchableOpacity onPress={() => { setSearchQuery(""); setSearchActive(false); }}>
+                <X size={14} color="#888" />
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <TouchableOpacity style={styles.searchBarInactive} onPress={() => setSearchActive(true)}>
+              <Search size={16} color="#555" />
+              <Text style={styles.searchPlaceholder}>{t("home.searchPlaceholder")}</Text>
+            </TouchableOpacity>
+          )}
+          <TouchableOpacity style={styles.sortBtn} onPress={() => setSortModalVisible(true)}>
+            {sortOrder === "recent"
+              ? <Clock size={14} color="#aaa" />
+              : sortOrder === "name"
+              ? <CaseSensitive size={14} color="#aaa" />
+              : <Package size={14} color="#aaa" />}
+          </TouchableOpacity>
+        </View>
+
+        {/* ── Category tab bar ───────────────────────────────────────────────── */}
+        <View style={styles.catBarWrap}>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.catBar}>
             <TouchableOpacity
-              style={styles.subCatTabNew}
-              onPress={() => setCatNameModal({ visible: true, parentId: currentCatObj.id })}
+              style={[styles.catTab, selectedCat === DEFAULT_CATEGORY && styles.catTabActive]}
+              onPress={() => setSelectedCat(DEFAULT_CATEGORY)}
             >
-              <Text style={styles.subCatTextNew}>＋</Text>
+              <Text style={[styles.catTabText, selectedCat === DEFAULT_CATEGORY && styles.catTabTextActive]}>{t("home.allFolders")}</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.catTab, selectedCat === "__fav__" && styles.catTabActive]}
+              onPress={() => setSelectedCat("__fav__")}
+            >
+              <Text style={[styles.catTabText, selectedCat === "__fav__" && styles.catTabTextActive]}>{t("home.favorites")}</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.catTab, selectedCat === "__uncat__" && styles.catTabActive]}
+              onPress={() => setSelectedCat("__uncat__")}
+            >
+              <Text style={[styles.catTabText, selectedCat === "__uncat__" && styles.catTabTextActive]}>{t("home.uncat")}</Text>
+            </TouchableOpacity>
+
+            {rootCategories.map((cat) => (
+              <TouchableOpacity
+                key={cat.id}
+                style={[styles.catTab, selectedCat === cat.id && styles.catTabActive]}
+                onPress={() => setSelectedCat(cat.id)}
+                onLongPress={() =>
+                  Alert.alert(cat.name, undefined, [
+                    { text: t("home.createSubfolder"), onPress: () => setCatNameModal({ visible: true, parentId: cat.id }) },
+                    { text: t("home.rename"),           onPress: () => setCatNameModal({ visible: true, editId: cat.id }) },
+                    { text: t("home.folderDelete"),     style: "destructive", onPress: () => deleteCategory(cat.id) },
+                    { text: t("common.cancel"),         style: "cancel" },
+                  ])
+                }
+                delayLongPress={400}
+              >
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+                  <Folder size={16} color="#aaa" />
+                  <Text style={[styles.catTabText, selectedCat === cat.id && styles.catTabTextActive]}>{cat.name}</Text>
+                </View>
+              </TouchableOpacity>
+            ))}
+
+            <TouchableOpacity style={styles.catTabNew} onPress={() => setCatNameModal({ visible: true })}>
+              <Text style={styles.catTabNewText}>＋</Text>
             </TouchableOpacity>
           </ScrollView>
         </View>
-      )}
 
-      {/* ── Multi-select action bar ─────────────────────────────────────────── */}
-      {multiSelect && (
-        <View style={styles.multiBar}>
-          <Text style={styles.multiCount}>{t("home.selected", { count: selectedUris.size })}</Text>
-          <TouchableOpacity style={styles.multiBtn} onPress={() => setBatchMoveVisible(true)} disabled={selectedUris.size === 0}>
-            <Text style={styles.multiBtnText}>{t("home.moveBtn")}</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={[styles.multiBtn, styles.multiBtnDanger]} onPress={deleteSelected} disabled={selectedUris.size === 0}>
-            <Text style={styles.multiBtnText}>{t("home.deleteBtn")}</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.multiBtn} onPress={() => { setMultiSelect(false); setSelectedUris(new Set()); }}>
-            <Text style={styles.multiBtnText}>{t("common.cancel")}</Text>
-          </TouchableOpacity>
-        </View>
-      )}
-
-      {/* ── File list ──────────────────────────────────────────────────────── */}
-      {recentFiles.length > 0 && (
-        <View style={styles.recentSection}>
-          <View style={styles.sectionHeader}>
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 4, flexShrink: 1 }}>
-              {parentCatObj && (
-                <>
-                  <Folder size={16} color="#aaa" />
-                  <Text style={styles.sectionTitle}>{parentCatObj.name} › </Text>
-                </>
-              )}
-              {currentCatObj && <Folder size={16} color="#aaa" />}
-              <Text style={styles.sectionTitle}>
-                {currentCatObj ? currentCatObj.name :
-                 selectedCat === "__uncat__" ? t("home.uncat") :
-                 selectedCat === "__fav__"   ? t("home.favorites") : t("home.fileList")}
-                <Text style={styles.fileCount}> {t("home.fileCount", { count: filteredFiles.length })}</Text>
-              </Text>
-            </View>
-            <View style={{ flexDirection: "row", gap: 12, alignItems: "center" }}>
-              {!multiSelect && (
-                <TouchableOpacity onPress={() => setMultiSelect(true)}>
-                  <Text style={styles.multiSelectText}>{t("home.multiSelectBtn")}</Text>
-                </TouchableOpacity>
-              )}
-              {filteredFiles.length > 0 && (
-                <TouchableOpacity onPress={deleteAll} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                  <Text style={styles.clearAllText}>{t("home.deleteAll")}</Text>
-                </TouchableOpacity>
-              )}
-            </View>
+        {/* ── Sub-category tabs ───────────────────────────────────────────────── */}
+        {currentCatObj && !currentCatObj.parentId && subCategories.length > 0 && (
+          <View style={styles.subCatBarWrap}>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.subCatBar}>
+              <TouchableOpacity
+                style={[styles.subCatTab, selectedCat === currentCatObj.id && styles.subCatTabActive]}
+                onPress={() => setSelectedCat(currentCatObj.id)}
+              >
+                <Text style={[styles.subCatText, selectedCat === currentCatObj.id && styles.subCatTextActive]}>
+                  {t("home.allWithCount", { count: recentFiles.filter((f) => {
+                    const ids = [currentCatObj.id, ...subCategories.map((c) => c.id)];
+                    return ids.includes(f.category ?? "");
+                  }).length })}
+                </Text>
+              </TouchableOpacity>
+              {subCategories.map((sub) => {
+                const count = recentFiles.filter((f) => f.category === sub.id).length;
+                return (
+                  <TouchableOpacity
+                    key={sub.id}
+                    style={[styles.subCatTab, selectedCat === sub.id && styles.subCatTabActive]}
+                    onPress={() => setSelectedCat(sub.id)}
+                    onLongPress={() =>
+                      Alert.alert(sub.name, undefined, [
+                        { text: t("home.rename"),       onPress: () => setCatNameModal({ visible: true, editId: sub.id }) },
+                        { text: t("home.folderDelete"), style: "destructive", onPress: () => deleteCategory(sub.id) },
+                        { text: t("common.cancel"),     style: "cancel" },
+                      ])
+                    }
+                    delayLongPress={400}
+                  >
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+                      <FolderOpen size={20} color="#aaa" />
+                      <Text style={[styles.subCatText, selectedCat === sub.id && styles.subCatTextActive]}>{sub.name} ({count})</Text>
+                    </View>
+                  </TouchableOpacity>
+                );
+              })}
+              <TouchableOpacity
+                style={styles.subCatTabNew}
+                onPress={() => setCatNameModal({ visible: true, parentId: currentCatObj.id })}
+              >
+                <Text style={styles.subCatTextNew}>＋</Text>
+              </TouchableOpacity>
+            </ScrollView>
           </View>
+        )}
 
-          {filteredFiles.length === 0 ? (
-            <View style={styles.emptyBox}>
-              <Text style={styles.emptyText}>
-                {searchQuery ? t("home.noSearchResult") : t("home.noFilesInFolder")}
-              </Text>
-              <Text style={styles.emptyHint}>{t("home.multiSelectHint")}</Text>
+        {/* ── Multi-select action bar ─────────────────────────────────────────── */}
+        {multiSelect && (
+          <View style={styles.multiBar}>
+            <Text style={styles.multiCount}>{t("home.selected", { count: selectedUris.size })}</Text>
+            <TouchableOpacity style={styles.multiBtn} onPress={() => setBatchMoveVisible(true)} disabled={selectedUris.size === 0}>
+              <Text style={styles.multiBtnText}>{t("home.moveBtn")}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.multiBtn, styles.multiBtnDanger]} onPress={deleteSelected} disabled={selectedUris.size === 0}>
+              <Text style={styles.multiBtnText}>{t("home.deleteBtn")}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.multiBtn} onPress={() => { setMultiSelect(false); setSelectedUris(new Set()); }}>
+              <Text style={styles.multiBtnText}>{t("common.cancel")}</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {/* ── File list ──────────────────────────────────────────────────────── */}
+        {recentFiles.length > 0 && (
+          <View style={styles.recentSection}>
+            <View style={styles.sectionHeader}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 4, flexShrink: 1 }}>
+                {parentCatObj && (
+                  <>
+                    <Folder size={16} color="#aaa" />
+                    <Text style={styles.sectionTitle}>{parentCatObj.name} › </Text>
+                  </>
+                )}
+                {currentCatObj && <Folder size={16} color="#aaa" />}
+                <Text style={styles.sectionTitle}>
+                  {currentCatObj ? currentCatObj.name :
+                   selectedCat === "__uncat__" ? t("home.uncat") :
+                   selectedCat === "__fav__"   ? t("home.favorites") : t("home.fileList")}
+                  <Text style={styles.fileCount}> {t("home.fileCount", { count: filteredFiles.length })}</Text>
+                </Text>
+              </View>
+              <View style={{ flexDirection: "row", gap: 12, alignItems: "center" }}>
+                {!multiSelect && (
+                  <TouchableOpacity onPress={() => setMultiSelect(true)}>
+                    <Text style={styles.multiSelectText}>{t("home.multiSelectBtn")}</Text>
+                  </TouchableOpacity>
+                )}
+                {filteredFiles.length > 0 && (
+                  <TouchableOpacity onPress={deleteAll} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                    <Text style={styles.clearAllText}>{t("home.deleteAll")}</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
             </View>
-          ) : (
-            <FlatList
-              data={filteredFiles}
-              keyExtractor={(item) => item.uri}
-              renderItem={renderFileItem}
-              showsVerticalScrollIndicator={false}
-              style={{ flex: 1 }}
-              nestedScrollEnabled={true}
-            />
-          )}
-        </View>
-      )}
 
-      {recentFiles.length === 0 && (
-        <View style={styles.emptyBox}>
-          <Text style={styles.emptyText}>{t("home.noFilesYet")}</Text>
-          <Text style={styles.emptyHint}>{t("home.noFilesHint")}</Text>
-        </View>
-      )}
+            {filteredFiles.length === 0 ? (
+              <View style={styles.emptyBox}>
+                <Text style={styles.emptyText}>
+                  {searchQuery ? t("home.noSearchResult") : t("home.noFilesInFolder")}
+                </Text>
+                <Text style={styles.emptyHint}>{t("home.multiSelectHint")}</Text>
+              </View>
+            ) : (
+              <FlatList
+                data={filteredFiles}
+                keyExtractor={(item) => item.uri}
+                renderItem={renderFileItem}
+                showsVerticalScrollIndicator={false}
+                style={{ flex: 1 }}
+                nestedScrollEnabled={true}
+              />
+            )}
+          </View>
+        )}
 
-      {/* Bottom nav */}
-      <View style={[styles.navButtons, { paddingBottom: insets.bottom }]}>
-        <TouchableOpacity style={styles.navBtn} onPress={() => router.push("/models")}>
-          <Text style={styles.navBtnText}>{t("home.modelManage")}</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.navBtn} onPress={() => router.push("/settings")}>
-          <Text style={styles.navBtnText}>{t("home.settingsBtn")}</Text>
-        </TouchableOpacity>
-      </View>
+        {recentFiles.length === 0 && (
+          <View style={styles.emptyBox}>
+            <Text style={styles.emptyText}>{t("home.noFilesYet")}</Text>
+            <Text style={styles.emptyHint}>{t("home.noFilesHint")}</Text>
+          </View>
+        )}
+
+        {/* Bottom nav */}
+        <View style={[styles.navButtons, { paddingBottom: insets.bottom }]}>
+          <TouchableOpacity style={styles.navBtn} onPress={() => router.push("/models")}>
+            <Text style={styles.navBtnText}>{t("home.modelManage")}</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.navBtn} onPress={() => router.push("/settings")}>
+            <Text style={styles.navBtnText}>{t("home.settingsBtn")}</Text>
+          </TouchableOpacity>
+        </View>
 
       </View>{/* end flex space-between wrapper */}
 
       {/* ── Modals ────────────────────────────────────────────────────────── */}
       <LangSetupModal visible={langModalVisible} onConfirm={goToProcessing} onCancel={handleCancelModal} />
 
-      {/* URL 입력 모달 (로컬 파일 + YouTube URL 지원) */}
+      {/* 번역 모드 모달 (장르 선택 + URL탭 자막칸 없음) */}
       <UrlInputModal
         visible={filePickerVisible}
         onClose={() => setFilePickerVisible(false)}
         onLocalFilePicked={handleLocalFilePicked}
         onUrlPicked={handleUrlPicked}
+      />
+
+      {/* 바로보기 모드 모달 (자막 선택 가능 + 바로 플레이어 진입) */}
+      <DirectPlayModal
+        visible={directPlayVisible}
+        onClose={() => setDirectPlayVisible(false)}
+        onLocalFilePicked={handleDirectLocalFilePicked}
+        onUrlPicked={handleDirectUrlPicked}
       />
 
       <CategoryNameModal
@@ -1530,7 +1547,6 @@ export default function HomeScreen() {
         onCancel={() => setMoveModal({ visible: false })}
       />
 
-      {/* Batch move modal */}
       <MoveCategoryModal
         visible={batchMoveVisible}
         categories={categories}
@@ -1579,22 +1595,41 @@ export default function HomeScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#0a0a0a", padding: 20, paddingTop: 8 },
 
-  hero: { alignItems: "center", paddingVertical: 8 },
-  appName: { color: "#fff", fontSize: 32, fontWeight: "bold" },
-  tagline: { color: "#888", fontSize: 14, marginTop: 4 },
-
-  pickButton: {
+  // ── 분할 버튼 ────────────────────────────────────────────────────────────────
+  pickButtonRow: {
+    flexDirection: "row",
+    gap: 10,
+    marginTop: 8,
+  },
+  pickButtonHalf: {
+    flex: 1,
     backgroundColor: "#1e1e1e",
     borderRadius: 16,
-    padding: 16,
-    marginTop: 8,
+    paddingVertical: 18,
+    paddingHorizontal: 12,
     alignItems: "center",
-    borderWidth: 1,
-    borderColor: "#333",
+    borderWidth: 1.5,
     borderStyle: "dashed",
+    gap: 5,
   },
-  pickText: { color: "#fff", fontSize: 18, fontWeight: "600" },
-  pickSub: { color: "#666", fontSize: 12, marginTop: 4 },
+  pickButtonLeft: {
+    borderColor: "#2563eb55",
+  },
+  pickButtonRight: {
+    borderColor: "#7c3aed55",
+  },
+  pickTextHalf: {
+    color: "#fff",
+    fontSize: 13,
+    fontWeight: "700",
+    textAlign: "center",
+  },
+  pickSubHalf: {
+    color: "#555",
+    fontSize: 10,
+    textAlign: "center",
+    lineHeight: 14,
+  },
 
   // ── Recently played ─────────────────────────────────────────────────────────
   recentPlaySection: { marginTop: 4 },
