@@ -11,6 +11,73 @@
  * FALLBACK (RULE 6):
  * - UNKNOWN → retry ONCE with SAME jobKey (RULE 13) → still UNKNOWN → Gemma fallback
  *   (no billing + no GPU recompute — server honors idempotency key)
+ *
+ * ── CHANGES (v14) ─────────────────────────────────────────────────────────────
+ *
+ * [FIX-12] getEffectiveBatchDuration: adaptive floor ratio (과대 예약 방지)
+ *
+ *   v13: floor = max(actual, MIN_EXECUTION_FLOOR, planned * 0.5) 고정 비율
+ *        문제: planned=30, actual=5 (chunk failure 심함)
+ *              → floor = max(5, 3, 15) = 15 → effective = 15
+ *              → 실제 workload 5s인데 15s로 inflate → 3x 과대 예약
+ *              → calcReservedSeconds buffer(×1.2)까지 붙어 quota drain 가속
+ *
+ *   v14: failureRatio = actual / planned 기반 동적 비율
+ *        failureRatio > 0.7 → ratio 0.5 (정상 범위 — 보호 유지)
+ *        failureRatio > 0.4 → ratio 0.35 (중간 failure — 절충)
+ *        failureRatio ≤ 0.4 → ratio 0.2 (심한 failure — 과대 예약 억제)
+ *
+ *        예시 (planned=30):
+ *          actual=25 (ratio=0.83) → dynamicRatio=0.5 → floor=max(25,3,15)=25 → effective=25
+ *          actual=15 (ratio=0.5)  → dynamicRatio=0.35→ floor=max(15,3,10.5)=15→ effective=15
+ *          actual=5  (ratio=0.17) → dynamicRatio=0.2 → floor=max(5,3,6)=6   → effective=6
+ *
+ *        불변식: 반환값 ≤ plannedDurationSecs (유지)
+ *
+ * [FIX-13] safeRecordUsage: persist micro-await (50ms) + _billingInFlight pending set
+ *
+ *   v13: persist fire-and-forget
+ *        문제: billing 성공 → 앱 강제 종료(persist 전) → 재시작 → dedup miss → 중복 billing
+ *             모바일 환경에서 이 케이스 실제로 발생 가능
+ *
+ *   v14:
+ *     (a) persist micro-await: 50ms budget — UX 영향 최소, persist 성공률 크게 향상
+ *         await Promise.race([_persistDedupAsync(), sleep(50)])
+ *         → 50ms 내 완료 가능성 높음 (AsyncStorage write는 통상 <10ms)
+ *         → 50ms 초과 시 fire-and-forget으로 fallback (기존과 동일)
+ *
+ *     (b) _billingInFlight pending set: race + crash 복합 케이스 방어
+ *         billing 중인 jobKey를 동시 호출에서도 dedup
+ *         registerJobKey 이전 시점의 race window 제거
+ *
+ * [FIX-14] fetchWithRetry: 429 (rate limit) 처리 추가
+ *
+ *   v13: 429 분류 없음 → unknown으로 처리
+ *        문제: RunPod rate limit 시 즉시 재시도 → 429 루프 악화
+ *
+ *   v14: 429 → 'retryable' 분류
+ *        Retry-After 헤더 있으면 해당 delay 사용
+ *        없으면 exponential backoff (기존)
+ *        Max delay cap: 30s (무한 대기 방지)
+ *
+ * [FIX-15] serverTranslate: billing invariant 위반 시 보수적 billing
+ *
+ *   v13: usageSeconds > reservedSeconds → 로그만 찍고 계속 진행
+ *        문제: 서버 버그 시 billing contract 깨짐 → quota 무력화 위험
+ *
+ *   v14: usageSeconds > reservedSeconds → 보수적으로 min(actual, reserved) 사용
+ *        throw하면 fallback 타서 GPU 재실행 비용 발생 → 보수적 billing이 더 합리적
+ *        로그 레벨 유지 + billedSeconds 명시적으로 기록
+ *
+ * v13에서 유지되는 것들:
+ *   - [FIX-9 v13] getEffectiveBatchDuration 3중 floor 구조 (adaptive로 교체)
+ *   - [FIX-10 v13] safeRecordUsage hydrate 이후 disk read 생략
+ *   - [FIX-11 v13] transcribe/translate 큐 분리 (FIFO 유지)
+ *   - [FIX-7 v12] calcReservedSeconds 구조 전체
+ *   - [FIX-1~6] v9~v11 전체 유지
+ *   - [SELF-1 v9] AbortController 누수 방지
+ *   - safeRecordUsage billing-before-persist 구조 전체
+ *   - TODO: POST /jobs/:id/cancel 서버 cancel API
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -42,12 +109,14 @@ export interface ServerTranscribeResponse {
 export interface ServerTranslateRequest {
   segments: Array<{ start: number; end: number; text: string }>;
   targetLanguage: string;
-  videoId: string; // deterministic jobKey — server idempotency key
+  videoId: string;           // deterministic jobKey — server idempotency key
+  reservedSeconds: number;   // 서버 hard stop 기준 — 이 값 초과 시 서버가 즉시 중단
 }
 
 export interface ServerTranslateResponse {
   segments: Array<{ start: number; end: number; text: string; translated: string }>;
-  usageSeconds: number;  // BILLING SOURCE OF TRUTH
+  usageSeconds: number;      // BILLING SOURCE OF TRUTH — actualSeconds
+  reservedSeconds: number;   // 서버가 실제 reserve한 값 (actualSeconds <= reservedSeconds 보장)
   completed: boolean;
 }
 
@@ -55,6 +124,7 @@ export interface ServerCompletedBatch {
   batchIndex: number;
   segments: Array<{ start: number; end: number; text: string; translated: string }>;
   usageSeconds: number;
+  completedAt?: number;
 }
 
 export type CompletedBatchesState = 'COMPLETED' | 'NOT_COMPLETED' | 'UNKNOWN';
@@ -72,7 +142,127 @@ export interface ServerBridgeConfig {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// [FIX-12 v14] getEffectiveBatchDuration — adaptive floor ratio
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * MIN_EXECUTION_FLOOR_SECS — effective duration 절대 하한선
+ * ⚠️ 변경 시 useServerBridge.ts의 HARD_MIN_EXECUTE_SECS도 함께 변경
+ */
+export const MIN_EXECUTION_FLOOR_SECS = 3;
+
+/**
+ * ADAPTIVE_FLOOR_RATIOS — failureRatio 기반 동적 planned floor 비율
+ *
+ * [FIX-12 v14] 고정 0.5에서 adaptive로 교체
+ *
+ * failureRatio = actual / planned
+ *   > 0.7 (정상):   0.5 — chunk 대부분 성공, 서버 hard stop 보호 유지
+ *   > 0.4 (중간):   0.35 — 절충점, actual 반영 비중 증가
+ *   ≤ 0.4 (심한):   0.2  — failure 많음, 과대 예약 억제 우선
+ *
+ * 근거:
+ *   - failure 심할수록 서버 실제 workload가 actual에 가까워짐
+ *   - planned 기반 floor를 줄여야 quota drain 속도 정상화
+ *   - 0.2 하한: 완전히 0으로 내리면 MIN_EXECUTION_FLOOR만 남아
+ *               서버 warmup 비용조차 못 커버하는 경우 방지
+ */
+export const ADAPTIVE_FLOOR_RATIOS = {
+  HIGH: { threshold: 0.7, ratio: 0.5 },   // failureRatio > 0.7
+  MID:  { threshold: 0.4, ratio: 0.35 },  // failureRatio > 0.4
+  LOW:  { ratio: 0.2 },                    // failureRatio ≤ 0.4
+} as const;
+
+/**
+ * getAdaptiveFloorRatio — failureRatio 기반 planned floor 비율 선택
+ */
+export function getAdaptiveFloorRatio(
+  actualDurationSecs: number,
+  plannedDurationSecs: number,
+): number {
+  if (plannedDurationSecs <= 0) return ADAPTIVE_FLOOR_RATIOS.LOW.ratio;
+  const failureRatio = actualDurationSecs / plannedDurationSecs;
+  if (failureRatio > ADAPTIVE_FLOOR_RATIOS.HIGH.threshold) return ADAPTIVE_FLOOR_RATIOS.HIGH.ratio;
+  if (failureRatio > ADAPTIVE_FLOOR_RATIOS.MID.threshold)  return ADAPTIVE_FLOOR_RATIOS.MID.ratio;
+  return ADAPTIVE_FLOOR_RATIOS.LOW.ratio;
+}
+
+/**
+ * getEffectiveBatchDuration
+ *
+ * [FIX-12 v14] adaptive floor ratio — failure 심도에 따라 planned floor 동적 조정
+ * [FIX-9 v13]  3중 floor 구조 (구조 유지, ratio만 dynamic으로 교체)
+ * [FIX-7 v12]  planned vs actual 분리 + floor+clamp 기반
+ *
+ * 일반 batch: plannedDurationSecs 그대로 반환
+ *
+ * 마지막 partial batch:
+ *   dynamicRatio = getAdaptiveFloorRatio(actual, planned)
+ *   floor = max(actual, MIN_EXECUTION_FLOOR, planned * dynamicRatio)
+ *   effective = min(planned, floor)
+ *
+ * 예시 (planned=30):
+ *   actual=25 (ratio=0.83) → dynamicRatio=0.5  → effective=min(30,max(25,3,15))=25
+ *   actual=15 (ratio=0.5)  → dynamicRatio=0.35 → effective=min(30,max(15,3,10.5))=15
+ *   actual=5  (ratio=0.17) → dynamicRatio=0.2  → effective=min(30,max(5,3,6))=6
+ *   actual=1  (ratio=0.03) → dynamicRatio=0.2  → effective=min(6,max(1,3,1.2))=3
+ *
+ * 불변식: 반환값 ≤ plannedDurationSecs
+ */
+export function getEffectiveBatchDuration(
+  plannedDurationSecs: number,
+  actualDurationSecs: number,
+  isLastPartialBatch: boolean,
+): number {
+  if (!isLastPartialBatch) {
+    return plannedDurationSecs;
+  }
+
+  const dynamicRatio = getAdaptiveFloorRatio(actualDurationSecs, plannedDurationSecs);
+  const plannedBasedFloor = plannedDurationSecs * dynamicRatio;
+  const floored = Math.max(
+    actualDurationSecs,
+    MIN_EXECUTION_FLOOR_SECS,
+    plannedBasedFloor,
+  );
+
+  return Math.min(plannedDurationSecs, floored);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// calcReservedSeconds — 배치별 hard stop 기준값 계산
+// ─────────────────────────────────────────────────────────────────────────────
+
+const RESERVED_SECONDS_HARD_CAP = 3600;
+const RESERVED_SECONDS_BUFFER   = 1.2;
+
+/**
+ * calcReservedSeconds
+ *
+ * [FIX-8 v12] 입력: effectiveDurationSecs = getEffectiveBatchDuration() 결과
+ * [FIX-6 v11] isLastPartialBatch=true 시 buffer 없이 clamp (유지)
+ *
+ * 불변식: 반환값 ≤ remainingQuotaSeconds
+ */
+export function calcReservedSeconds(
+  effectiveDurationSecs: number,
+  remainingQuotaSeconds: number,
+  isLastPartialBatch = false,
+): number {
+  if (remainingQuotaSeconds <= 0) return 0;
+
+  if (isLastPartialBatch) {
+    return Math.min(remainingQuotaSeconds, effectiveDurationSecs);
+  }
+
+  const buffered = Math.ceil(effectiveDurationSecs * RESERVED_SECONDS_BUFFER);
+  const capped   = Math.min(buffered, RESERVED_SECONDS_HARD_CAP);
+  return Math.min(capped, remainingQuotaSeconds);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // RULE 11: Server error classification
+// [FIX-14 v14] 429 (rate limit) 처리 추가
 // ─────────────────────────────────────────────────────────────────────────────
 
 export type ServerErrorClass = 'retryable' | 'auth' | 'validation' | 'unknown';
@@ -83,6 +273,7 @@ export function classifyServerError(err: any): ServerErrorClass {
   if (status === 401 || status === 403) return 'auth';
   if (status === 400 || status === 422) return 'validation';
   if (
+    status === 429 ||   // [FIX-14 v14] rate limit → retryable (Retry-After delay 적용)
     status >= 500 ||
     msg.includes('timeout') ||
     msg.includes('network') ||
@@ -101,18 +292,35 @@ const USAGE_DEDUP_KEY   = 'usage_dedup_v1';
 const DEDUP_TTL_MS      = 72 * 60 * 60 * 1000;
 const DEDUP_MAX_ENTRIES = 5000;
 
+/**
+ * PERSIST_MICRO_AWAIT_MS — persist micro-await 예산 [FIX-13 v14]
+ *
+ * AsyncStorage write 통상 <10ms → 50ms 내 완료 가능성 높음
+ * 50ms 초과 시 fire-and-forget으로 자동 fallback
+ * UX 영향 거의 없으면서 persist 성공률 크게 향상
+ */
+const PERSIST_MICRO_AWAIT_MS = 50;
+
 export const _usageRecorded = new Map<string, number>();
+
+/**
+ * _billingInFlight — billing 중인 jobKey pending set [FIX-13 v14]
+ *
+ * registerJobKey 이전 시점의 race window 제거:
+ *   - memory check 통과 → billing 중인데 동시 호출이 동일 jobKey로 진입
+ *   - registerJobKey 이전이므로 memory check도 통과 → 중복 billing
+ * _billingInFlight로 이 window를 원자적으로 방어
+ */
+const _billingInFlight = new Set<string>();
 
 let _hydrated       = false;
 let _hydratePromise: Promise<void> | null = null;
 
 function pruneDedup(): void {
   const now = Date.now();
-  // Step 1: TTL prune (MUST run first — billing safety)
   for (const [key, ts] of _usageRecorded) {
     if (now - ts > DEDUP_TTL_MS) _usageRecorded.delete(key);
   }
-  // Step 2: LRU cap (only after TTL prune)
   if (_usageRecorded.size > DEDUP_MAX_ENTRIES) {
     const removeCount = _usageRecorded.size - DEDUP_MAX_ENTRIES;
     let removed = 0;
@@ -138,7 +346,7 @@ export async function hydrateUsageDedup(): Promise<void> {
       const now = Date.now();
       for (const [key, ts] of Object.entries(persisted)) {
         if (now - ts < DEDUP_TTL_MS && !_usageRecorded.has(key)) {
-          _usageRecorded.set(key, ts); // original ts preserved (RULE 12)
+          _usageRecorded.set(key, ts);
         }
       }
       pruneDedup();
@@ -163,14 +371,20 @@ async function _persistDedupAsync(): Promise<void> {
 /**
  * safeRecordUsage — single billing entry point (RULE 10 + 12)
  *
- * Execution order:
- * 0. Hydration race guard: join _hydratePromise if in-progress; start new only if neither done nor started
+ * [FIX-13 v14] persist micro-await + _billingInFlight pending set
+ * [FIX-10 v13] hydrate 이후 disk read 생략
+ *
+ * Execution order (v14):
+ * 0. Hydration race guard
  * 1. Memory check (sync fast path)
- * 2. Disk check (async) → restore original ts on hit
- * 3. Race-check: has() re-verify after await gap
- * 4. registerJobKey (memory write)
- * 5. BILLING ← BEFORE persist
- * 6. Persist (fire-and-forget) — persist fail → log only, no rollback
+ * 1a. _billingInFlight check (race window 방어) — [FIX-13 v14]
+ * 2. [_hydrated=false만] Disk check
+ * 3. [_hydrated=false만] Race-check after await gap
+ * 4. _billingInFlight.add (pending 등록) — [FIX-13 v14]
+ * 5. registerJobKey (memory write)
+ * 6. BILLING ← BEFORE persist
+ * 7. Persist micro-await (50ms budget) — [FIX-13 v14]
+ * 8. _billingInFlight.delete (pending 해제) — [FIX-13 v14]
  */
 export async function safeRecordUsage(
   jobKey: string,
@@ -180,16 +394,15 @@ export async function safeRecordUsage(
   tier: string,
 ): Promise<boolean> {
 
-  // [DEV 3c] Skip billing in dev mode — return true so pipeline continues normally
   if (__DEV__ && _DevConfig?.isDevMode()) {
     _DevLogger?.log('billing_skipped',
       `BILLING SKIPPED (dev mode) — ${jobKey} · ${usageSeconds}s · tier=${tier}`,
     );
     console.log(`[UsageDedup] DEV — billing skipped: ${jobKey} (${usageSeconds}s)`);
-    return true;  // true = "recorded" — pipeline proceeds; no real charge
+    return true;
   }
 
-  // Step 0: hydration race guard
+  // 0. Hydration race guard
   if (!_hydrated) {
     if (_hydratePromise) {
       await _hydratePromise;
@@ -199,47 +412,75 @@ export async function safeRecordUsage(
     }
   }
 
-  // Step 1: memory check
+  // 1. Memory check — hydrated 이후에는 항상 여기서 결정 (disk read 없음)
   if (_usageRecorded.has(jobKey)) {
     console.log(`[UsageDedup] Skipped (memory): ${jobKey}`);
     return false;
   }
 
-  // Step 2: disk check
-  let diskTs: number | undefined;
-  try {
-    const raw = await AsyncStorage.getItem(USAGE_DEDUP_KEY);
-    if (raw) {
-      const persisted: Record<string, number> = JSON.parse(raw);
-      const ts = persisted[jobKey];
-      if (ts !== undefined && Date.now() - ts < DEDUP_TTL_MS) diskTs = ts;
+  // 1a. [FIX-13 v14] _billingInFlight check — registerJobKey 이전 race window 방어
+  if (_billingInFlight.has(jobKey)) {
+    console.log(`[UsageDedup] Skipped (in-flight): ${jobKey}`);
+    return false;
+  }
+
+  // 2+3. [FIX-10 v13] _hydrated=true면 disk check 완전 생략
+  if (!_hydrated) {
+    let diskTs: number | undefined;
+    try {
+      const raw = await AsyncStorage.getItem(USAGE_DEDUP_KEY);
+      if (raw) {
+        const persisted: Record<string, number> = JSON.parse(raw);
+        const ts = persisted[jobKey];
+        if (ts !== undefined && Date.now() - ts < DEDUP_TTL_MS) diskTs = ts;
+      }
+    } catch { /* treat as miss */ }
+
+    if (diskTs !== undefined) {
+      if (!_usageRecorded.has(jobKey)) _usageRecorded.set(jobKey, diskTs);
+      console.log(`[UsageDedup] Skipped (disk): ${jobKey}`);
+      return false;
     }
-  } catch { /* treat as miss */ }
 
-  if (diskTs !== undefined) {
-    if (!_usageRecorded.has(jobKey)) _usageRecorded.set(jobKey, diskTs);
-    console.log(`[UsageDedup] Skipped (disk): ${jobKey}`);
-    return false;
+    // Race-check: disk check await gap에서 다른 caller가 먼저 등록했을 수 있음
+    if (_usageRecorded.has(jobKey) || _billingInFlight.has(jobKey)) {
+      console.log(`[UsageDedup] Skipped (race): ${jobKey}`);
+      return false;
+    }
   }
 
-  // Step 3: race-check
-  if (_usageRecorded.has(jobKey)) {
-    console.log(`[UsageDedup] Skipped (race): ${jobKey}`);
-    return false;
+  // 4. [FIX-13 v14] pending 등록 — billing 시작 전 선점
+  _billingInFlight.add(jobKey);
+
+  try {
+    // 5. registerJobKey (memory write)
+    registerJobKey(jobKey);
+
+    // 6. BILLING ← BEFORE persist (의도된 설계)
+    recordUsageFn(usageSeconds);
+    recordGpuSecondsFn(usageSeconds, tier).catch(() => {});
+    console.log(`[UsageDedup] Billed: ${jobKey} (${usageSeconds}s)`);
+
+    // 7. [FIX-13 v14] persist micro-await (50ms budget)
+    //    50ms 내 완료 가능성 높음 (AsyncStorage write 통상 <10ms)
+    //    50ms 초과 시 자동 fallback — fire-and-forget으로 전환
+    const persistPromise = _persistDedupAsync();
+    await Promise.race([
+      persistPromise,
+      new Promise<void>(res => setTimeout(res, PERSIST_MICRO_AWAIT_MS)),
+    ]);
+    // 50ms 내 완료 못 했어도 백그라운드 계속 진행 (로그 추가)
+    persistPromise.catch(e => {
+      console.warn(
+        '[UsageDedup] Persist failed (billing already done — dedup may miss on restart):',
+        e,
+      );
+    });
+
+  } finally {
+    // 8. [FIX-13 v14] pending 해제 — 성공/실패 모든 경로
+    _billingInFlight.delete(jobKey);
   }
-
-  // Step 4: register
-  registerJobKey(jobKey);
-
-  // Step 5: BILLING — before persist
-  recordUsageFn(usageSeconds);
-  recordGpuSecondsFn(usageSeconds, tier).catch(() => {});
-  console.log(`[UsageDedup] Billed: ${jobKey} (${usageSeconds}s)`);
-
-  // Step 6: persist (fire-and-forget)
-  _persistDedupAsync().catch(e => {
-    console.warn('[UsageDedup] Persist failed (billing already done):', e);
-  });
 
   return true;
 }
@@ -252,6 +493,12 @@ const CONFIG_KEY          = 'server_bridge_config';
 const DEFAULT_TIMEOUT_MS  = 120_000;
 const MAX_RETRIES         = 3;
 const RETRY_DELAY_BASE_MS = 1000;
+
+/**
+ * RATE_LIMIT_MAX_DELAY_MS — 429 Retry-After 상한 [FIX-14 v14]
+ * Retry-After가 비정상적으로 크면 무한 대기 방지
+ */
+const RATE_LIMIT_MAX_DELAY_MS = 30_000;
 
 let _config: ServerBridgeConfig | null = null;
 
@@ -267,7 +514,6 @@ export async function loadServerBridgeConfig(): Promise<ServerBridgeConfig | nul
       if (raw) _config = JSON.parse(raw) as ServerBridgeConfig;
     } catch {}
   }
-  // [DEV 3b] Inject endpoint/apiKey overrides when dev mode is active
   if (__DEV__ && _DevConfig?.isDevMode()) {
     const dev = _DevConfig.getState();
     if (dev.endpointOverride || dev.apiKeyOverride) {
@@ -292,27 +538,38 @@ export function isServerBridgeConfigured(): boolean {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Concurrency limiter (FIFO)
+// [FIX-11 v13] Concurrency: transcribe / translate 큐 분리 (FIFO 유지)
 // ─────────────────────────────────────────────────────────────────────────────
 
-const MAX_INFLIGHT = 2;
-let _inflightCount = 0;
-const _waitQueue: Array<() => void> = [];
+const MAX_TRANSCRIBE_INFLIGHT = 4;
+const MAX_TRANSLATE_INFLIGHT  = 2;
 
-async function waitForSlot(): Promise<void> {
-  if (_inflightCount < MAX_INFLIGHT) { _inflightCount++; return; }
-  await new Promise<void>(resolve => _waitQueue.push(resolve));
-  _inflightCount++;
+/** FIFO semaphore — slot 수 초과 시 resolve queue로 대기 */
+function createSemaphore(maxSlots: number) {
+  let count = 0;
+  const queue: Array<() => void> = [];
+
+  async function acquire(): Promise<void> {
+    if (count < maxSlots) { count++; return; }
+    await new Promise<void>(resolve => queue.push(resolve));
+    count++;
+  }
+
+  function release(): void {
+    count = Math.max(0, count - 1);
+    const next = queue.shift();
+    if (next) next();
+  }
+
+  return { acquire, release };
 }
 
-function releaseSlot(): void {
-  _inflightCount = Math.max(0, _inflightCount - 1);
-  const next = _waitQueue.shift();
-  if (next) next();
-}
+const _transcribeSemaphore = createSemaphore(MAX_TRANSCRIBE_INFLIGHT);
+const _translateSemaphore  = createSemaphore(MAX_TRANSLATE_INFLIGHT);
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Duplicate job protection (RULE 5)
+// Duplicate job protection — atomic pattern (RULE 5)
+// [FIX-2 v9] race condition 수정
 // ─────────────────────────────────────────────────────────────────────────────
 
 const _activeJobs = new Map<string, Promise<ServerTranslateResponse>>();
@@ -328,10 +585,14 @@ export function cancelAllInflight(): void {
     try { ctrl.abort(); } catch {}
   }
   _activeControllers.clear();
+  // TODO: POST /jobs/:id/cancel 서버 cancel API
+  // 현재 HTTP abort는 클라이언트 연결만 끊음 — 서버 GPU는 계속 실행 가능
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // fetchWithRetry
+// [FIX-14 v14] 429 Retry-After 헤더 처리 추가
+// [SELF-1 v9]  AbortController 누수 방지 — try/finally로 해제 보장
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function fetchWithRetry(
@@ -348,7 +609,6 @@ async function fetchWithRetry(
     const effectiveTimeout = attempt <= 1 ? Math.max(timeoutMs, 30_000) : timeoutMs;
     const timer = setTimeout(() => controller.abort(), effectiveTimeout);
 
-    // [DEV 3d] Log request_start (3-arg: level, message, opts?)
     const _t0 = __DEV__ ? Date.now() : 0;
     if (__DEV__) {
       _DevLogger?.log('request_start',
@@ -359,9 +619,7 @@ async function fetchWithRetry(
 
     try {
       const response = await fetch(url, { ...options, signal: controller.signal });
-      clearTimeout(timer);
-      _activeControllers.delete(controller);
-      // [DEV 3d] Log success/failure
+
       if (__DEV__) {
         if (response.ok) {
           _DevLogger?.log('request_success',
@@ -375,6 +633,7 @@ async function fetchWithRetry(
           );
         }
       }
+
       if (response.ok) return response;
 
       const errClass = classifyServerError({ status: response.status });
@@ -386,11 +645,29 @@ async function fetchWithRetry(
         throw fatalErr;
       }
 
+      // [FIX-14 v14] 429: Retry-After 헤더 기반 delay
+      if (response.status === 429 && attempt < retries) {
+        const retryAfterHeader = response.headers.get('retry-after');
+        const retryAfterSecs = retryAfterHeader ? parseFloat(retryAfterHeader) : NaN;
+        const retryDelayMs = !isNaN(retryAfterSecs)
+          ? Math.min(retryAfterSecs * 1000, RATE_LIMIT_MAX_DELAY_MS)
+          : Math.min(RETRY_DELAY_BASE_MS * Math.pow(2, attempt), RATE_LIMIT_MAX_DELAY_MS);
+        console.warn(
+          `[ServerBridge] 429 rate limit — waiting ${retryDelayMs}ms ` +
+          `(Retry-After: ${retryAfterHeader ?? 'none'})`,
+        );
+        lastError = new Error(`Rate limited (429): ${text}`);
+        (lastError as any).status = 429;
+        clearTimeout(timer);
+        _activeControllers.delete(controller);
+        await new Promise(r => setTimeout(r, retryDelayMs));
+        continue;
+      }
+
       lastError = new Error(`Server error ${response.status}: ${text}`);
       (lastError as any).status = response.status;
+
     } catch (e: any) {
-      clearTimeout(timer);
-      _activeControllers.delete(controller);
       if (__DEV__) {
         _DevLogger?.log('request_error',
           `✗ ${e?.name === 'AbortError' ? 'timeout' : (e?.message ?? 'error')} ${url.split('/').pop() ?? url}`,
@@ -405,6 +682,10 @@ async function fetchWithRetry(
       } else {
         lastError = e;
       }
+    } finally {
+      // [SELF-1 v9] 성공/실패 모든 경로에서 해제 — 누수 방지
+      clearTimeout(timer);
+      _activeControllers.delete(controller);
     }
 
     if (attempt < retries) {
@@ -418,14 +699,6 @@ async function fetchWithRetry(
 // fetchCompletedBatches — 3-state result (RULE 4 + RULE 6)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Returns 3-state result:
- *   COMPLETED    → server has results → use them + bill
- *   NOT_COMPLETED → not completed → Gemma fallback allowed
- *   UNKNOWN      → server error → caller retries ONCE with SAME jobKey (RULE 13),
- *                  then Gemma fallback (no billing, no GPU recompute)
- * Never throws.
- */
 export async function fetchCompletedBatches(
   stableVideoId: string,
 ): Promise<ServerCompletedBatchesResponse> {
@@ -457,7 +730,7 @@ export async function fetchCompletedBatches(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// serverTranscribe
+// serverTranscribe — [FIX-11 v13] transcribeSemaphore 사용
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function serverTranscribe(
@@ -466,7 +739,7 @@ export async function serverTranscribe(
   const config = await loadServerBridgeConfig();
   if (!config) throw new Error('[ServerBridge] Not configured.');
 
-  await waitForSlot();
+  await _transcribeSemaphore.acquire();
   try {
     const url = `${config.runpodEndpointBase.replace(/\/$/, '')}/transcribe`;
     const response = await fetchWithRetry(url, {
@@ -479,7 +752,6 @@ export async function serverTranscribe(
     if (!data.segments || !Array.isArray(data.segments)) {
       throw new Error('[ServerBridge] Invalid transcribe response: missing segments');
     }
-    // Transcribe usageSeconds: informational only, NOT billed (RULE 2). Estimate if missing.
     if (typeof data.usageSeconds !== 'number') {
       const span = data.segments.length > 0
         ? (data.segments[data.segments.length - 1].end - data.segments[0].start)
@@ -488,29 +760,35 @@ export async function serverTranscribe(
     }
     return data as ServerTranscribeResponse;
   } finally {
-    releaseSlot();
+    _transcribeSemaphore.release();
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// serverTranslate (RULE 5: dedup by jobKey)
+// serverTranslate
+// [FIX-15 v14] billing invariant 위반 시 보수적 billing
+// [FIX-2 v9]   atomic dedup — race condition 수정
+// [FIX-11 v13] translateSemaphore 사용
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function serverTranslate(
   request: ServerTranslateRequest,
 ): Promise<ServerTranslateResponse> {
-  const existing = _activeJobs.get(request.videoId);
-  if (existing) {
+  if (_activeJobs.has(request.videoId)) {
     console.log(`[ServerBridge] Dedup: returning existing job for ${request.videoId}`);
-    return existing;
+    return _activeJobs.get(request.videoId)!;
   }
-  const job = _serverTranslateImpl(request);
-  _activeJobs.set(request.videoId, job);
-  try {
-    return await job;
-  } finally {
-    _activeJobs.delete(request.videoId);
-  }
+
+  const jobPromise = (async () => {
+    try {
+      return await _serverTranslateImpl(request);
+    } finally {
+      _activeJobs.delete(request.videoId);
+    }
+  })();
+
+  _activeJobs.set(request.videoId, jobPromise);
+  return jobPromise;
 }
 
 async function _serverTranslateImpl(
@@ -519,7 +797,7 @@ async function _serverTranslateImpl(
   const config = await loadServerBridgeConfig();
   if (!config) throw new Error('[ServerBridge] Not configured.');
 
-  await waitForSlot();
+  await _translateSemaphore.acquire();
   try {
     const url = `${config.runpodEndpointBase.replace(/\/$/, '')}/translate`;
     const response = await fetchWithRetry(url, {
@@ -532,16 +810,40 @@ async function _serverTranslateImpl(
     if (!data.segments || !Array.isArray(data.segments)) {
       throw new Error('[ServerBridge] Invalid translate response: missing segments');
     }
-    // STRICT: usageSeconds must be present — no estimation allowed (RULE 2)
+
+    // STRICT: usageSeconds 누락 → billing contract violation
     if (typeof data.usageSeconds !== 'number') {
       throw new Error(
         '[ServerBridge] Missing usageSeconds in server response — billing contract violation.'
       );
     }
+
+    // reservedSeconds 누락 시 요청값으로 fallback (하위 호환)
+    if (typeof data.reservedSeconds !== 'number') {
+      data.reservedSeconds = request.reservedSeconds;
+      console.warn('[ServerBridge] reservedSeconds missing in response — using request value as fallback');
+    }
+
+    // [FIX-15 v14] actualSeconds > reservedSeconds 불변식 위반 시 보수적 billing
+    //
+    // throw → fallback 타면 GPU 재실행 비용 발생 (더 비쌈)
+    // 보수적 billing (min 사용): quota는 서버 guard 실패만큼만 drain
+    // 로그로 서버 버그 추적 유지
+    if (data.usageSeconds > data.reservedSeconds) {
+      const billedSeconds = Math.min(data.usageSeconds, data.reservedSeconds);
+      console.error(
+        `[ServerBridge] billing invariant violated: ` +
+        `actualSeconds(${data.usageSeconds}) > reservedSeconds(${data.reservedSeconds}) — ` +
+        `billing conservatively as min(actual, reserved) = ${billedSeconds}s ` +
+        `(server-side guard failure)`,
+      );
+      data.usageSeconds = billedSeconds;
+    }
+
     if (typeof data.completed !== 'boolean') data.completed = true;
     return data as ServerTranslateResponse;
   } finally {
-    releaseSlot();
+    _translateSemaphore.release();
   }
 }
 
