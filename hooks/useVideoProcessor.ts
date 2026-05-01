@@ -1,12 +1,14 @@
 /**
  * useVideoProcessor.ts
  *
- * ── CHANGES (v9) ─────────────────────────────────────────────────────────────
- * [SELF-3] 상수 동기화 주석 보강 (로직 변경 없음)
+ * ── CHANGES (v10) ─────────────────────────────────────────────────────────────
+ * [SELF-4] serverBridgeService.ts v15 priority semaphore 반영 주석 업데이트
+ *          (로직 변경 없음)
  *
- *   v8: HARD_MIN_EXECUTE_SECS / MIN_QUOTA_TO_PROCESS_SECS 주석에 "함께 변경" 언급
  *   v9: serverBridgeService.ts v14의 MIN_EXECUTION_FLOOR_SECS 추가 명시
- *       → 3개 파일 상수 동기화 체인을 주석에서 명확히 추적
+ *   v10: serverBridgeService.ts v15 [FIX-16] PriorityTranslateSemaphore 적용 반영
+ *        → 동기화 체인 주석에 translate queue 전략 변경 이력 추가
+ *        → 로직·상수·동작 변경 없음
  *
  *   동기화 체인:
  *     HARD_MIN_EXECUTE_SECS(3):
@@ -14,8 +16,8 @@
  *     MIN_QUOTA_TO_PROCESS_SECS(10):
  *       useVideoProcessor.ts ← useServerBridge.ts
  *
- * v8에서 유지되는 것들:
- *   - [FIX-2 v8] buildPartialQuotaWarning 3단계 분기 (HARD_MIN / MIN_QUOTA / 일반 partial)
+ * v9에서 유지되는 것들:
+ *   - [FIX-2 v8] buildPartialQuotaWarning 3단계 분기
  *   - [SELF-2 v8] HARD_MIN_EXECUTE_SECS 상수 동기화
  *   - 2단계 gating: canProcess(1) → canProcess(실제값)
  *   - tier별 fallback 분기: free → 차단, paid → 통과 + 로그
@@ -55,10 +57,10 @@ const ESTIMATE_HARD_CAP_MINUTES = 60;
 const FREE_DAILY_CAP_MINUTES    = 20;
 
 /**
- * HARD_MIN_EXECUTE_SECS — 3-파일 동기화 필수 [v9 SELF-3]
+ * HARD_MIN_EXECUTE_SECS — 3-파일 동기화 필수 [v10 SELF-4]
  *
  * 동기화 대상:
- *   useServerBridge.ts    → HARD_MIN_EXECUTE_SECS (batch 전송 차단 기준)
+ *   useServerBridge.ts     → HARD_MIN_EXECUTE_SECS (batch 전송 차단 기준)
  *   serverBridgeService.ts → MIN_EXECUTION_FLOOR_SECS (effective duration 하한)
  *
  * 이 값을 변경하면 위 두 파일도 반드시 함께 변경할 것.
@@ -67,7 +69,7 @@ const FREE_DAILY_CAP_MINUTES    = 20;
 const HARD_MIN_EXECUTE_SECS = 3;
 
 /**
- * MIN_QUOTA_TO_PROCESS_SECS — 2-파일 동기화 필수 [v9 SELF-3]
+ * MIN_QUOTA_TO_PROCESS_SECS — 2-파일 동기화 필수 [v10 SELF-4]
  *
  * 동기화 대상:
  *   useServerBridge.ts → MIN_QUOTA_TO_PROCESS_SECS (정상 배치 기준선)
@@ -81,7 +83,7 @@ async function estimateVideoMinutes(
   tier: PlanTier,
 ): Promise<number | null> {
   try {
-    const seconds = await getVideoDuration(videoUri);
+    const seconds  = await getVideoDuration(videoUri);
     const estimated = Math.ceil(seconds / 60);
     return Math.min(estimated, ESTIMATE_HARD_CAP_MINUTES);
   } catch {
@@ -95,7 +97,7 @@ async function estimateVideoMinutes(
 function localCacheKey(uri: string): string {
   try {
     const decoded = decodeURIComponent(uri);
-    const parts = decoded.replace(/\\/g, "/").split("/");
+    const parts   = decoded.replace(/\\/g, "/").split("/");
     return "local__" + (parts[parts.length - 1] ?? uri);
   } catch {
     return "local__" + uri;
@@ -107,23 +109,18 @@ function makeErrorProgress(msg: string): ProcessingProgress {
 }
 
 /**
- * [FIX-2 v8] buildPartialQuotaWarning — useServerBridge v10 [FIX-4]와 정합
+ * [FIX-2 v8] buildPartialQuotaWarning — useServerBridge [FIX-4]와 정합
  *
  * remainingSeconds 기준 3단계 분기:
  *
  * (A) remainingSeconds < HARD_MIN_EXECUTE_SECS(3):
- *     → 처리 자체가 불가능에 가까움 (useServerBridge가 break 처리)
  *     → "quota가 거의 소진되어 처리할 수 없을 수 있습니다" 안내
  *
  * (B) HARD_MIN ≤ remainingSeconds < MIN_QUOTA(10):
- *     → 마지막 partial batch로 일부 처리 (useServerBridge가 isLastPartialBatch=true)
  *     → "남은 한도 N초로 일부만 처리됩니다" 안내
  *
  * (C) remainingSeconds ≥ MIN_QUOTA이지만 estimatedMinutes 미달:
- *     → 일반 partial 처리 (중간에 멈출 수 있음)
  *     → "이 영상은 약 Xmin입니다. 남은 한도 Ymin까지만 처리됩니다." 안내
- *
- * 반환: progress message에 삽입할 경고 문자열 | null (경고 불필요)
  */
 function buildPartialQuotaWarning(
   estimatedMinutes: number | null,
@@ -135,7 +132,7 @@ function buildPartialQuotaWarning(
 
   const remainingSeconds = remainingMinutes * 60;
 
-  // (A) HARD_MIN 미달: 처리 가능성 매우 낮음
+  // (A) HARD_MIN 미달
   if (remainingSeconds < HARD_MIN_EXECUTE_SECS) {
     return i18n.t('plan.quotaNearlyExhausted', {
       seconds: Math.floor(remainingSeconds),
@@ -144,7 +141,7 @@ function buildPartialQuotaWarning(
     }) as string;
   }
 
-  // (B) HARD_MIN ≤ remaining < MIN_QUOTA: 마지막 partial batch
+  // (B) HARD_MIN ≤ remaining < MIN_QUOTA
   if (remainingSeconds < MIN_QUOTA_TO_PROCESS_SECS) {
     return i18n.t('plan.partialBatchOnlyWarning', {
       seconds: Math.floor(remainingSeconds),
@@ -153,7 +150,7 @@ function buildPartialQuotaWarning(
     }) as string;
   }
 
-  // (C) 일반 partial: 중간에 멈출 수 있음
+  // (C) 일반 partial
   return i18n.t('plan.partialProcessWarning', {
     estimated: estimatedMinutes,
     remaining: Math.floor(remainingMinutes),
@@ -217,7 +214,6 @@ export function useVideoProcessor() {
       const estimatedMinutes = await estimateVideoMinutes(videoUri, fastState.tier);
 
       if (estimatedMinutes === null) {
-        // paid + duration 실패: 통과 + 로그 (서버 사이드 guard 전제)
         console.warn(
           '[useVideoProcessor] duration 측정 실패 — paid 플랜 통과 허용.',
           'tier:', fastState.tier,
@@ -242,7 +238,7 @@ export function useVideoProcessor() {
         }
       }
 
-      // ── [FIX-2 v8] quota 부족 UX 경고 (3단계 분기) ────────────────────────
+      // ── quota 부족 UX 경고 (3단계 분기) ───────────────────────────────────
       const remainingMinutes = planState.tier === 'free'
         ? planState.limits.dailyCapMinutes - planState.usedMinutes
         : planState.limits.monthlyCapMinutes > 0

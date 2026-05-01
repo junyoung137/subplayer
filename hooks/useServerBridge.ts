@@ -10,19 +10,24 @@
  *           TODO: POST /jobs/:id/cancel 서버 엔드포인트 구현 후 연동
  * UNKNOWN:  Retry ONCE with SAME jobKey (RULE 13) — no billing, no GPU recompute
  *
- * ── CHANGES (v12) ────────────────────────────────────────────────────────────
- * [FIX-7] getEffectiveBatchDuration adaptive 연동 로그 보강
+ * ── CHANGES (v13) ────────────────────────────────────────────────────────────
+ * [SELF-1] 로그 품질 개선 + 방어 코드 강화 (로직 변경 없음)
  *
- *   v11: effective/planned/actual 로그 출력
- *   v12: dynamicRatio 값도 함께 로그 출력
- *        → serverBridgeService v14 [FIX-12] adaptive ratio 디버깅 가시성 향상
- *        → "어떤 failureRatio에 어떤 ratio가 선택됐는지" 운영 로그에서 추적 가능
+ *   - [LOG-1] batch loop 진입 시 remainingQuotaSeconds 로그 추가
+ *             → quota 소진 흐름 추적 용이
+ *   - [LOG-2] earlyPlayback fired 시점 로그 추가
+ *             → playback 트리거 timing 가시화
+ *   - [DEF-1] serverCompleted.batches null guard
+ *             → fetchCompletedBatches UNKNOWN 응답 시 batches 순회 오류 방지
+ *   - [DEF-2] allSubtitles 정렬 전 length 체크 로그
+ *             → 빈 결과 반환 추적
  *
- * v11에서 유지되는 것들:
+ * v12에서 유지되는 것들:
+ *   - [FIX-7 v12] getEffectiveBatchDuration adaptive ratio 디버깅 로그
  *   - [FIX-5 v11] planned vs actual duration 명확히 분리
  *   - [FIX-6 v11] segments.length === 0 → serverTranslate 호출 차단
  *   - [FIX-4 v10] Hybrid quota guard (HARD_MIN / MIN_QUOTA 분기)
- *   - [FIX-5 v10] isLastPartialBatch 파라미터 (calcReservedSeconds 전달)
+ *   - [FIX-5 v10] isLastPartialBatch 파라미터
  *   - [CHECKPOINT] client-side checkpoint read/write/clear
  *   - [RESUME] server + client resume on re-entry
  *   - [BATCH] transcribe + translate loop 구조
@@ -69,16 +74,14 @@ import { useTranslation } from 'react-i18next';
 // Constants
 // ─────────────────────────────────────────────────────────────────────────────
 
-const CHUNK_DURATION_SECS       = 30;
-const CHUNKS_PER_BATCH          = 6;
-const CHECKPOINT_TTL_MS         = 72 * 60 * 60 * 1000;
-const BATCH_RETRY_DELAY_MS      = 2000;
+const CHUNK_DURATION_SECS  = 30;
+const CHUNKS_PER_BATCH     = 6;
+const CHECKPOINT_TTL_MS    = 72 * 60 * 60 * 1000;
+const BATCH_RETRY_DELAY_MS = 2000;
 
 /**
  * MIN_QUOTA_TO_PROCESS_SECS — 정상 배치 처리 기준선
- * 이 이상이면 buffer 포함 정상 reservedSeconds 계산
  * calcReservedSeconds의 10초 최솟값 guard를 단독 소유
- * (serverBridgeService v9 [FIX-1]: 이 상수가 있으므로 함수 내 이중 방어 불필요)
  */
 const MIN_QUOTA_TO_PROCESS_SECS = 10;
 
@@ -93,11 +96,11 @@ const MIN_QUOTA_TO_PROCESS_SECS = 10;
  * 3초 미만 job → 서버 비용 > 실제 작업 가치 → 전송 차단
  * 3~9초 구간  → 마지막 partial batch로 처리 (남은 quota 소진)
  *
- * HARD_MIN < MIN_QUOTA 불변식 필수:
+ * HARD_MIN < MIN_QUOTA 불변식:
  *   HARD_MIN_EXECUTE_SECS(3) < MIN_QUOTA_TO_PROCESS_SECS(10) ✅
  *
- * ⚠️ 이 값을 변경하면 serverBridgeService.ts의 MIN_EXECUTION_FLOOR_SECS,
- *    useVideoProcessor.ts의 HARD_MIN_EXECUTE_SECS도 함께 변경 필요
+ * ⚠️ 변경 시 serverBridgeService.ts의 MIN_EXECUTION_FLOOR_SECS,
+ *    useVideoProcessor.ts의 HARD_MIN_EXECUTE_SECS도 함께 변경
  */
 const HARD_MIN_EXECUTE_SECS = 3;
 
@@ -196,7 +199,10 @@ export function useServerBridge() {
       const serverCompleted = await fetchCompletedBatches(stableId);
       const serverCompletedIndices = new Set(serverCompleted.completedBatchIndices);
 
-      for (const batch of serverCompleted.batches) {
+      // [DEF-1] batches null guard — UNKNOWN 응답 시 빈 배열 fallback
+      const resumeBatches = serverCompleted.batches ?? [];
+
+      for (const batch of resumeBatches) {
         const batchSubs: SubtitleSegment[] = batch.segments
           .filter(seg => seg.translated && seg.translated.trim().length > 2)
           .map(seg => ({
@@ -207,7 +213,6 @@ export function useServerBridge() {
         allSubtitles.push(...batchSubs);
         const batchJobKey = `${stableId}_batch_${batch.batchIndex}`;
         if (!_usageRecorded.has(batchJobKey)) {
-          // [FIX-2 v9] batch.completedAt 있으면 우선 사용 — TTL 계산 정확도 향상
           _usageRecorded.set(batchJobKey, batch.completedAt ?? Date.now());
         }
       }
@@ -215,7 +220,7 @@ export function useServerBridge() {
       if (serverCompleted.completedBatchIndices.length > 0) {
         const maxBatch = Math.max(...serverCompleted.completedBatchIndices);
         chunkIndex = Math.min(maxBatch * CHUNKS_PER_BATCH, totalChunks);
-        offset = Math.min(chunkIndex * CHUNK_DURATION_SECS, totalDuration);
+        offset     = Math.min(chunkIndex * CHUNK_DURATION_SECS, totalDuration);
         batchIndex = maxBatch;
         onProgress({
           step: 'transcribing', current: chunkIndex, total: totalChunks,
@@ -232,10 +237,10 @@ export function useServerBridge() {
             CHUNKS_PER_BATCH,
             Math.ceil((totalDuration - scan * CHUNKS_PER_BATCH * CHUNK_DURATION_SECS) / CHUNK_DURATION_SECS),
           );
-          offset += chunksInBatch * CHUNK_DURATION_SECS;
+          offset     += chunksInBatch * CHUNK_DURATION_SECS;
           chunkIndex += chunksInBatch;
-          batchIndex = scan + 1;
-          const ck = `${stableId}_batch_${scan + 1}`;
+          batchIndex  = scan + 1;
+          const ck    = `${stableId}_batch_${scan + 1}`;
           if (!_usageRecorded.has(ck)) _usageRecorded.set(ck, Date.now());
           scan++;
         }
@@ -263,18 +268,25 @@ export function useServerBridge() {
           continue;
         }
 
-        // ── remainingQuotaSeconds — 배치 처리 시작 시점에 계산 ─────────────
-        const currentPlanState = usePlanStore.getState();
+        // ── remainingQuotaSeconds 계산 ────────────────────────────────────
+        const currentPlanState   = usePlanStore.getState();
         const remainingQuotaSeconds = Math.max(
           currentPlanState.tier === 'free'
-            ? (currentPlanState.limits.dailyCapMinutes - currentPlanState.usedMinutes) * 60
+            ? (currentPlanState.limits.dailyCapMinutes  - currentPlanState.usedMinutes) * 60
             : (currentPlanState.limits.monthlyCapMinutes - currentPlanState.usedMinutes) * 60,
           0,
         );
 
-        // ── [FIX-4 v10] Hybrid quota guard ────────────────────────────────
+        // [LOG-1] batch 진입 시 quota 상태 로그 — quota 소진 흐름 추적
+        console.log(
+          `[ServerBridge] batch ${batchIndex} start: ` +
+          `offset=${offset.toFixed(1)}s, ` +
+          `remainingQuota=${remainingQuotaSeconds}s, ` +
+          `totalDuration=${totalDuration.toFixed(1)}s`,
+        );
 
-        // (A) quota 완전 소진
+        // ── [FIX-4 v10] Hybrid quota guard ───────────────────────────────
+
         if (remainingQuotaSeconds <= 0) {
           console.warn(
             `[ServerBridge] Quota exhausted (${remainingQuotaSeconds}s) — ` +
@@ -283,7 +295,6 @@ export function useServerBridge() {
           break;
         }
 
-        // (B) 서버 효율 최소선 미달
         if (remainingQuotaSeconds < HARD_MIN_EXECUTE_SECS) {
           console.warn(
             `[ServerBridge] Below hard minimum: ${remainingQuotaSeconds}s < ${HARD_MIN_EXECUTE_SECS}s — ` +
@@ -292,22 +303,21 @@ export function useServerBridge() {
           break;
         }
 
-        // (C) partial 구간: HARD_MIN ≤ remaining < MIN_QUOTA
         const isLastPartialBatch = remainingQuotaSeconds < MIN_QUOTA_TO_PROCESS_SECS;
 
         if (isLastPartialBatch) {
           console.log(
             `[ServerBridge] Entering final partial batch ${batchIndex}: ` +
-            `remaining=${remainingQuotaSeconds}s (${HARD_MIN_EXECUTE_SECS}s ≤ remaining < ${MIN_QUOTA_TO_PROCESS_SECS}s) — ` +
+            `remaining=${remainingQuotaSeconds}s ` +
+            `(${HARD_MIN_EXECUTE_SECS}s ≤ remaining < ${MIN_QUOTA_TO_PROCESS_SECS}s) — ` +
             `will process once then stop`,
           );
         }
 
-        // Phase A: transcribe (NOT billed — RULE 2)
+        // Phase A: transcribe
         const batchRawSegments: Array<{ start: number; end: number; text: string }> = [];
         let chunksThisBatch = 0;
 
-        // [FIX-5 v11] planned vs actual 명확히 분리
         let batchPlannedDurationSecs = 0;
         let batchActualDurationSecs  = 0;
 
@@ -346,7 +356,7 @@ export function useServerBridge() {
           });
         }
 
-        // [FIX-6 v11] segments.length === 0 → translate 호출 차단
+        // [FIX-6 v11] 빈 segments → translate 차단
         if (batchRawSegments.length === 0) {
           console.warn(
             `[ServerBridge] Batch ${batchIndex}: segments empty after transcription — ` +
@@ -359,8 +369,7 @@ export function useServerBridge() {
 
         if (isCancelled()) return { subtitles: [], translationSkipped: false };
 
-        // [FIX-5 v11] getEffectiveBatchDuration으로 안전한 effective 값 계산
-        // [FIX-7 v12] adaptive ratio 로그 보강 — serverBridgeService v14 [FIX-12] 연동
+        // [FIX-7 v12] adaptive ratio 로그
         const effectiveDurationSecs = getEffectiveBatchDuration(
           batchPlannedDurationSecs,
           batchActualDurationSecs,
@@ -373,7 +382,6 @@ export function useServerBridge() {
           isLastPartialBatch,
         );
 
-        // [FIX-7 v12] dynamicRatio 로그 추가 — adaptive ratio 선택 추적
         const dynamicRatio = isLastPartialBatch
           ? getAdaptiveFloorRatio(batchActualDurationSecs, batchPlannedDurationSecs)
           : null;
@@ -392,8 +400,7 @@ export function useServerBridge() {
           `isLastPartial=${isLastPartialBatch}`,
         );
 
-        // Phase B: translate
-        // [FIX-3 v9] retry policy: unknown vs retryable 명확화 (RULE 13 spec 준수)
+        // Phase B: translate — [FIX-3 v9] retry policy
         const batchEndOffset = offset;
         let translateResult: Awaited<ReturnType<typeof serverTranslate>> | undefined;
         let lastErr: any;
@@ -429,7 +436,6 @@ export function useServerBridge() {
                   break;
                 }
               } else {
-                // retryable (network/5xx/429) → retry
                 console.warn(`[ServerBridge] Batch ${batchIndex} retryable error — retry:`, err);
                 await new Promise(r => setTimeout(r, BATCH_RETRY_DELAY_MS));
               }
@@ -445,11 +451,11 @@ export function useServerBridge() {
 
         if (isCancelled()) return { subtitles: [], translationSkipped: false };
 
-        // ── [BILLING] safeRecordUsage (await) ─────────────────────────────
+        // ── [BILLING] safeRecordUsage ─────────────────────────────────────
         if (translateResult.completed) {
           const billed = await safeRecordUsage(
             batchJobKey,
-            translateResult.usageSeconds,   // actualSeconds — BILLING SOURCE OF TRUTH
+            translateResult.usageSeconds,
             recordUsage,
             recordGpuSeconds,
             tier,
@@ -497,6 +503,11 @@ export function useServerBridge() {
             earlyPlaybackFired = true;
             lastEmittedEndTime = contiguous[contiguous.length - 1].endTime;
             onEarlyPlaybackReady([...contiguous]);
+            // [LOG-2] early playback fired 시점 로그
+            console.log(
+              `[ServerBridge] early playback fired at batch ${batchIndex}: ` +
+              `coverage=${coverage.toFixed(1)}s, segments=${contiguous.length}`,
+            );
           }
         }
 
@@ -526,6 +537,15 @@ export function useServerBridge() {
       }
 
       await clearBatchCheckpoints(stableId);
+
+      // [DEF-2] 빈 결과 추적 로그
+      if (allSubtitles.length === 0) {
+        console.warn(
+          `[ServerBridge] Processing complete but no subtitles produced — ` +
+          `videoUri=${videoUri}, totalDuration=${totalDuration.toFixed(1)}s`,
+        );
+      }
+
       onProgress({
         step: 'done', current: allSubtitles.length, total: allSubtitles.length,
         percent: 100, message: t('serverBridge.processingDone'),
@@ -544,7 +564,7 @@ export function useServerBridge() {
   const cancel = useCallback(() => {
     cancelledRef.current = true;
     cancelAllInflight();
-    // TODO: 서버 cancel API 연동 — cancelAllInflight() 내부 주석 참조
+    // TODO: 서버 cancel API 연동
   }, []);
 
   return { processVideoServer, cancel };
