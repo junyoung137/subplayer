@@ -395,7 +395,7 @@ export default function ProcessingScreen() {
         setPlaying(true);
         // Force ring to 100% so user sees completion before navigation
         monotonicRef.current = 100;
-        setRingPercent(100);
+        tweenRing(100, 600);
         if (!earlyReadyFiredRef.current) {
           earlyReadyFiredRef.current = true;
           setEarlyReady(true);
@@ -471,16 +471,39 @@ export default function ProcessingScreen() {
   }
 
   // ── Monotonic progress ──────────────────────────────────────────────────────
-  // Uses fine-grained progress.current / progress.total per step so each
-  // STT chunk and translation batch produces visible ring movement.
+  const monotonicRef   = useRef(0);
+  const ringAnimValue  = useRef(new Animated.Value(0)).current;
+  const ringAnimRef    = useRef<Animated.CompositeAnimation | null>(null);
+  const ringDisplayRef = useRef(0);
+  const [ringDisplayPercent, setRingDisplayPercent] = useState(0);
 
-  const monotonicRef = useRef(0);
-  const ringAnimRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const [ringPercent, setRingPercent] = useState(0);
+  // Sync animated value → display state at ~5fps (avoids 60fps re-renders)
+  useEffect(() => {
+    const listenerId = ringAnimValue.addListener(({ value }) => {
+      ringDisplayRef.current = value;
+    });
+    const intervalId = setInterval(() => {
+      const v = Math.round(ringDisplayRef.current);
+      setRingDisplayPercent(prev => prev === v ? prev : v);
+    }, 200);
+    return () => {
+      ringAnimValue.removeListener(listenerId);
+      clearInterval(intervalId);
+    };
+  }, []);
+
+  const tweenRing = useCallback((target: number, duration: number) => {
+    ringAnimRef.current?.stop();
+    ringAnimRef.current = Animated.timing(ringAnimValue, {
+      toValue:         target,
+      duration,
+      easing:          Easing.out(Easing.cubic),
+      useNativeDriver: false,
+    });
+    ringAnimRef.current.start(() => { ringAnimRef.current = null; });
+  }, []); // ringAnimValue and ringAnimRef are stable refs
 
   useEffect(() => {
-    // videoProcessor now emits unified timeline percent for all steps.
-    // Trust it directly; only apply monotonic guard here.
     let computed: number;
 
     if (isDone) {
@@ -496,55 +519,30 @@ export default function ProcessingScreen() {
     // Monotonic guard: never go backward
     if (computed > monotonicRef.current) {
       monotonicRef.current = computed;
-      setRingPercent(Math.round(computed));
+      const gap = computed - ringDisplayRef.current;
+      const duration = Math.min(1500, Math.max(300, gap * 18));
+      tweenRing(computed, duration);
     }
-
-    // Clear any previous ticker
-    if (ringAnimRef.current !== null) {
-      clearInterval(ringAnimRef.current);
-      ringAnimRef.current = null;
-    }
-
-    // Only animate during translation phase; other phases update
-    // infrequently enough that direct setRingPercent is fine.
-    if (progress.step === 'translating' && !isDone) {
-      const target = monotonicRef.current;
-      ringAnimRef.current = setInterval(() => {
-        setRingPercent(prev => {
-          if (prev >= target) {
-            clearInterval(ringAnimRef.current!);
-            ringAnimRef.current = null;
-            return prev;
-          }
-          return Math.min(prev + 1, target);
-        });
-      }, 120);  // advance 1% every 120ms → smooth over ~0.5s per 4% step
-    }
-
-    return () => {
-      if (ringAnimRef.current !== null) {
-        clearInterval(ringAnimRef.current);
-        ringAnimRef.current = null;
-      }
-    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [progress.step, progress.percent, isDone]);
 
   // Reset on new video
   useEffect(() => {
     monotonicRef.current = 0;
-    setRingPercent(0);
-    if (ringAnimRef.current !== null) {
-      clearInterval(ringAnimRef.current);
-      ringAnimRef.current = null;
-    }
+    ringAnimRef.current?.stop();
+    ringAnimRef.current = null;
+    ringAnimValue.setValue(0);
+    ringDisplayRef.current = 0;
+    setRingDisplayPercent(0);
   }, [videoUri]);
 
-  // Force 100 on done
+  // Force 100 on done with fixed 600ms tween regardless of current value
   useEffect(() => {
     if (isDone) {
       monotonicRef.current = 100;
-      setRingPercent(100);
+      tweenRing(100, 600);
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isDone]);
 
   // ── End monotonic progress ──────────────────────────────────────────────────
@@ -633,7 +631,7 @@ export default function ProcessingScreen() {
             paddingBottom: 24,
           }}>
             <CircularProgressRing
-              percent={ringPercent}
+              percent={ringDisplayPercent}
               isDone={isDone}
             />
 
@@ -641,7 +639,7 @@ export default function ProcessingScreen() {
             {!earlyReady && !isDone && (
               <View style={ringStyles.statusRow}>
                 <ActivityIndicator size="small" color="#3b82f6" />
-                <Text style={ringStyles.statusText}>앞부분 자막 준비 중...</Text>
+                <Text style={ringStyles.statusText}>{t("processing.earlySubtitlePreparing")}</Text>
               </View>
             )}
 
@@ -650,11 +648,11 @@ export default function ProcessingScreen() {
               <View style={{ alignItems: 'center', gap: 8, marginTop: 16 }}>
                 <View style={ringStyles.statusRow}>
                   <Check size={16} color="#22c55e" />
-                  <Text style={ringStyles.readyText}>지금 재생 가능</Text>
+                  <Text style={ringStyles.readyText}>{t("processing.earlyPlayReady")}</Text>
                 </View>
-                <Text style={ringStyles.hintText}>뒤쪽 자막은 자동 생성 중입니다</Text>
+                <Text style={ringStyles.hintText}>{t("processing.earlyPlayHint")}</Text>
                 <Text style={ringStyles.hintSubText}>
-                  재생 중 자막이 없는 구간은 잠시 후 자동으로 표시됩니다
+                  {t("processing.earlyPlayHintSub")}
                 </Text>
               </View>
             )}
@@ -663,7 +661,7 @@ export default function ProcessingScreen() {
             {isDone && (
               <View style={ringStyles.statusRow}>
                 <Check size={16} color="#22c55e" />
-                <Text style={ringStyles.doneText}>완료! 재생을 시작합니다...</Text>
+                <Text style={ringStyles.doneText}>{t("processing.doneNavigating")}</Text>
               </View>
             )}
           </View>

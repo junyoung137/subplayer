@@ -1,6 +1,7 @@
 import "../i18n";
 import { useEffect } from "react";
-import { AppRegistry, View, ActivityIndicator } from "react-native";
+import { AppRegistry, Text, View, Image } from "react-native";
+import SplashAnimScreen from "./splash";
 import { Stack, router } from "expo-router";
 import { useTranslation } from "react-i18next";
 import { StatusBar } from "expo-status-bar";
@@ -85,11 +86,7 @@ export default function RootLayout() {
   }, []);
 
   if (isLoading) {
-    return (
-      <View style={{ flex: 1, backgroundColor: "#0a0a0a", alignItems: "center", justifyContent: "center" }}>
-        <ActivityIndicator size="large" color="#2563eb" />
-      </View>
-    );
+    return <SplashAnimScreen />;
   }
 
   return (
@@ -103,7 +100,23 @@ export default function RootLayout() {
           contentStyle: { backgroundColor: "#0a0a0a" },
         }}
       >
-        <Stack.Screen name="index"        options={{ title: "RealtimeSub" }} />
+        <Stack.Screen
+          name="index"
+          options={{
+            headerTitle: () => (
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 2 }}>
+                <Text style={{ fontSize: 20, fontWeight: "700", color: "#fff" }}>
+                  Realtime<Text style={{ color: "#60a5fa" }}>Sub</Text>
+                </Text>
+                <Image
+                  source={require("../assets/header_icon.png")}
+                  style={{ width: 36, height: 36, borderRadius: 8 }}
+                  resizeMode="contain"
+                />
+              </View>
+            ),
+          }}
+        />
         <Stack.Screen name="processing"   options={{ title: "처리 중",   headerShown: false }} />
         <Stack.Screen name="player"       options={{ title: "플레이어", headerShown: false }} />
         <Stack.Screen name="settings"     options={{ title: t("layout.settings") }} />
@@ -113,6 +126,7 @@ export default function RootLayout() {
         <Stack.Screen name="support"        options={{ title: "피드백", headerShown: false }} />
         <Stack.Screen name="login"          options={{ headerShown: false }} />
         <Stack.Screen name="signup"         options={{ headerShown: false }} />
+        <Stack.Screen name="pricing"        options={{ headerShown: false }} />
       </Stack>
     </>
   );

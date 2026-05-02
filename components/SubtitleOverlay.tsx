@@ -519,8 +519,15 @@ export function SubtitleOverlay() {
   const activeOriginal = useMemo(() => {
     if (!renderedLine) return "";
     const seg = subtitles.find((s) => s.id === renderedLine.segmentId);
-    return seg ? cleanSubtitleText(seg.original) : "";
-  }, [renderedLine, subtitles]);
+    if (!seg) return "";
+    const cleaned = cleanSubtitleText(seg.original);
+    // Suppress original when it's identical to translated in "both" mode
+    // (monolingual SRT: no point showing the same text twice)
+    if (subtitleMode === "both" && cleaned === cleanSubtitleText(seg.translated)) {
+      return "";
+    }
+    return cleaned;
+  }, [renderedLine, subtitles, subtitleMode]);
 
   const renderLines = (
     containerStyle: object,

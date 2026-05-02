@@ -11,9 +11,9 @@
     "newArchEnabled": true,
 
     "splash": {
-      "image": "./assets/icon.png",
+      "image": "./assets/adaptive_foreground.png",
       "resizeMode": "contain",
-      "backgroundColor": "#000000"
+      "backgroundColor": "#0a0a0a"
     },
 
     "scheme": "realtimesub",

@@ -1,18 +1,31 @@
 /**
- * YoutubePlayerScreen (v19)
+ * YoutubePlayerScreen (v19.2)
+ *
+ * 변경사항 (v19.1 → v19.2):
+ * ─────────────────────────────────────────────────────────────────────────────
+ * [BUG FIX 1] serverTranslate 호출 시 reservedSeconds 누락 수정
+ *   - ServerTranslateRequest.reservedSeconds (required) 추가
+ *   - calcReservedSeconds() import 및 호출 추가
+ *   - remainingQuotaSeconds를 usePlanStore 기반으로 계산
+ *   - 구문 오류 ('try' expected, 'catch' expected) 해결
+ *   - YouTube 구조 특성: 오디오 없음, 자막 fetch → 번역만 수행
+ *     → effectiveDurationSecs = 세그먼트 실제 재생 시간 합산으로 계산
+ *
+ * [BUG FIX 2] Free 경로 recordUsage 기준 수정 (v19.1 → v19.2)
+ *   - result.segments 전체 → inputFiltered 기준으로 변경
+ *   - 재번역/resume 시 중복 차감 방지
+ *   - inputFiltered 필드: seg.end - seg.start (InputItem 타입)
  *
  * 변경사항 (v18 → v19):
  * ─────────────────────────────────────────────────────────────────────────────
  * [BUG FIX] 재생버튼 미작동 문제
- *   - 원인 1: current=0 (영상 미시작) 상태에서 YouTubePlayer 내부 tap 핸들러가
- *             "double-tap ignored" 처리하여 play() 명령 자체가 무시됨
- *   - 원인 2: 연속 탭 시 play() → pause() 순서 역전으로 상태 충돌 발생
- *   - 수정: optimisticPlaying 로컬 state + debounce ref 로 해결.
- *           버튼 탭 시 optimisticPlaying 즉시 토글 (UI 즉각 반응).
- *           300ms debounce 후 실제 ref.play()/pause() 1회만 호출.
- *           isPlaying store 상태는 오직 onStateChange 이벤트에서만 업데이트 (단방향).
- *           play prop 추가 없음 — YouTubePlayerHandle ref 메서드만 사용.
+ *   - optimisticPlaying 로컬 state + ref 로 즉각 UI 반응
+ *   - isPlaying store는 onStateChange 이벤트에서만 업데이트 (단방향)
+ *
+ * 변경사항 (v19 → v19.1):
  * ─────────────────────────────────────────────────────────────────────────────
+ * [USAGE FIX] Free 플랜 로컬 Gemma 번역 사용량 차감 누락 수정
+ *   - Free 경로(on-device Gemma) 번역 완료 후 recordUsage 호출 추가
  */
 
 import React, { useRef, useState, useCallback, useEffect } from "react";
@@ -84,6 +97,7 @@ import {
   makeDeterministicYtKey,
   classifyServerError,
   safeRecordUsage,
+  calcReservedSeconds,
   _usageRecorded,
 } from '../services/serverBridgeService';
 import type { ServerCompletedBatchesResponse } from '../services/serverBridgeService';
@@ -91,7 +105,7 @@ import { recordGpuSeconds } from '../services/usageTracker';
 
 // ── 상수 ─────────────────────────────────────────────────────────────────────
 
-const SPEEDS = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
+const SPEEDS = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0];
 
 // ── 헬퍼 ─────────────────────────────────────────────────────────────────────
 
@@ -105,6 +119,18 @@ function fmt(sec: number): string {
   const s = Math.floor(sec % 60);
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
+
+const QUALITY_LABELS: Record<string, string> = {
+  hd2160: '2160p 4K',
+  hd1440: '1440p HD',
+  hd1080: '1080p HD',
+  hd720:  '720p',
+  large:  '480p',
+  medium: '360p',
+  small:  '240p',
+  tiny:   '144p',
+  auto:   '자동',
+};
 
 // ── 자막 phase 타입 ───────────────────────────────────────────────────────────
 
@@ -270,6 +296,8 @@ export default function YoutubePlayerScreen() {
 
   const { isRetranslating } = useRetranslate();
   const planTier    = usePlanStore((s) => s.tier);
+  const planLimits  = usePlanStore((s) => s.limits);
+  const usedMinutes = usePlanStore((s) => s.usedMinutes);
   const canProcess  = usePlanStore((s) => s.canProcess);
   const recordUsage = usePlanStore((s) => s.recordUsage);
 
@@ -304,7 +332,6 @@ export default function YoutubePlayerScreen() {
   const lastProgressTimestampRef = useRef<number>(0);
 
   // optimisticPlaying: 버튼 탭 시 UI 즉각 반응용 로컬 state
-  // 실제 isPlaying store 상태는 오직 onStateChange 이벤트에서만 업데이트 (단방향)
   const [optimisticPlaying, setOptimisticPlaying] = useState(false);
   const optimisticPlayingRef  = useRef(false);
   const [fullscreenOverlayVisible, setFullscreenOverlayVisible] = useState(false);
@@ -323,7 +350,6 @@ export default function YoutubePlayerScreen() {
   const batchStartTimeRef   = useRef<number>(0);
   const lastCompletedRef    = useRef<number>(0);
   const secsPerSegmentRef   = useRef<number>(0);
-  const fgAnimThrottleRef   = useRef<number>(0);
 
   // BG remaining-time estimation refs
   const bgPrevProgressRef  = useRef<number>(0);
@@ -357,6 +383,7 @@ export default function YoutubePlayerScreen() {
   const [saveModalVisible,     setSaveModalVisible]     = useState(false);
   const [searchModalVisible,   setSearchModalVisible]   = useState(false);
   const [speedIdx,             setSpeedIdx]             = useState(2);
+  const [currentQuality,       setCurrentQuality]       = useState<string>('자동');
   const [selectedGenre,        setSelectedGenre]        = useState(_initialGenre);
   const isLandscape = screenWidth > screenHeight;
   const navigation  = useNavigation();
@@ -443,7 +470,7 @@ export default function YoutubePlayerScreen() {
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── SRT fallback: handles case where handlePlayerReady fired before pendingSubtitleRef was set ──
+  // ── SRT fallback ──────────────────────────────────────────────────────────
   useEffect(() => {
     const srtUri = pendingSubtitleRef.current;
     if (!srtUri) return;
@@ -511,7 +538,7 @@ export default function YoutubePlayerScreen() {
     };
   }, [bgStatus?.status, bgStatus?.videoId, youtubeVideoId]);
 
-  // ── Shimmer animation
+  // ── Shimmer animation ─────────────────────────────────────────────────────
   useEffect(() => {
     const phase: SubtitlePhase = usingWhisper
       ? (whisperStatus.isRunning ? 'fallback_whisper' : 'idle')
@@ -536,7 +563,7 @@ export default function YoutubePlayerScreen() {
     }
   }, [isBgRunning, usingWhisper, whisperStatus.isRunning, subtitlePhase, subtitleProgress, bgStatus?.progress, shimmerAnim]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Pulsing opacity animation for background banner
+  // ── Pulsing opacity animation for background banner ───────────────────────
   useEffect(() => {
     if (!isBgRunning) {
       bannerOpacity.setValue(0.7);
@@ -552,7 +579,7 @@ export default function YoutubePlayerScreen() {
     return () => animation.stop();
   }, [isBgRunning, bannerOpacity]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Staleness detection
+  // ── Staleness detection ───────────────────────────────────────────────────
   useEffect(() => {
     const bgProg = bgStatus?.progress ?? 0;
     if (subtitleProgress > 0 || bgProg > 0) {
@@ -594,10 +621,7 @@ export default function YoutubePlayerScreen() {
     bgUpdateCountRef.current += 1;
     const p   = bgStatus.progress ?? 0;
     const now = Date.now();
-    if (
-      bgPrevProgressRef.current > 0 &&
-      p > bgPrevProgressRef.current
-    ) {
+    if (bgPrevProgressRef.current > 0 && p > bgPrevProgressRef.current) {
       const deltaPct  = p - bgPrevProgressRef.current;
       const elapsedMs = now - bgPrevTimestampRef.current;
       const elapsedS  = elapsedMs / 1000;
@@ -679,14 +703,12 @@ export default function YoutubePlayerScreen() {
     rafIdRef.current = requestAnimationFrame(frame);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── BG progress: react to real progress updates ───────────────────────────
   useEffect(() => {
     const target = bgStatus?.progress ?? 0;
     if (target <= displayedPctRef.current) return;
     bgAnimateTo(target, 800);
   }, [bgStatus?.progress, bgAnimateTo]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── BG progress: heartbeat nudge between batch callbacks ─────────────────
   useEffect(() => {
     if (heartbeatRef.current) clearInterval(heartbeatRef.current);
 
@@ -711,7 +733,6 @@ export default function YoutubePlayerScreen() {
     };
   }, [bgStatus?.status]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── BG progress: done / error / idle transitions ──────────────────────────
   useEffect(() => {
     if (bgStatus?.status === 'done') {
       if (heartbeatRef.current) {
@@ -739,7 +760,6 @@ export default function YoutubePlayerScreen() {
     }
   }, [bgStatus?.status, bgAnimateTo]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── BG progress: unmount cleanup ─────────────────────────────────────────
   useEffect(() => {
     return () => {
       if (rafIdRef.current !== null) cancelAnimationFrame(rafIdRef.current);
@@ -747,7 +767,7 @@ export default function YoutubePlayerScreen() {
     };
   }, []);
 
-  // ── Genre restore from player store ──────────────────────────────────────
+  // ── Genre restore ─────────────────────────────────────────────────────────
   useEffect(() => {
     const g = usePlayerStore.getState().pendingGenre ?? "general";
     currentVideoIdRef.current  = youtubeVideoId;
@@ -759,7 +779,7 @@ export default function YoutubePlayerScreen() {
   }, [youtubeVideoId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (srtModeActiveRef.current) return; // SRT mode — don't reset pipeline guards
+    if (srtModeActiveRef.current) return;
     bgResultApplied.current      = false;
     autoFetchCompletedRef.current = false;
     allSegmentsRef.current    = null;
@@ -777,7 +797,7 @@ export default function YoutubePlayerScreen() {
   useEffect(() => {
     if (!youtubeVideoId) return;
     (async () => {
-      if (srtModeActiveRef.current) return; // SRT mode — skip bg result restore
+      if (srtModeActiveRef.current) return;
       const result = await loadBgResult(youtubeVideoId);
       if (!result) return;
       if (isBgRunningRef.current) return;
@@ -786,7 +806,6 @@ export default function YoutubePlayerScreen() {
         await clearBgResult(youtubeVideoId);
         return;
       }
-      console.log(`[YT_SCREEN] Restoring bg result on mount: ${result.segments.length} segs`);
       const restored = result.segments.map((seg, i) => ({
         id:         `bg_${i}_${Math.round(seg.startTime * 1000)}`,
         startTime:  seg.startTime,
@@ -838,7 +857,6 @@ export default function YoutubePlayerScreen() {
       setTranslationEverCompleted(true);
       saveSubtitles(youtubeVideoId, result.language, selectedGenre, restored).catch(() => {});
       await clearBgResult(youtubeVideoId);
-      console.log(`[YT_SCREEN] BG result auto-applied while screen open: ${restored.length} segs`);
     })();
   }, [bgStatus?.status, youtubeVideoId]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -855,7 +873,7 @@ export default function YoutubePlayerScreen() {
     return true;
   };
 
-  // ── throttled setSubtitles
+  // ── throttled setSubtitles ────────────────────────────────────────────────
   const scheduleSetSubtitles = useCallback((subs: SubtitleSegment[], callerJobId: number) => {
     if (rafHandleRef.current !== null) {
       cancelAnimationFrame(rafHandleRef.current);
@@ -867,7 +885,7 @@ export default function YoutubePlayerScreen() {
     });
   }, [setSubtitles]);
 
-  // ── Smooth progress bar animation ─────────────────────────────────────
+  // ── Smooth progress bar animation ─────────────────────────────────────────
   const animateTo = useCallback((target: number) => {
     animTargetRef.current = target;
     if (animFrameRef.current !== null) return;
@@ -894,7 +912,7 @@ export default function YoutubePlayerScreen() {
     animFrameRef.current = requestAnimationFrame(frame);
   }, []);
 
-  // ── Segmented progress crawl ───────────────────────────────────────────
+  // ── Segmented progress crawl ───────────────────────────────────────────────
   const startCrawl = useCallback((
     fromVal: number,
     toVal: number,
@@ -945,7 +963,7 @@ export default function YoutubePlayerScreen() {
       return;
     }
 
-    // ── Plan gate ──────────────────────────────────────────────────────────────
+    // ── Plan gate ────────────────────────────────────────────────────────────
     const estimatedMinutes = Math.ceil((result.segments.length * 3) / 60);
     const { allowed, reason: planReason } = canProcess(estimatedMinutes);
     if (!allowed) {
@@ -954,7 +972,7 @@ export default function YoutubePlayerScreen() {
       return;
     }
 
-    // ── Plan routing ───────────────────────────────────────────────────────────
+    // ── Plan routing ─────────────────────────────────────────────────────────
     const useServer = planTier === 'standard' || planTier === 'pro';
 
     const myJobId = ++jobIdRef.current;
@@ -968,11 +986,6 @@ export default function YoutubePlayerScreen() {
     const useLang  = langOverride  ?? targetLanguage;
     const useGenre = genreOverride ?? genreValueRef.current;
     const isResume = (existingTranslations?.size ?? 0) > 0;
-
-    console.log(
-      `[TRANSLATE] ▶ job=${myJobId}, segs=${result.segments.length}, ` +
-      `lang=${useLang}, genre=${useGenre}, resume=${isResume}`
-    );
 
     const originalOnly: SubtitleSegment[] = (result.segments ?? [])
       .filter((seg) => seg != null && seg.text != null)
@@ -1036,7 +1049,7 @@ export default function YoutubePlayerScreen() {
       });
     }
 
-    if (!hasGemma) {
+    if (!hasGemma && !useServer) {
       setPhase("done");
       setRemainingSecs(null);
       animateTo(1);
@@ -1083,7 +1096,7 @@ export default function YoutubePlayerScreen() {
       let translated: typeof translateInput;
 
       if (useServer) {
-        // ── Server path (Standard/Pro) ────────────────────────────────────────
+        // ── Server path (Standard/Pro) ────────────────────────────────────
         try {
           const serverConfig = await loadServerBridgeConfig();
           if (!serverConfig) throw new Error('Server not configured');
@@ -1092,13 +1105,35 @@ export default function YoutubePlayerScreen() {
           // RULE 13: compute batchKey ONCE before try — never regenerate on retry
           const batchKey = makeDeterministicYtKey(stableId, translateInput);
 
+          // ── [v19.2 FIX] remainingQuotaSeconds 계산 ─────────────────────
+          // YouTube는 오디오 없음 — 세그먼트 재생 시간 합산을 effectiveDuration으로 사용
+          const effectiveDurationSecs = inputFiltered.reduce(
+            (acc, seg) => acc + Math.max(0, seg.end - seg.start),
+            0,
+          );
+
+          const currentPlanState = usePlanStore.getState();
+          const remainingQuotaSeconds = Math.max(
+            currentPlanState.tier === 'free'
+              ? (currentPlanState.limits.dailyCapMinutes  - currentPlanState.usedMinutes) * 60
+              : (currentPlanState.limits.monthlyCapMinutes - currentPlanState.usedMinutes) * 60,
+            0,
+          );
+
+          const reservedSeconds = calcReservedSeconds(
+            effectiveDurationSecs,
+            remainingQuotaSeconds,
+            false, // YouTube는 배치 분할 없음 — 전체를 한 번에 처리
+          );
+
           const serverResult = await serverTranslate({
             segments: translateInput.map(s => ({ start: s.start, end: s.end, text: s.text })),
             targetLanguage: langName,
-            videoId: batchKey, // idempotency key — same on any retry
+            videoId: batchKey,
+            reservedSeconds,          // [v19.2 FIX] 추가
           });
 
-          // ── [BILLING] safeRecordUsage ─────────────────────────────────────
+          // ── [BILLING] safeRecordUsage ─────────────────────────────────
           if (serverResult.completed) {
             safeRecordUsage(batchKey, serverResult.usageSeconds, recordUsage, recordGpuSeconds, planTier).catch(e => {
               console.error('[YT_SCREEN] safeRecordUsage error:', e);
@@ -1120,25 +1155,22 @@ export default function YoutubePlayerScreen() {
 
           // RULE 6: Standard fallback decision tree
           const errClass = classifyServerError(serverErr);
-          if (errClass === 'auth' || errClass === 'validation') throw serverErr; // fatal
+          if (errClass === 'auth' || errClass === 'validation') throw serverErr;
 
           const stableId = makeStableVideoId(youtubeVideoId ?? 'yt_default');
-          // RULE 13: same deterministic inputs → same batchKey as above — no new generation
           const batchKey = makeDeterministicYtKey(stableId, translateInput);
 
           // fetchCompletedBatches: 3-state (RULE 6)
           let checkResult = await fetchCompletedBatches(stableId);
 
-          // RULE 6 + RULE 13: UNKNOWN → retry ONCE (2s backoff, same stableId/batchKey)
-          // Server honors idempotency key → no GPU recompute on retry
+          // RULE 6 + RULE 13: UNKNOWN → retry ONCE
           if (checkResult.state === 'UNKNOWN') {
-            console.log('[YT_SCREEN] fetchCompletedBatches UNKNOWN — retrying in 2s (same key, no recompute)');
+            console.log('[YT_SCREEN] fetchCompletedBatches UNKNOWN — retrying in 2s');
             await new Promise(r => setTimeout(r, 2000));
             checkResult = await fetchCompletedBatches(stableId);
           }
 
           if (checkResult.state === 'COMPLETED') {
-            console.log('[YT_SCREEN] Server completed (checkpoint). Using checkpoint result.');
             const serverBatch = checkResult.batches[0];
             if (serverBatch?.usageSeconds > 0) {
               safeRecordUsage(batchKey, serverBatch.usageSeconds, recordUsage, recordGpuSeconds, planTier).catch(e => {
@@ -1153,12 +1185,11 @@ export default function YoutubePlayerScreen() {
             });
 
           } else {
-            // NOT_COMPLETED or still UNKNOWN → Standard: Gemma fallback, no billing, no GPU recompute
-            console.log(`[YT_SCREEN] Server ${checkResult.state} — Standard fallback to Gemma (no billing)`);
-            const hasGemma = await ensureGemma();
-            if (!hasGemma) throw serverErr;
+            // NOT_COMPLETED or UNKNOWN → Standard: Gemma fallback, no billing
+            console.log(`[YT_SCREEN] Server ${checkResult.state} — Standard fallback to Gemma`);
+            const hasGemmaFallback = await ensureGemma();
+            if (!hasGemmaFallback) throw serverErr;
 
-            // Gemma fallback — VERBATIM copy of Free path below
             translated = await translateSegments(
               translateInput,
               (completed, total, partial) => {
@@ -1167,9 +1198,8 @@ export default function YoutubePlayerScreen() {
                 if (isBgRunningRef.current) return;
 
                 const totalDone = alreadyDoneCount + completed;
-                const totalAll  = total;
                 setTranslatedCount(totalDone);
-                const newProgress = totalAll > 0 ? totalDone / totalAll : 0;
+                const newProgress = total > 0 ? totalDone / total : 0;
                 if (newProgress > animProgressRef.current) animateTo(newProgress);
 
                 const now = performance.now();
@@ -1177,19 +1207,16 @@ export default function YoutubePlayerScreen() {
                   const delta   = completed - lastCompletedRef.current;
                   const elapsed = (now - batchStartTimeRef.current) / 1000;
                   if (elapsed >= 0.05) {
-                    const rate = delta / elapsed;
-                    const secPerSeg = 1 / rate;
-                    if (secsPerSegmentRef.current === 0) {
-                      secsPerSegmentRef.current = secPerSeg;
-                    } else {
-                      secsPerSegmentRef.current = 0.7 * secsPerSegmentRef.current + 0.3 * secPerSeg;
-                    }
+                    const secPerSeg = 1 / (delta / elapsed);
+                    secsPerSegmentRef.current = secsPerSegmentRef.current === 0
+                      ? secPerSeg
+                      : 0.7 * secsPerSegmentRef.current + 0.3 * secPerSeg;
                   }
                 }
                 batchStartTimeRef.current = now;
                 lastCompletedRef.current  = completed;
 
-                const remaining = totalAll - totalDone;
+                const remaining = total - totalDone;
                 if (secsPerSegmentRef.current > 0.02 && remaining > 0 && completed > 5) {
                   const nextEstimate = remaining * secsPerSegmentRef.current;
                   setRemainingSecs(prev => {
@@ -1197,8 +1224,6 @@ export default function YoutubePlayerScreen() {
                     const clamped = Math.min(prev * 1.3, Math.max(prev * 0.7, nextEstimate));
                     return Math.ceil(clamped);
                   });
-                } else {
-                  setRemainingSecs(null);
                 }
 
                 const shouldUpdateUI = (completed % 3 === 0) || (completed === total);
@@ -1227,7 +1252,7 @@ export default function YoutubePlayerScreen() {
         }
 
       } else {
-        // ── Free path (on-device Gemma) — COMPLETELY UNCHANGED ───────────────
+        // ── Free path (on-device Gemma) ───────────────────────────────────
         translated = await translateSegments(
           translateInput,
           (completed, total, partial) => {
@@ -1248,14 +1273,10 @@ export default function YoutubePlayerScreen() {
               const delta   = completed - lastCompletedRef.current;
               const elapsed = (now - batchStartTimeRef.current) / 1000;
               if (elapsed >= 0.05) {
-                const rate = delta / elapsed;
-                const secPerSeg = 1 / rate;
-                if (secsPerSegmentRef.current === 0) {
-                  secsPerSegmentRef.current = secPerSeg;
-                } else {
-                  secsPerSegmentRef.current =
-                    0.7 * secsPerSegmentRef.current + 0.3 * secPerSeg;
-                }
+                const secPerSeg = 1 / (delta / elapsed);
+                secsPerSegmentRef.current = secsPerSegmentRef.current === 0
+                  ? secPerSeg
+                  : 0.7 * secsPerSegmentRef.current + 0.3 * secPerSeg;
               }
             }
             batchStartTimeRef.current = now;
@@ -1299,13 +1320,31 @@ export default function YoutubePlayerScreen() {
           langName,
           useGenre,
         );
+
+        // ── [USAGE] Free 플랜 로컬 Gemma 번역 사용량 차감 (v19.2) ───────────
+        // [v19.2 FIX] result.segments 전체 → inputFiltered 기준으로 변경
+        //   재번역/resume 시 이미 번역된 세그먼트까지 중복 차감 방지
+        if (myJobId === jobIdRef.current && !isBgRunningRef.current && translated?.length > 0) {
+          try {
+            // inputFiltered: 실제 이번 번역 작업에서 처리된 세그먼트만
+            const totalSecs = inputFiltered.reduce(
+              (acc, seg) => acc + Math.max(0, seg.end - seg.start),
+              0,
+            );
+            if (totalSecs > 0) {
+              recordUsage(totalSecs);
+              console.log(
+                `[YT_SCREEN] Free 사용량 기록: ${Math.round(totalSecs)}초 ` +
+                `(${(totalSecs / 60).toFixed(1)}분), 세그먼트: ${inputFiltered.length}개`,
+              );
+            }
+          } catch (e) {
+            console.warn('[YT_SCREEN] recordUsage 실패 (non-fatal):', e);
+          }
+        }
       }
 
-      // ── ALL POST-TRANSLATION LOGIC BELOW IS UNCHANGED ────────────────────────
-      // finalMap, finalSubs, setSubtitles, setPhase, animateTo,
-      // setTranslatedCount, setTranslationEverCompleted, saveSubtitles
-      // remain exactly as-is from the original file.
-
+      // ── POST-TRANSLATION ──────────────────────────────────────────────────
       if (isBgRunningRef.current || myJobId !== jobIdRef.current) return;
 
       const finalMap = new Map<string, string>();
@@ -1336,7 +1375,6 @@ export default function YoutubePlayerScreen() {
       setTranslatedCount(result.segments.length);
       setTranslationEverCompleted(true);
 
-      console.log(`[TRANSLATE] ✓ job=${myJobId} complete: ${finalSubs.length} segs`);
       saveSubtitles(youtubeVideoId ?? "default", useLang, useGenre, finalSubs).catch(() => {});
 
     } catch (e: any) {
@@ -1345,7 +1383,7 @@ export default function YoutubePlayerScreen() {
       console.error("[YT_SCREEN] 번역 오류:", e);
       setPhase("error");
     }
-  }, [targetLanguage, youtubeVideoId, setSubtitles, scheduleSetSubtitles, setLoadingLabel, setPhase]);
+  }, [targetLanguage, youtubeVideoId, planTier, setSubtitles, scheduleSetSubtitles, setLoadingLabel, setPhase, recordUsage]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── onSubtitleData 콜백 ──────────────────────────────────────────────────
   const handleSubtitleData = useCallback((_result: SubtitleFetchResult) => {}, []);
@@ -1383,13 +1421,10 @@ export default function YoutubePlayerScreen() {
       source: "timedtext",
     };
 
-    console.log(`[YT_SCREEN] 전체 세그먼트 수신: ${segments.length}개, lang=${language}`);
-
     allSegmentsRef.current  = result;
     lastFetchResult.current = result;
 
     if (isBgRunningRef.current) {
-      console.log('[YT_SCREEN] BG translation running — segments stored, showing raw subtitles');
       const rawSubs: SubtitleSegment[] = result.segments.map((seg) => ({
         id:         makeSegmentId(seg.startTime, seg.endTime),
         startTime:  seg.startTime,
@@ -1412,12 +1447,12 @@ export default function YoutubePlayerScreen() {
 
   // ── 플레이어 준비 + 캐시 체크 ─────────────────────────────────────────────
   const handlePlayerReady = useCallback(async () => {
-    // ── SRT mode: must be FIRST — skip entire AI pipeline ─────────────────
+    // SRT mode
     const srtUri = initialSrtUri.current ?? pendingSubtitleRef.current;
     pendingSubtitleRef.current = null;
     initialSrtUri.current = null;
     if (srtUri) {
-      srtModeActiveRef.current = true; // set BEFORE async read — blocks any racing handleSubtitlesLoaded
+      srtModeActiveRef.current = true;
       try {
         const content = await FileSystem.readAsStringAsync(srtUri);
         const segments = parseSrt(content);
@@ -1437,9 +1472,9 @@ export default function YoutubePlayerScreen() {
       } catch (e) {
         console.warn("[SRT] Failed to load SRT in handlePlayerReady:", e);
       }
-      return; // unconditional — never start AI pipeline when SRT was provided
+      return;
     }
-    // ── existing pipeline code ─────────────────────────────────────────────
+
     if (!youtubeVideoId) return;
 
     const videoIdAtStart = youtubeVideoId;
@@ -1459,8 +1494,7 @@ export default function YoutubePlayerScreen() {
           clearTimeout(timeout);
           resolve();
         };
-        const check   = setInterval(() => { if (genreReadyRef.current) finish(); },
-                                    CHECK_INTERVAL_MS);
+        const check   = setInterval(() => { if (genreReadyRef.current) finish(); }, CHECK_INTERVAL_MS);
         const timeout = setTimeout(finish, HARD_TIMEOUT_MS);
       });
     }
@@ -1523,10 +1557,6 @@ export default function YoutubePlayerScreen() {
         const cachedTranslatedCount = cached.translatedCount;
         const totalCount            = cached.segments.length;
 
-        console.log(
-          `[CACHE] Partial cache hit: ${cachedTranslatedCount}/${totalCount} 번역됨 → resume`
-        );
-
         setTranslatedCount(cachedTranslatedCount);
         setTotalSegments(totalCount);
         setSubtitleProgress(totalCount > 0 ? cachedTranslatedCount / totalCount : 0);
@@ -1546,15 +1576,8 @@ export default function YoutubePlayerScreen() {
           setPhase("resuming");
         }
       } else {
-        if (isBgRunningRef.current) {
-          setPhase('idle');
-          return;
-        }
-        if (bgResultApplied.current) {
-          console.log('[CACHE] BG result applied, skipping full-cache FG restore');
-          return;
-        }
-        console.log(`[CACHE] Full cache hit → auto-start FG translation (${cached.translatedCount}개)`);
+        if (isBgRunningRef.current) { setPhase('idle'); return; }
+        if (bgResultApplied.current) return;
 
         partialTranslationsRef.current = new Map(
           cached.segments
@@ -1580,17 +1603,12 @@ export default function YoutubePlayerScreen() {
     }
 
     if (isBgRunningRef.current) return;
-
-    if (bgResultApplied.current) {
-      console.log('[CACHE] BG result applied, skipping FG fetch on cache miss');
-      return;
-    }
+    if (bgResultApplied.current) return;
 
     if (autoFetchCompletedRef.current) {
       console.log("[CACHE] Cache miss — auto-fetch already completed, skipping");
       return;
     }
-    console.log("[CACHE] Cache miss → start fetch");
     if (subtitlePhaseRef.current !== 'resuming') {
       setLoadingLabel(t("player.loadingFetching"));
     }
@@ -1678,7 +1696,6 @@ export default function YoutubePlayerScreen() {
   }, [setCurrentTime, bumpSeek]);
 
   const handleFullscreenSeek = useCallback((t: number) => {
-    // fallback for portrait seekbar (unchanged behavior)
     fsSeekValueRef.current = t;
     fsSeekingRef.current = true;
     setCurrentTime(t);
@@ -1702,14 +1719,13 @@ export default function YoutubePlayerScreen() {
 
   const handleFsSeekMove = useCallback((t: number) => {
     fsSeekValueRef.current = t;
-    setCurrentTime(t); // update display only, no seekTo
+    setCurrentTime(t);
   }, [setCurrentTime]);
 
   const handleFsSeekEnd = useCallback((t: number) => {
     fsSeekValueRef.current = t;
     setCurrentTime(t);
     if (fsSeekPendingRef.current) clearTimeout(fsSeekPendingRef.current);
-    // Small delay before seekTo so the block is fully in place
     setTimeout(() => {
       ytPlayerRef.current?.seekTo(t);
       bumpSeek();
@@ -1720,7 +1736,7 @@ export default function YoutubePlayerScreen() {
     }, 2500);
   }, [setCurrentTime, bumpSeek]);
 
-  // ── 검색 모달용 seek 핸들러 ───────────────────────────────────────────────
+  // ── 검색 모달용 seek ──────────────────────────────────────────────────────
   const handleSearchSeek = useCallback((time: number) => {
     setCurrentTime(time);
     bumpSeek();
@@ -1728,7 +1744,6 @@ export default function YoutubePlayerScreen() {
   }, [setCurrentTime, bumpSeek]);
 
   const handlePlayToggle = useCallback(() => {
-    console.log('[TOGGLE] handlePlayToggle called, optimisticPlayingRef=', optimisticPlayingRef.current);
     const next = !optimisticPlayingRef.current;
     optimisticPlayingRef.current = next;
     setOptimisticPlaying(next);
@@ -1989,8 +2004,11 @@ export default function YoutubePlayerScreen() {
           onFullscreenToggle={handleFullscreenToggle}
           onOverlayVisibilityChange={(visible) => setFullscreenOverlayVisible(visible)}
           isFullscreen={isLandscape}
+          onQualityChanged={(q) => {
+            console.log('[QUALITY] actual quality applied by YouTube:', q);
+            setCurrentQuality(QUALITY_LABELS[q] ?? q);
+          }}
           onStateChange={(state) => {
-            // [FIX v19] 실제 플레이어 이벤트 기반 단방향 상태 업데이트
             if (state === "playing") {
               setPlaying(true);
               optimisticPlayingRef.current = true;
@@ -2001,8 +2019,6 @@ export default function YoutubePlayerScreen() {
             }
             if (state === "paused" || state === "ended") {
               setPlaying(false);
-              // Only sync optimisticPlaying to false if we WERE playing.
-              // Do NOT reset on the initial iframe load PAUSED event.
               if (optimisticPlaying) {
                 optimisticPlayingRef.current = false;
                 setOptimisticPlaying(false);
@@ -2022,7 +2038,7 @@ export default function YoutubePlayerScreen() {
         <View style={styles.subtitleLayer} pointerEvents="box-none">
           <SubtitleOverlay />
         </View>
-        {/* ── 풀스크린 오버레이 컨트롤 (landscape only) ─────────────────── */}
+        {/* ── 풀스크린 오버레이 컨트롤 ───────────────────────────────────── */}
         {isLandscape && fullscreenOverlayVisible && (
           <View
             style={{
@@ -2259,15 +2275,9 @@ export default function YoutubePlayerScreen() {
 
       {/* ── 컨트롤 바 ─────────────────────────────────────────────────────── */}
       {!isLandscape && <View style={styles.controlBar}>
-        {/*
-          [FIX v19] 재생버튼: debounce 방식으로 교체
-          - optimisticPlaying으로 아이콘 즉각 반응
-          - 300ms debounce 후 ref.play()/pause() 1회만 호출
-          - isPlaying store는 onStateChange에서만 업데이트 (단방향)
-        */}
         <TouchableOpacity
           style={styles.playBtn}
-          onPress={() => { console.log('[BTN] play button pressed'); handlePlayToggle(); }}
+          onPress={handlePlayToggle}
           activeOpacity={0.75}
         >
           <Text style={styles.playBtnText}>{optimisticPlaying ? "⏸" : "▶"}</Text>
@@ -2280,6 +2290,12 @@ export default function YoutubePlayerScreen() {
         >
           <Text style={styles.chipBtnText}>{speedLabel(playbackRate)}</Text>
         </TouchableOpacity>
+
+        <View style={styles.chipBtn}>
+          <Text style={styles.chipBtnText}>
+            {QUALITY_LABELS[currentQuality] ?? currentQuality}
+          </Text>
+        </View>
 
         <TouchableOpacity
           style={[styles.chipBtn, styles.chipBtnFlex]}
@@ -2306,7 +2322,11 @@ export default function YoutubePlayerScreen() {
           <Search size={15} color="#ccc" />
         </TouchableOpacity>
 
-        {Platform.OS === 'android' && (
+        {Platform.OS === 'android' &&
+          (isBgRunning ||
+            subtitlePhase === 'translating' ||
+            subtitlePhase === 'resuming' ||
+            subtitlePhase === 'fetching') && (
           <TouchableOpacity
             style={[
               styles.chipBtn,
@@ -2476,11 +2496,6 @@ const styles = StyleSheet.create({
     backgroundColor: "#111",
     paddingHorizontal: 12, paddingVertical: 8, gap: 8,
   },
-  controlBar2: {
-    flexDirection: "row", alignItems: "center",
-    backgroundColor: "#111",
-    paddingHorizontal: 12, paddingBottom: 10, gap: 8,
-  },
 
   playBtn: {
     width: 44, height: 44, borderRadius: 22,
@@ -2498,8 +2513,6 @@ const styles = StyleSheet.create({
   chipBtnFlex:     { flex: 1 },
   chipBtnActive:   { backgroundColor: "#1e3a5f", borderWidth: 1, borderColor: "#2563eb" },
   chipBtnDone:     { backgroundColor: "#14532d", borderWidth: 1, borderColor: "#22c55e" },
-  chipBtnWhisper:  { backgroundColor: "#431407", borderWidth: 1, borderColor: "#f59e0b" },
-  chipBtnResume:   { backgroundColor: "#2e1a5e", borderWidth: 1, borderColor: "#a78bfa" },
   chipBtnDisabled: { opacity: 0.4 },
   chipBtnText: { color: "#ccc", fontSize: 12 },
 
@@ -2543,11 +2556,6 @@ const pillStyles = StyleSheet.create({
   },
   statusText: {
     color: '#60a5fa', fontSize: 11, fontWeight: '600', flex: 1,
-  },
-  counter: {
-    color: '#94a3b8', fontSize: 11,
-    fontVariant: ['tabular-nums'],
-    marginLeft: 4,
   },
   retryBtn: {
     paddingHorizontal: 10, paddingVertical: 4,

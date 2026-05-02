@@ -14,10 +14,6 @@ function detectScript(text: string): Script {
   return "other";
 }
 
-function isMixedScript(text: string): boolean {
-  return /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/.test(text)
-      && /[a-zA-Z]/.test(text);
-}
 
 function parseTimecode(tc: string): number {
   // HH:MM:SS,mmm
@@ -74,24 +70,44 @@ export function parseSrt(content: string): SubtitleSegment[] {
         continue;
       }
 
-      const firstLine  = textLines[0];
-      const restLines  = textLines.slice(1);
-      const restJoined = restLines.join(" ").trim();
+      // Find the best split point using dominant-script scoring.
+      // Counts CJK vs Latin chars in each half to tolerate mixed-script lines
+      // (e.g. Korean text containing a Latin acronym like "MMO").
+      let bestSplit = -1;
+      let bestScore = -1;
 
-      const firstScript   = detectScript(firstLine);
-      const restScript    = detectScript(restJoined);
-      const firstNotMixed = !isMixedScript(firstLine);
-      const differentScripts =
-        firstScript !== restScript &&
-        firstScript !== "other" &&
-        restScript  !== "other";
+      for (let i = 1; i < textLines.length; i++) {
+        const topText    = textLines.slice(0, i).join(" ").trim();
+        const bottomText = textLines.slice(i).join(" ").trim();
 
-      if (differentScripts && firstNotMixed && firstLine.length > 3 && restJoined.length > 3) {
-        // Bilingual: first line = source language, rest (possibly wrapped) = translation
-        original   = firstLine;
-        translated = restJoined;
+        const topCJK    = (topText.match(/[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/g) ?? []).length;
+        const topLatin  = (topText.match(/[a-zA-Z]/g) ?? []).length;
+        const botCJK    = (bottomText.match(/[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/g) ?? []).length;
+        const botLatin  = (bottomText.match(/[a-zA-Z]/g) ?? []).length;
+
+        const topDominant = topCJK > topLatin ? "cjk" : topLatin > topCJK ? "latin" : "other";
+        const botDominant = botCJK > botLatin ? "cjk" : botLatin > botCJK ? "latin" : "other";
+
+        if (
+          topDominant !== botDominant &&
+          topDominant !== "other" &&
+          botDominant !== "other" &&
+          topText.length > 3 &&
+          bottomText.length > 3
+        ) {
+          const score = Math.abs(topCJK - topLatin) + Math.abs(botCJK - botLatin);
+          if (score > bestScore) {
+            bestScore = score;
+            bestSplit = i;
+          }
+        }
+      }
+
+      if (bestSplit !== -1) {
+        original   = textLines.slice(0, bestSplit).join(" ").trim();
+        translated = textLines.slice(bestSplit).join(" ").trim();
       } else {
-        // Same script or ambiguous: treat as monolingual
+        // Same dominant script or ambiguous: monolingual
         original   = joined;
         translated = joined;
       }

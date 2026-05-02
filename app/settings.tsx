@@ -22,6 +22,8 @@ import { signOut } from "../services/authService";
 import { auth } from "../services/firebase";
 import { KeyRound, LogOut, Trash2, Eye, EyeOff, Check } from 'lucide-react-native';
 import { DevModePanel } from '../components/DevModePanel';
+import { usePlanStore } from '../store/usePlanStore';
+import { useEffectiveUsedMinutes } from '../store/usePlanStore';
 
 export default function SettingsScreen() {
   const settings = useSettingsStore();
@@ -30,6 +32,12 @@ export default function SettingsScreen() {
 
   const user   = useAuthStore((s) => s.user);
   const isPro  = useAuthStore((s) => s.isPro);
+
+  // ── Plan / quota state ───────────────────────────────────────────────────
+  const planTier     = usePlanStore((s) => s.tier);
+  const planLimits   = usePlanStore((s) => s.limits);
+  const resetAt      = usePlanStore((s) => s.resetAt);
+  const usedMinutes  = useEffectiveUsedMinutes();
 
   const [langDropdownVisible, setLangDropdownVisible] = useState(false);
 
@@ -45,10 +53,39 @@ export default function SettingsScreen() {
   const [showNewPw,      setShowNewPw]      = useState(false);
   const [showConfirmPw,  setShowConfirmPw]  = useState(false);
 
-  const providerId = auth().currentUser?.providerData[0]?.providerId ?? "";
+  const providerId   = auth().currentUser?.providerData[0]?.providerId ?? "";
   const isGoogleUser = providerId === "google.com";
   const displayLabel = user?.displayName ?? user?.email ?? "";
   const avatarLetter = (displayLabel[0] ?? "?").toUpperCase();
+
+  // ── Quota calculations ───────────────────────────────────────────────────
+  const isFree       = planTier === 'free';
+  const capMinutes   = isFree
+    ? planLimits.dailyCapMinutes
+    : planLimits.monthlyCapMinutes;
+
+  const usedClamped  = Math.min(usedMinutes, capMinutes > 0 ? capMinutes : usedMinutes);
+  const fillRatio    = capMinutes > 0 ? Math.min(usedClamped / capMinutes, 1) : 0;
+  const remainingMin = capMinutes > 0 ? Math.max(capMinutes - usedMinutes, 0) : null;
+
+  // 잔여 시간 텍스트
+  const remainingLabel = remainingMin !== null
+    ? remainingMin >= 60
+      ? `${Math.floor(remainingMin / 60)}h ${Math.round(remainingMin % 60)}m ${t('settings.remaining', { defaultValue: '남음' })}`
+      : `${Math.round(remainingMin)}m ${t('settings.remaining', { defaultValue: '남음' })}`
+    : '∞';
+
+  // 리셋 날짜 텍스트
+  const resetLabel = resetAt
+    ? new Date(resetAt).toLocaleDateString(settings.interfaceLanguage, { month: 'short', day: 'numeric' })
+    : null;
+
+  // 바 색상 — 잔여 비율 기반
+  const barColor = fillRatio >= 0.9
+    ? '#8b3a3a'   // 위험 (90%+ 사용)
+    : fillRatio >= 0.7
+      ? '#b07d2a' // 경고 (70%+ 사용)
+      : '#2a3f6f'; // 정상
 
   const handleLogout = () => {
     Alert.alert(t("auth.logout"), t("auth.logoutConfirm"), [
@@ -172,9 +209,115 @@ export default function SettingsScreen() {
 
         {/* Delete account */}
         <TouchableOpacity style={styles.accountRow} onPress={handleDeleteAccount} activeOpacity={0.7}>
-          <Trash2 size={18} color="#ef4444" />
+          <Trash2 size={18} color="#8b3a3a" />
           <Text style={[styles.accountRowText, styles.accountRowDanger]}>{t("auth.deleteAccount")}</Text>
         </TouchableOpacity>
+      </View>
+
+      {/* ── Usage quota card ─────────────────────────────────────────────────── */}
+      <View style={styles.quotaCard}>
+        {/* 헤더 */}
+        <View style={styles.quotaHeader}>
+          <Text style={styles.sectionTitle}>
+            {t('settings.usageQuota')}
+          </Text>
+          <View style={[
+            styles.quotaTierBadge,
+            planTier === 'pro'      ? styles.quotaTierPro
+            : planTier === 'standard' ? styles.quotaTierStandard
+            : styles.quotaTierFree,
+          ]}>
+            <Text style={[
+              styles.quotaTierText,
+              planTier === 'pro'      ? styles.quotaTierTextPro
+              : planTier === 'standard' ? styles.quotaTierTextStandard
+              : styles.quotaTierTextFree,
+            ]}>
+              {planTier.toUpperCase()}
+            </Text>
+          </View>
+        </View>
+
+        {/* 숫자 요약 */}
+        <View style={styles.quotaNumRow}>
+          <View style={styles.quotaNumBox}>
+            <Text style={styles.quotaNumLabel}>
+              {t('settings.used', { defaultValue: '사용' })}
+            </Text>
+            <Text style={styles.quotaNumValue}>
+              {usedMinutes >= 60
+                ? `${Math.floor(usedMinutes / 60)}h ${Math.round(usedMinutes % 60)}m`
+                : `${Math.round(usedMinutes * 10) / 10}m`}
+            </Text>
+          </View>
+
+          <View style={styles.quotaNumDivider} />
+
+          <View style={styles.quotaNumBox}>
+            <Text style={styles.quotaNumLabel}>
+              {isFree
+                ? t('settings.dailyCap', { defaultValue: '일일 한도' })
+                : t('settings.monthlyCap', { defaultValue: '월 한도' })}
+            </Text>
+            <Text style={styles.quotaNumValue}>
+              {capMinutes > 0
+                ? capMinutes >= 60
+                  ? `${Math.floor(capMinutes / 60)}h`
+                  : `${capMinutes}m`
+                : '∞'}
+            </Text>
+          </View>
+
+          <View style={styles.quotaNumDivider} />
+
+          <View style={styles.quotaNumBox}>
+            <Text style={styles.quotaNumLabel}>
+              {t('settings.remaining', { defaultValue: '남음' })}
+            </Text>
+            <Text style={[
+              styles.quotaNumValue,
+              fillRatio >= 0.9 ? styles.quotaValueDanger
+              : fillRatio >= 0.7 ? styles.quotaValueWarn
+              : styles.quotaValueOk,
+            ]}>
+              {remainingLabel}
+            </Text>
+          </View>
+        </View>
+
+        {/* 프로그레스 바 */}
+        {capMinutes > 0 && (
+          <View style={styles.quotaBarTrack}>
+            <View
+              style={[
+                styles.quotaBarFill,
+                { width: `${Math.round(fillRatio * 100)}%` as any, backgroundColor: barColor },
+              ]}
+            />
+          </View>
+        )}
+
+        {/* 퍼센트 + 리셋 날짜 */}
+        <View style={styles.quotaFooter}>
+          {capMinutes > 0 && (
+            <Text style={[styles.quotaFooterText, { color: barColor }]}>
+              {Math.round(fillRatio * 100)}%{' '}
+              {t('settings.quotaUsed', { defaultValue: '사용됨' })}
+            </Text>
+          )}
+          {resetLabel && (
+            <Text style={styles.quotaResetText}>
+              {isFree
+                ? t('settings.resetsDaily', { defaultValue: '매일 자정 초기화' })
+                : `${t('settings.resetsOn', { defaultValue: '초기화' })} ${resetLabel}`}
+            </Text>
+          )}
+          {!resetLabel && isFree && (
+            <Text style={styles.quotaResetText}>
+              {t('settings.resetsDaily', { defaultValue: '매일 자정 초기화' })}
+            </Text>
+          )}
+        </View>
       </View>
 
       {/* ── Interface language ──────────────────────────────────────────────── */}
@@ -194,27 +337,18 @@ export default function SettingsScreen() {
         </View>
       </View>
 
-      {/* ── Audio chunk duration ─────────────────────────────────────────────── */}
-      <Section title={t("settings.audioChunkDuration")}>
-        <View style={styles.chipRow}>
-          {([1, 2, 3] as const).map((n) => (
-            <TouchableOpacity
-              key={n}
-              style={[styles.chip, settings.chunkDuration === n && styles.chipActive]}
-              onPress={() => update({ chunkDuration: n })}
-            >
-              <Text style={[styles.chipText, settings.chunkDuration === n && styles.chipTextActive]}>
-                {n}{t("settings.seconds")}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-      </Section>
+      {/* ── Model management ────────────────────────────────────────────────── */}
+      <TouchableOpacity
+        style={styles.modelManageBtn}
+        onPress={() => router.push("/models")}
+        activeOpacity={0.8}
+      >
+        <Text style={styles.modelManageBtnText}>{t("home.modelManage")}</Text>
+      </TouchableOpacity>
 
       {/* ── Subtitle appearance ──────────────────────────────────────────────── */}
       <Section title={t("settings.subtitleStyleSection")}>
 
-        {/* Sub 스타일 종류 선택 */}
         <Text style={styles.subLabel}>{t("settings.subtitleDesign")}</Text>
         <View style={styles.styleCardRow}>
           {subtitleStyles.map((s) => {
@@ -226,7 +360,6 @@ export default function SettingsScreen() {
                 onPress={() => update({ subtitleStyle: s.key })}
                 activeOpacity={0.75}
               >
-                {/* 미리보기 */}
                 <View style={styles.stylePreview}>
                   {s.key === "outline" && (
                     <Text style={styles.previewOutline}>Sub</Text>
@@ -259,7 +392,7 @@ export default function SettingsScreen() {
             step={1}
             value={settings.subtitleFontSize}
             onValueChange={(v) => update({ subtitleFontSize: v })}
-            minimumTrackTintColor="#2563eb"
+            minimumTrackTintColor="#2a3f6f"
             maximumTrackTintColor="#333"
           />
         </Row>
@@ -272,7 +405,7 @@ export default function SettingsScreen() {
             step={0.05}
             value={settings.subtitleOpacity}
             onValueChange={(v) => update({ subtitleOpacity: v })}
-            minimumTrackTintColor="#2563eb"
+            minimumTrackTintColor="#2a3f6f"
             maximumTrackTintColor="#333"
           />
         </Row>
@@ -301,7 +434,7 @@ export default function SettingsScreen() {
           step={0.1}
           value={settings.timingOffset}
           onValueChange={(v) => update({ timingOffset: Math.round(v * 10) / 10 })}
-          minimumTrackTintColor="#2563eb"
+          minimumTrackTintColor="#2a3f6f"
           maximumTrackTintColor="#333"
         />
         <Text style={styles.hint}>{t("settings.timingOffsetHint")}</Text>
@@ -334,7 +467,7 @@ export default function SettingsScreen() {
                 placeholder={t("auth.currentPassword")}
                 placeholderTextColor="#555"
                 secureTextEntry={!showCurrentPw}
-                selectionColor="#2563eb"
+                selectionColor="#2a3f6f"
               />
               <TouchableOpacity style={styles.pwEyeBtn} onPress={() => setShowCurrentPw(v => !v)}>
                 {showCurrentPw ? <Eye size={18} color="#555" /> : <EyeOff size={18} color="#555" />}
@@ -348,7 +481,7 @@ export default function SettingsScreen() {
                 placeholder={t("auth.newPassword")}
                 placeholderTextColor="#555"
                 secureTextEntry={!showNewPw}
-                selectionColor="#2563eb"
+                selectionColor="#2a3f6f"
               />
               <TouchableOpacity style={styles.pwEyeBtn} onPress={() => setShowNewPw(v => !v)}>
                 {showNewPw ? <Eye size={18} color="#555" /> : <EyeOff size={18} color="#555" />}
@@ -362,7 +495,7 @@ export default function SettingsScreen() {
                 placeholder={t("auth.passwordConfirm")}
                 placeholderTextColor="#555"
                 secureTextEntry={!showConfirmPw}
-                selectionColor="#2563eb"
+                selectionColor="#2a3f6f"
               />
               <TouchableOpacity style={styles.pwEyeBtn} onPress={() => setShowConfirmPw(v => !v)}>
                 {showConfirmPw ? <Eye size={18} color="#555" /> : <EyeOff size={18} color="#555" />}
@@ -418,7 +551,7 @@ export default function SettingsScreen() {
                   >
                     <Text style={styles.modalOptionText}>{lang.nativeName}</Text>
                     <Text style={styles.modalOptionSub}>{lang.name}</Text>
-                    {isActive && <Check size={14} color="#2563eb" />}
+                    {isActive && <Check size={14} color="#2a3f6f" />}
                   </TouchableOpacity>
                 );
               })}
@@ -427,7 +560,7 @@ export default function SettingsScreen() {
         </Pressable>
       </Modal>
 
-      {/* [DEV] Developer Test Mode Panel — renders null in production */}
+      {/* [DEV] Developer Test Mode Panel */}
       <DevModePanel />
 
     </ScrollView>
@@ -496,15 +629,11 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     backgroundColor: "#222",
   },
-  chipActive:     { backgroundColor: "#2563eb" },
+  chipActive:     { backgroundColor: "#2a3f6f" },
   chipText:       { color: "#aaa", fontSize: 13 },
   chipTextActive: { color: "#fff", fontWeight: "600" },
 
-  // ── 스타일 카드 ──────────────────────────────────────────────────────────
-  styleCardRow: {
-    flexDirection: "row",
-    gap: 8,
-  },
+  styleCardRow: { flexDirection: "row", gap: 8 },
   styleCard: {
     flex: 1,
     backgroundColor: "#1a1a1a",
@@ -515,10 +644,7 @@ const styles = StyleSheet.create({
     borderWidth: 1.5,
     borderColor: "#2a2a2a",
   },
-  styleCardActive: {
-    borderColor: "#2563eb",
-    backgroundColor: "#0f1f3d",
-  },
+  styleCardActive: { borderColor: "#2a3f6f", backgroundColor: "#0d1a2e" },
   stylePreview: {
     width: "100%",
     height: 40,
@@ -528,7 +654,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     overflow: "hidden",
   },
-  // outline 미리보기
   previewOutline: {
     color: "#fff",
     fontSize: 14,
@@ -537,19 +662,13 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 2, height: 2 },
     textShadowRadius: 4,
   },
-  // pill 미리보기
   previewPillBox: {
     backgroundColor: "rgba(0,0,0,0.65)",
     borderRadius: 4,
     paddingHorizontal: 8,
     paddingVertical: 3,
   },
-  previewPillText: {
-    color: "#fff",
-    fontSize: 13,
-    fontWeight: "700",
-  },
-  // bar 미리보기
+  previewPillText: { color: "#fff", fontSize: 13, fontWeight: "700" },
   previewBarBox: {
     position: "absolute",
     bottom: 0,
@@ -559,35 +678,11 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
     alignItems: "center",
   },
-  previewBarText: {
-    color: "#fff",
-    fontSize: 13,
-    fontWeight: "700",
-  },
+  previewBarText: { color: "#fff", fontSize: 13, fontWeight: "700" },
 
-  styleCardLabel: {
-    color: "#aaa",
-    fontSize: 12,
-    fontWeight: "600",
-  },
-  styleCardLabelActive: {
-    color: "#60a5fa",
-  },
-  styleCardDesc: {
-    color: "#555",
-    fontSize: 10,
-    textAlign: "center",
-  },
-
-  manageBtn: {
-    backgroundColor: "#1e3a5f",
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderWidth: 1,
-    borderColor: "#2563eb",
-  },
-  manageBtnText: { color: "#93c5fd", fontSize: 13, fontWeight: "600" },
+  styleCardLabel:       { color: "#aaa", fontSize: 12, fontWeight: "600" },
+  styleCardLabelActive: { color: "#5a82b0" },
+  styleCardDesc:        { color: "#555", fontSize: 10, textAlign: "center" },
 
   dropdown: {
     flexDirection: "row",
@@ -600,7 +695,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#333",
   },
-  dropdownText: { color: "#fff", fontSize: 13, fontWeight: "600" },
+  dropdownText:  { color: "#fff", fontSize: 13, fontWeight: "600" },
   dropdownArrow: { color: "#666", fontSize: 12 },
 
   modalBackdrop: {
@@ -632,9 +727,9 @@ const styles = StyleSheet.create({
     borderBottomColor: "#2a2a2a",
     gap: 8,
   },
-  modalOptionActive: { backgroundColor: "#1e3a5f", borderRadius: 8 },
-  modalOptionText: { color: "#fff", fontSize: 15, flex: 1 },
-  modalOptionSub: { color: "#555", fontSize: 12 },
+  modalOptionActive: { backgroundColor: "#162540", borderRadius: 8 },
+  modalOptionText:   { color: "#fff", fontSize: 15, flex: 1 },
+  modalOptionSub:    { color: "#555", fontSize: 12 },
 
   supportBtn: {
     backgroundColor: "#141414",
@@ -645,25 +740,31 @@ const styles = StyleSheet.create({
     borderColor: "#2a2a2a",
     marginBottom: 12,
   },
-  supportBtnText: { color: "#60a5fa", fontSize: 15, fontWeight: "600" },
+  supportBtnText: { color: "#5a82b0", fontSize: 15, fontWeight: "600" },
 
-  modeBtn:         { backgroundColor: "#222", borderRadius: 10, paddingVertical: 8, paddingHorizontal: 16, alignItems: "center" },
-  modeBtnActive:   { backgroundColor: "#2563eb" },
-  modeBtnText:     { color: "#aaa", fontSize: 14 },
-  modeBtnTextActive: { color: "#fff", fontWeight: "600" },
+  modelManageBtn: {
+    backgroundColor: "#141414",
+    borderRadius: 12,
+    paddingVertical: 16,
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "#2a2a2a",
+    marginBottom: 12,
+  },
+  modelManageBtnText: { color: "#ccc", fontSize: 14, fontWeight: "600" },
+
+  modeBtn:          { backgroundColor: "#222", borderRadius: 10, paddingVertical: 8, paddingHorizontal: 16, alignItems: "center" },
+  modeBtnActive:    { backgroundColor: "#2a3f6f" },
+  modeBtnText:      { color: "#aaa", fontSize: 14 },
+  modeBtnTextActive:{ color: "#fff", fontWeight: "600" },
 
   hint:     { color: "#555", fontSize: 11, marginTop: 2 },
-  hintOk:   { color: "#22c55e" },
-  hintWarn: { color: "#f59e0b" },
+  hintOk:   { color: "#2d7a5e" },
+  hintWarn: { color: "#b07d2a" },
 
-  infoText: {
-    color: "#4b5563",
-    fontSize: 12,
-    textAlign: "center",
-    marginTop: 4,
-  },
+  infoText: { color: "#4b5563", fontSize: 12, textAlign: "center", marginTop: 4 },
 
-  // ── Account card ────────────────────────────────────────────────────────
+  // ── Account card ─────────────────────────────────────────────────────────
   accountCard: {
     backgroundColor: "#141414",
     borderRadius: 12,
@@ -682,25 +783,19 @@ const styles = StyleSheet.create({
     width: 48,
     height: 48,
     borderRadius: 24,
-    backgroundColor: "#2563eb",
+    backgroundColor: "#2a3f6f",
     alignItems: "center",
     justifyContent: "center",
   },
   accountAvatarText: { color: "#fff", fontSize: 20, fontWeight: "700" },
-  accountName: { color: "#fff", fontSize: 14, fontWeight: "600", marginBottom: 5 },
+  accountName:       { color: "#fff", fontSize: 14, fontWeight: "600", marginBottom: 5 },
 
-  planBadge: {
-    alignSelf: "flex-start",
-    borderRadius: 6,
-    borderWidth: 1,
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-  },
-  planBadgeFree: { backgroundColor: "#1a1a1a", borderColor: "#333" },
-  planBadgePro:  { backgroundColor: "#1a3a1a", borderColor: "#22c55e" },
-  planBadgeText: { fontSize: 11, fontWeight: "600" },
+  planBadge:         { alignSelf: "flex-start", borderRadius: 6, borderWidth: 1, paddingHorizontal: 8, paddingVertical: 2 },
+  planBadgeFree:     { backgroundColor: "#1a1a1a", borderColor: "#333" },
+  planBadgePro:      { backgroundColor: "#0f2318", borderColor: "#2d7a5e" },
+  planBadgeText:     { fontSize: 11, fontWeight: "600" },
   planBadgeTextFree: { color: "#888" },
-  planBadgeTextPro:  { color: "#22c55e" },
+  planBadgeTextPro:  { color: "#2d7a5e" },
 
   googleBadge: {
     flexDirection: "row",
@@ -728,9 +823,9 @@ const styles = StyleSheet.create({
   },
   accountRowText:    { flex: 1, color: "#ccc", fontSize: 14 },
   accountRowChevron: { color: "#555", fontSize: 18 },
-  accountRowDanger:  { color: "#ef4444" },
+  accountRowDanger:  { color: "#8b3a3a" },
 
-  // ── Password modal ───────────────────────────────────────────────────────
+  // ── Password modal ────────────────────────────────────────────────────────
   pwWrapper:    { position: "relative", marginBottom: 10 },
   pwInputInner: { marginBottom: 0, paddingRight: 44 },
   pwEyeBtn:     { position: "absolute", right: 14, top: 0, bottom: 0, justifyContent: "center", padding: 4 },
@@ -745,8 +840,8 @@ const styles = StyleSheet.create({
     fontSize: 14,
     marginBottom: 10,
   },
-  pwError:   { color: "#ef4444", fontSize: 12, marginBottom: 8 },
-  pwSuccess: { color: "#22c55e", fontSize: 12, marginBottom: 8 },
+  pwError:   { color: "#8b3a3a", fontSize: 12, marginBottom: 8 },
+  pwSuccess: { color: "#2d7a5e", fontSize: 12, marginBottom: 8 },
   pwBtnRow:  { flexDirection: "row", gap: 10, marginTop: 4 },
   pwCancelBtn: {
     flex: 1,
@@ -760,8 +855,95 @@ const styles = StyleSheet.create({
     flex: 1,
     paddingVertical: 12,
     borderRadius: 10,
-    backgroundColor: "#2563eb",
+    backgroundColor: "#2a3f6f",
     alignItems: "center",
   },
   pwSaveText: { color: "#fff", fontSize: 14, fontWeight: "700" },
+
+  // ── Quota card ────────────────────────────────────────────────────────────
+  quotaCard: {
+    backgroundColor: "#141414",
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    gap: 12,
+  },
+  quotaHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  quotaTierBadge: {
+    borderRadius: 6,
+    borderWidth: 1,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+  },
+  quotaTierFree:     { backgroundColor: "#1a1a1a",  borderColor: "#333" },
+  quotaTierStandard: { backgroundColor: "#111d2e",  borderColor: "#2a3f6f" },
+  quotaTierPro:      { backgroundColor: "#0f2318",  borderColor: "#2d7a5e" },
+  quotaTierText:     { fontSize: 10, fontWeight: "700", letterSpacing: 0.5 },
+  quotaTierTextFree:     { color: "#666" },
+  quotaTierTextStandard: { color: "#5a82b0" },
+  quotaTierTextPro:      { color: "#2d7a5e" },
+
+  quotaNumRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#1a1a1a",
+    borderRadius: 10,
+    overflow: "hidden",
+  },
+  quotaNumBox: {
+    flex: 1,
+    paddingVertical: 10,
+    alignItems: "center",
+    gap: 3,
+  },
+  quotaNumDivider: {
+    width: StyleSheet.hairlineWidth,
+    height: 32,
+    backgroundColor: "#2a2a2a",
+  },
+  quotaNumLabel: {
+    color: "#555",
+    fontSize: 10,
+    fontWeight: "600",
+    letterSpacing: 0.3,
+    textTransform: "uppercase",
+  },
+  quotaNumValue: {
+    color: "#e0e0e0",
+    fontSize: 15,
+    fontWeight: "700",
+  },
+  quotaValueOk:     { color: "#5a82b0" },
+  quotaValueWarn:   { color: "#b07d2a" },
+  quotaValueDanger: { color: "#8b3a3a" },
+
+  quotaBarTrack: {
+    height: 5,
+    backgroundColor: "#222",
+    borderRadius: 3,
+    overflow: "hidden",
+  },
+  quotaBarFill: {
+    height: 5,
+    borderRadius: 3,
+  },
+
+  quotaFooter: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginTop: -4,
+  },
+  quotaFooterText: {
+    fontSize: 11,
+    fontWeight: "600",
+  },
+  quotaResetText: {
+    color: "#444",
+    fontSize: 11,
+  },
 });

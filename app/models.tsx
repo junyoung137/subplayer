@@ -29,6 +29,7 @@ export default function ModelsScreen() {
   const selectedModel       = useSettingsStore((s) => s.whisperModel);
   const update              = useSettingsStore((s) => s.update);
   const thermalProtection   = useSettingsStore((s) => s.thermalProtection);
+  const chunkDuration       = useSettingsStore((s) => s.chunkDuration);
   const { t } = useTranslation();
 
   const [gemmaPhase,    setGemmaPhase]    = useState<GemmaPhase>("checking");
@@ -120,6 +121,23 @@ export default function ModelsScreen() {
             onSelect={() => update({ whisperModel: model.id as any })}
           />
         ))}
+        <View style={styles.chunkDivider} />
+        <View style={styles.chunkRow}>
+          <Text style={styles.chunkLabel}>{t("settings.audioChunkDuration")}</Text>
+          <View style={styles.chunkChipRow}>
+            {([1, 2, 3] as const).map((n) => (
+              <TouchableOpacity
+                key={n}
+                style={[styles.chunkChip, chunkDuration === n && styles.chunkChipActive]}
+                onPress={() => update({ chunkDuration: n })}
+              >
+                <Text style={[styles.chunkChipText, chunkDuration === n && styles.chunkChipTextActive]}>
+                  {n}{t("settings.seconds")}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </View>
       </View>
 
       {/* ── Translation Model ──────────────────────────────────── */}
@@ -242,4 +260,28 @@ const styles = StyleSheet.create({
   progressFill: { height: "100%", backgroundColor: "#2563eb" },
   progressText: { color: "#aaa", fontSize: 11 },
   cancelText:   { color: "#ef4444", fontSize: 12 },
+
+  chunkDivider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: "#2a2a2a",
+    marginHorizontal: 16,
+  },
+  chunkRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
+  chunkLabel: { color: "#ccc", fontSize: 14 },
+  chunkChipRow: { flexDirection: "row", gap: 6 },
+  chunkChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    backgroundColor: "#222",
+  },
+  chunkChipActive: { backgroundColor: "#2563eb" },
+  chunkChipText: { color: "#aaa", fontSize: 13 },
+  chunkChipTextActive: { color: "#fff", fontWeight: "600" },
 });

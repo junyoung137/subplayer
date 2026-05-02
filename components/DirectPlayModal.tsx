@@ -2,6 +2,7 @@
  * DirectPlayModal — 바로보기 모드
  * 번역 프로세스 없이 로컬/URL 영상을 바로 플레이어로 전송
  * 자막 파일(SRT) 선택 옵션 포함 (로컬 + URL 탭 모두)
+ * [UPDATE] 비디오 장르 선택 추가 (로컬 + URL 탭 모두)
  */
 import React, { useState, useCallback } from "react";
 import {
@@ -38,11 +39,12 @@ async function ensureStableFileUri(uri: string, filename: string): Promise<strin
   }
 }
 
+
 interface DirectPlayModalProps {
   visible: boolean;
   onClose: () => void;
-  onLocalFilePicked: (uri: string, name: string, subtitleUri?: string) => void;
-  onUrlPicked: (videoId: string, title: string, subtitleUri?: string) => void;
+  onLocalFilePicked: (uri: string, name: string, genre: string, subtitleUri?: string) => void;
+  onUrlPicked: (videoId: string, title: string, genre: string, subtitleUri?: string) => void;
 }
 
 type Tab = "local" | "url";
@@ -53,12 +55,23 @@ export function DirectPlayModal({
   const { t } = useTranslation();
   const insets = useSafeAreaInsets();
 
-  const [activeTab,    setActiveTab]    = useState<Tab>("local");
-  const [urlInput,     setUrlInput]     = useState("");
-  const [isLoading,    setIsLoading]    = useState(false);
-  const [urlError,     setUrlError]     = useState<string | null>(null);
-  const [subtitleUri,  setSubtitleUri]  = useState<string | null>(null);
-  const [subtitleName, setSubtitleName] = useState<string | null>(null);
+  const GENRE_OPTIONS = [
+    { key: "general",      label: t("genre.general") },
+    { key: "tech lecture", label: t("genre.techLecture") },
+    { key: "comedy",       label: t("genre.comedy") },
+    { key: "news",         label: t("genre.news") },
+    { key: "documentary",  label: t("genre.documentary") },
+    { key: "gaming",       label: t("genre.gaming") },
+    { key: "education",    label: t("genre.education") },
+  ];
+
+  const [activeTab,     setActiveTab]     = useState<Tab>("local");
+  const [urlInput,      setUrlInput]      = useState("");
+  const [isLoading,     setIsLoading]     = useState(false);
+  const [urlError,      setUrlError]      = useState<string | null>(null);
+  const [selectedGenre, setSelectedGenre] = useState("general");
+  const [subtitleUri,   setSubtitleUri]   = useState<string | null>(null);
+  const [subtitleName,  setSubtitleName]  = useState<string | null>(null);
 
   const parsedId = parseYoutubeId(urlInput.trim());
 
@@ -66,6 +79,7 @@ export function DirectPlayModal({
     setUrlInput("");
     setUrlError(null);
     setActiveTab("local");
+    setSelectedGenre("general");
     setSubtitleUri(null);
     setSubtitleName(null);
   };
@@ -82,7 +96,10 @@ export function DirectPlayModal({
       if (result.canceled) return;
       const file = result.assets[0];
       if (!file.name.toLowerCase().endsWith(".srt")) {
-        Alert.alert("지원하지 않는 형식", ".srt 파일만 지원합니다.");
+        Alert.alert(
+          t("url.subtitleUnsupportedTitle"),
+          t("url.subtitleUnsupportedMsg")
+        );
         return;
       }
       setSubtitleUri(file.uri);
@@ -92,7 +109,32 @@ export function DirectPlayModal({
     }
   };
 
-  // 자막 UI (재사용 컴포넌트)
+  // 장르 선택 UI (로컬 + URL 탭 공통)
+  const GenrePicker = () => (
+    <View style={styles.genreSection}>
+      <Text style={styles.genreLabel}>{t("genre.sectionTitle")}</Text>
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.genreRow}
+        keyboardShouldPersistTaps="handled"
+      >
+        {GENRE_OPTIONS.map((g) => (
+          <TouchableOpacity
+            key={g.key}
+            style={[styles.genrePill, selectedGenre === g.key && styles.genrePillActive]}
+            onPress={() => setSelectedGenre(g.key)}
+          >
+            <Text style={[styles.genrePillText, selectedGenre === g.key && styles.genrePillTextActive]}>
+              {g.label}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </ScrollView>
+    </View>
+  );
+
+  // 자막 UI (로컬 + URL 탭 공통)
   const SubtitlePicker = () => (
     <View style={{ gap: 6 }}>
       <Text style={styles.inputLabel}>{t("url.subtitleFileLabel")}</Text>
@@ -102,7 +144,7 @@ export function DirectPlayModal({
             ✓ {subtitleName}
           </Text>
           <TouchableOpacity onPress={() => { setSubtitleUri(null); setSubtitleName(null); }}>
-            <X size={16} color="#86efac" />
+            <X size={16} color="#6aab8a" />
           </TouchableOpacity>
         </View>
       ) : (
@@ -124,25 +166,32 @@ export function DirectPlayModal({
       if (result.canceled) return;
       const file = result.assets[0];
       const stableUri = await ensureStableFileUri(file.uri, file.name);
-      if (!stableUri) { Alert.alert(t("url.error"), t("url.fileCopyError")); return; }
+      if (!stableUri) { 
+        Alert.alert(t("url.error"), t("url.fileCopyError")); 
+        return; 
+      }
       handleClose();
-      onLocalFilePicked(stableUri, file.name, subtitleUri ?? undefined);
+      onLocalFilePicked(stableUri, file.name, selectedGenre, subtitleUri ?? undefined);
     } catch (e) {
       Alert.alert(t("url.error"), t("url.fileOpenError") + String(e));
     } finally {
       setIsLoading(false);
     }
-  }, [onLocalFilePicked, subtitleUri, t]);
+  }, [onLocalFilePicked, selectedGenre, subtitleUri, t]);
 
   // URL 확인
   const confirmUrl = useCallback(() => {
     setUrlError(null);
     const trimmed = urlInput.trim();
-    if (!trimmed) { setUrlError(t("url.urlRequired")); return; }
+    if (!trimmed) { 
+      setUrlError(t("url.urlRequired")); 
+      return; 
+    }
     const ytId = parseYoutubeId(trimmed);
     if (ytId) {
+      const genreSnapshot = selectedGenre;
       handleClose();
-      onUrlPicked(ytId, `YouTube: ${ytId}`, subtitleUri ?? undefined);
+      onUrlPicked(ytId, `YouTube: ${ytId}`, genreSnapshot, subtitleUri ?? undefined);
       return;
     }
     if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
@@ -150,7 +199,7 @@ export function DirectPlayModal({
       return;
     }
     setUrlError(t("url.invalidUrl"));
-  }, [urlInput, subtitleUri, onUrlPicked, t]);
+  }, [urlInput, selectedGenre, subtitleUri, onUrlPicked, t]);
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={handleClose}>
@@ -170,11 +219,11 @@ export function DirectPlayModal({
           {/* 헤더 */}
           <View style={styles.headerRow}>
             <View style={styles.modeBadge}>
-              <Play size={12} color="#a78bfa" />
-              <Text style={styles.modeBadgeText}>바로보기 모드</Text>
+              <Play size={12} color="#8b7bc0" />
+              <Text style={styles.modeBadgeText}>{t("url.directModeBadge")}</Text>
             </View>
-            <Text style={styles.title}>동영상 불러오기</Text>
-            <Text style={styles.modeDesc}>번역 없이 즉시 재생</Text>
+            <Text style={styles.title}>{t("url.directModeTitle")}</Text>
+            <Text style={styles.modeDesc}>{t("url.directModeDesc")}</Text>
           </View>
 
           {/* 탭 */}
@@ -200,10 +249,9 @@ export function DirectPlayModal({
           {/* ── 로컬 탭 ─────────────────────────────────────────────── */}
           {activeTab === "local" && (
             <View style={styles.tabContent}>
-              {/* 자막 파일 선택 */}
+              <GenrePicker />
               <SubtitlePicker />
 
-              {/* 파일 선택 버튼 */}
               <TouchableOpacity
                 style={styles.bigPickBtn}
                 onPress={pickLocalFile}
@@ -214,7 +262,7 @@ export function DirectPlayModal({
                   <ActivityIndicator color="#fff" />
                 ) : (
                   <>
-                    <FolderOpen size={20} color="#a78bfa" />
+                    <FolderOpen size={20} color="#8b7bc0" />
                     <Text style={styles.bigPickText}>{t("url.selectFile")}</Text>
                     <Text style={styles.bigPickSub}>{t("url.supportedFormats")}</Text>
                   </>
@@ -226,10 +274,9 @@ export function DirectPlayModal({
           {/* ── URL 탭 ──────────────────────────────────────────────── */}
           {activeTab === "url" && (
             <View style={styles.tabContent}>
-              {/* 자막 파일 선택 */}
+              <GenrePicker />
               <SubtitlePicker />
 
-              {/* URL 입력 */}
               <View style={styles.inputWrap}>
                 <Text style={styles.inputLabel}>{t("url.youtubeUrlLabel")}</Text>
                 <View style={[
@@ -245,7 +292,7 @@ export function DirectPlayModal({
                     placeholderTextColor="#444"
                     autoCorrect={false}
                     autoCapitalize="none"
-                    selectionColor="#7c3aed"
+                    selectionColor="#4a3070"
                     returnKeyType="go"
                     onSubmitEditing={confirmUrl}
                   />
@@ -257,7 +304,7 @@ export function DirectPlayModal({
                 </View>
                 {parsedId && urlInput.length > 0 && (
                   <View style={styles.parsedRow}>
-                    <Check size={16} color="#22c55e" />
+                    <Check size={16} color="#3d7a5a" />
                     <Text style={styles.parsedText}>{t("url.idDetected", { id: parsedId })}</Text>
                   </View>
                 )}
@@ -280,6 +327,7 @@ export function DirectPlayModal({
 }
 
 const styles = StyleSheet.create({
+  // ... (스타일은 그대로 유지)
   kavWrapper: {
     flex: 1,
     backgroundColor: "rgba(0,0,0,0.75)",
@@ -304,11 +352,11 @@ const styles = StyleSheet.create({
   headerRow: { alignItems: "center", gap: 4 },
   modeBadge: {
     flexDirection: "row", alignItems: "center", gap: 4,
-    backgroundColor: "#2d1b69",
-    borderRadius: 20, borderWidth: 1, borderColor: "#7c3aed",
+    backgroundColor: "#1e1535",
+    borderRadius: 20, borderWidth: 1, borderColor: "#4a3070",
     paddingHorizontal: 10, paddingVertical: 4,
   },
-  modeBadgeText: { color: "#a78bfa", fontSize: 11, fontWeight: "700" },
+  modeBadgeText: { color: "#8b7bc0", fontSize: 11, fontWeight: "700" },
   title: { color: "#fff", fontSize: 18, fontWeight: "700" },
   modeDesc: { color: "#555", fontSize: 12 },
 
@@ -320,19 +368,37 @@ const styles = StyleSheet.create({
     gap: 3,
   },
   tab: { flex: 1, paddingVertical: 9, borderRadius: 10, alignItems: "center" },
-  tabActive: { backgroundColor: "#7c3aed" },   // 보라색 — 번역모드와 구분
+  tabActive: { backgroundColor: "#4a3070" },
   tabText:       { color: "#555", fontSize: 13, fontWeight: "600" },
   tabTextActive: { color: "#fff" },
 
   tabContent: { gap: 12 },
 
+  genreSection: { gap: 8 },
+  genreLabel:   { color: "#666", fontSize: 12, fontWeight: "600" },
+  genreRow:     { flexDirection: "row", gap: 8, paddingVertical: 2 },
+  genrePill: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 20,
+    backgroundColor: "#1a1a1a",
+    borderWidth: 1,
+    borderColor: "#2a2a2a",
+  },
+  genrePillActive: {
+    backgroundColor: "#4a3070",
+    borderColor: "#4a3070",
+  },
+  genrePillText:       { color: "#666", fontSize: 13, fontWeight: "600" },
+  genrePillTextActive: { color: "#fff" },
+
   subtitleSelected: {
     flexDirection: "row", alignItems: "center",
-    backgroundColor: "#14532d", borderRadius: 10,
-    borderWidth: 1, borderColor: "#22c55e",
+    backgroundColor: "#1a3528", borderRadius: 10,
+    borderWidth: 1, borderColor: "#3d7a5a",
     paddingHorizontal: 12, paddingVertical: 10, gap: 8,
   },
-  subtitleSelectedText: { color: "#86efac", fontSize: 13, flex: 1 },
+  subtitleSelectedText: { color: "#6aab8a", fontSize: 13, flex: 1 },
   subtitleEmpty: {
     flexDirection: "row", alignItems: "center", gap: 8,
     backgroundColor: "#1a1a1a", borderRadius: 10,
@@ -345,7 +411,7 @@ const styles = StyleSheet.create({
     backgroundColor: "#1e1e1e",
     borderRadius: 16, paddingVertical: 28,
     alignItems: "center",
-    borderWidth: 1.5, borderColor: "#7c3aed55",
+    borderWidth: 1.5, borderColor: "#4a307088",
     borderStyle: "dashed", gap: 6,
   },
   bigPickText: { color: "#fff", fontSize: 16, fontWeight: "600" },
@@ -356,20 +422,20 @@ const styles = StyleSheet.create({
   inputRow: {
     flexDirection: "row", alignItems: "center",
     backgroundColor: "#1a1a1a", borderRadius: 12,
-    borderWidth: 1.5, borderColor: "#7c3aed",
+    borderWidth: 1.5, borderColor: "#4a3070",
     paddingHorizontal: 12, gap: 8,
   },
-  inputRowValid: { borderColor: "#22c55e" },
-  inputRowError: { borderColor: "#ef4444" },
+  inputRowValid: { borderColor: "#3d7a5a" },
+  inputRowError: { borderColor: "#8b3a3a" },
   input: { flex: 1, color: "#fff", fontSize: 13, paddingVertical: 12 },
   clearBtn: { padding: 4 },
 
   parsedRow: { flexDirection: "row", alignItems: "center", gap: 6 },
-  parsedText: { color: "#22c55e", fontSize: 12, fontWeight: "600" },
-  errorText:  { color: "#ef4444", fontSize: 12, lineHeight: 18 },
+  parsedText: { color: "#3d7a5a", fontSize: 12, fontWeight: "600" },
+  errorText:  { color: "#8b3a3a", fontSize: 12, lineHeight: 18 },
 
   confirmBtn: {
-    backgroundColor: "#7c3aed",   // 보라색 버튼
+    backgroundColor: "#4a3070",
     borderRadius: 12, paddingVertical: 14, alignItems: "center",
   },
   confirmBtnDisabled: { opacity: 0.35 },

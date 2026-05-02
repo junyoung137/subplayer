@@ -1,22 +1,14 @@
 /**
  * useVideoProcessor.ts
  *
- * ── CHANGES (v10) ─────────────────────────────────────────────────────────────
- * [SELF-4] serverBridgeService.ts v15 priority semaphore 반영 주석 업데이트
- *          (로직 변경 없음)
+ * ── CHANGES (v11) ─────────────────────────────────────────────────────────────
+ * [BUG FIX] 로컬 영상 사용량 미차감 수정
+ *   - 원인: processVideo() 완료 후 recordUsage() 호출 누락
+ *   - free 경로(on-device Gemma): 번역 완료 후 실제 영상 길이 기준으로 recordUsage 호출
+ *   - server 경로(standard/pro): 기존 safeRecordUsage()로 처리 (변경 없음)
+ *   - 취소/에러 시 cancelledRef.current === true → 차감 안 함 (정상)
  *
- *   v9: serverBridgeService.ts v14의 MIN_EXECUTION_FLOOR_SECS 추가 명시
- *   v10: serverBridgeService.ts v15 [FIX-16] PriorityTranslateSemaphore 적용 반영
- *        → 동기화 체인 주석에 translate queue 전략 변경 이력 추가
- *        → 로직·상수·동작 변경 없음
- *
- *   동기화 체인:
- *     HARD_MIN_EXECUTE_SECS(3):
- *       useVideoProcessor.ts ← useServerBridge.ts ← serverBridgeService.ts(MIN_EXECUTION_FLOOR_SECS)
- *     MIN_QUOTA_TO_PROCESS_SECS(10):
- *       useVideoProcessor.ts ← useServerBridge.ts
- *
- * v9에서 유지되는 것들:
+ * v10에서 유지되는 것들:
  *   - [FIX-2 v8] buildPartialQuotaWarning 3단계 분기
  *   - [SELF-2 v8] HARD_MIN_EXECUTE_SECS 상수 동기화
  *   - 2단계 gating: canProcess(1) → canProcess(실제값)
@@ -177,6 +169,7 @@ export function useVideoProcessor() {
 
   const syncFromSettings = usePlanStore((s) => s.syncFromSettings);
   const planTier         = usePlanStore((s) => s.tier);
+  const recordUsage      = usePlanStore((s) => s.recordUsage);   // [v11 BUG FIX]
 
   const { processVideoServer } = useServerBridge();
 
@@ -211,6 +204,14 @@ export function useVideoProcessor() {
       }
 
       // 2차: 실제 영상 길이 기반 정밀 판단
+      // [v11 BUG FIX] 실제 duration을 recordUsage에서도 활용하기 위해 변수 저장
+      let actualDurationSecs: number | null = null;
+      try {
+        actualDurationSecs = await getVideoDuration(videoUri);
+      } catch {
+        // 측정 실패는 기존 fallback 로직이 처리
+      }
+
       const estimatedMinutes = await estimateVideoMinutes(videoUri, fastState.tier);
 
       if (estimatedMinutes === null) {
@@ -286,6 +287,51 @@ export function useVideoProcessor() {
 
         if (cancelledRef.current) return { success: false, translationSkipped: false };
 
+        // ── [v11 BUG FIX] 로컬(free/on-device) 경로 사용량 차감 ────────────
+        // server 경로(standard/pro)는 processVideoServer 내부의
+        // safeRecordUsage()로 이미 처리됨 → 여기서는 free 경로만 차감
+        //
+        // 차감 기준 우선순위:
+        //   1. 실제 자막 세그먼트 시간 합산 (번역된 내용만 정확히 반영)
+        //   2. 실제 영상 duration (자막 없을 때 fallback)
+        //   3. estimatedMinutes (duration 측정 실패 시 최후 fallback)
+        //
+        // 취소 시 cancelledRef.current === true → 위에서 이미 early return
+        // translationSkipped === true여도 STT(Whisper) 처리는 됐으므로 차감
+        if (!useServer && subtitles.length > 0) {
+          try {
+            let chargedSecs: number;
+
+            if (subtitles.length > 0) {
+              // 1순위: 실제 번역된 세그먼트 시간 합산
+              chargedSecs = subtitles.reduce(
+                (acc, seg) => acc + Math.max(0, seg.endTime - seg.startTime),
+                0,
+              );
+            } else if (actualDurationSecs !== null && actualDurationSecs > 0) {
+              // 2순위: 실제 영상 길이
+              chargedSecs = actualDurationSecs;
+            } else if (estimatedMinutes !== null) {
+              // 3순위: 추정치
+              chargedSecs = estimatedMinutes * 60;
+            } else {
+              chargedSecs = 0;
+            }
+
+            if (chargedSecs > 0) {
+              recordUsage(chargedSecs);
+              console.log(
+                `[useVideoProcessor] 로컬 사용량 기록: ${Math.round(chargedSecs)}초 ` +
+                `(${(chargedSecs / 60).toFixed(1)}분), tier: ${planState.tier}`,
+              );
+            }
+          } catch (usageErr) {
+            // recordUsage 실패는 non-fatal — 번역 결과는 정상 반환
+            console.warn('[useVideoProcessor] recordUsage 실패 (non-fatal):', usageErr);
+          }
+        }
+        // ── 사용량 차감 끝 ────────────────────────────────────────────────────
+
         if (!pendingSubtitleRef.current) {
           setSubtitles(subtitles);
 
@@ -315,7 +361,7 @@ export function useVideoProcessor() {
     [
       clearSubtitles, setSubtitles, setProcessing,
       setProcessingError, setProcessingProgress,
-      syncFromSettings, planTier, t,
+      syncFromSettings, planTier, recordUsage, t,   // [v11] recordUsage 추가
     ]
   );
 

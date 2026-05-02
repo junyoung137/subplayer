@@ -65,6 +65,7 @@ export interface YouTubePlayerProps {
   isFullscreen?: boolean;
   playing?: boolean;
   style?: object;
+  onQualityChanged?: (quality: string) => void;
 }
 
 export interface YouTubePlayerHandle {
@@ -77,6 +78,8 @@ export interface YouTubePlayerHandle {
   blockTimeSync: (ms: number) => void;
   pauseTimeSync: () => void;
   resumeTimeSync: () => void;
+  getCurrentQuality: () => Promise<string>;
+  setQuality: (quality: string) => void;
 }
 
 export interface SubtitleFetchResult {
@@ -124,6 +127,7 @@ export const YouTubePlayer = React.forwardRef<
     isFullscreen = false,
     playing,
     style,
+    onQualityChanged,
   },
   ref
 ) {
@@ -270,11 +274,13 @@ export const YouTubePlayer = React.forwardRef<
   const onSeekRef             = useRef(onSeek);
   // ✅ [v28] onTap ref 추가
   const onTapRef              = useRef(onTap);
+  const onQualityChangedRef   = useRef(onQualityChanged);
   useEffect(() => { onSubtitleDataRef.current = onSubtitleData; }, [onSubtitleData]);
   useEffect(() => { onSubtitleClearRef.current = onSubtitleClear; }, [onSubtitleClear]);
   useEffect(() => { onSubtitlesLoadedRef.current = onSubtitlesLoaded; }, [onSubtitlesLoaded]);
   useEffect(() => { onSeekRef.current = onSeek; }, [onSeek]);
   useEffect(() => { onTapRef.current = onTap; }, [onTap]); // ✅ [v28]
+  useEffect(() => { onQualityChangedRef.current = onQualityChanged; }, [onQualityChanged]);
 
   // ── caption fetch ─────────────────────────────────────────────────────────
   const doFetch = useCallback(
@@ -453,6 +459,46 @@ export const YouTubePlayer = React.forwardRef<
     },
     pauseTimeSync: () => { isTimeSyncPausedRef.current = true; },
     resumeTimeSync: () => { isTimeSyncPausedRef.current = false; },
+    getCurrentQuality: (): Promise<string> => {
+      return new Promise((resolve) => {
+        const webViewRef = (playerRef.current as any)?.getWebViewRef?.();
+        if (!webViewRef) { resolve('auto'); return; }
+        // Uses the same eventEmitter pattern as getDuration/getCurrentTime
+        webViewRef.injectJavaScript(`
+          (function() {
+            try {
+              var q = window.player && typeof window.player.getPlaybackQuality === 'function'
+                ? window.player.getPlaybackQuality()
+                : 'auto';
+              window.ReactNativeWebView.postMessage(JSON.stringify({
+                eventType: 'getCurrentQuality',
+                data: q || 'auto'
+              }));
+            } catch(e) {
+              window.ReactNativeWebView.postMessage(JSON.stringify({
+                eventType: 'getCurrentQuality',
+                data: 'auto'
+              }));
+            }
+          })(); true;
+        `);
+        const timeout = setTimeout(() => resolve('auto'), 1500);
+        (playerRef.current as any).__qualityResolver__ = (q: string) => {
+          clearTimeout(timeout);
+          (playerRef.current as any).__qualityResolver__ = null;
+          resolve(q || 'auto');
+        };
+      });
+    },
+    setQuality: (quality: string) => {
+      const webViewRef = (playerRef.current as any)?.getWebViewRef?.();
+      if (!webViewRef) return;
+      const ytQ = quality === 'auto' ? 'default' : quality;
+      webViewRef.injectJavaScript(
+        `try { window.player && window.player.setPlaybackQuality('${ytQ}'); } catch(e) {}; true;`
+      );
+      onQualityChangedRef.current?.(quality);
+    },
   }));
 
   // ── State change handler ──────────────────────────────────────────────────
@@ -503,11 +549,17 @@ export const YouTubePlayer = React.forwardRef<
     setIsReady(true);
     setTimeout(() => {
       const webViewRef = (playerRef.current as any)?.getWebViewRef?.();
-      if (webViewRef && playing) {
+      if (!webViewRef) return;
+      if (playing) {
         console.log('[PLAY_EFFECT] delayed post-ready play trigger');
         webViewRef.injectJavaScript('window.player && window.player.playVideo(); true;');
       }
-    }, 500);
+      // Request highest quality automatically — YouTube may override based on
+      // network/device, actual applied quality reported via onPlaybackQualityChange
+      webViewRef.injectJavaScript(
+        `try { window.player && window.player.setPlaybackQuality('hd1080'); } catch(e) {}; true;`
+      );
+    }, 800);
     onReady?.();
   }, [onReady, playing]);
 
@@ -551,9 +603,31 @@ export const YouTubePlayer = React.forwardRef<
         onReady={handleReady}
         onChangeState={handleStateChange}
         onError={handleError}
+        onPlaybackQualityChange={(quality: string) => {
+          console.log('[QUALITY] onPlaybackQualityChange fired:', quality);
+          onQualityChangedRef.current?.(quality);
+        }}
         webViewProps={{
           androidLayerType: "hardware",
           injectedJavaScript: hideSubtitleScript,
+          onMessage: (event: any) => {
+            // Handle getCurrentQuality response from injectJavaScript
+            try {
+              const msg = JSON.parse(event.nativeEvent.data);
+              if (msg.eventType === 'getCurrentQuality') {
+                const resolver = (playerRef.current as any).__qualityResolver__;
+                if (resolver) resolver(msg.data || 'auto');
+                return;
+              }
+            } catch {}
+            // Forward all other messages to the library's internal handler
+            // via webViewRef.props.onMessage (the library binds onWebMessage here)
+            try {
+              const wv = (playerRef.current as any)?.getWebViewRef?.();
+              const handler = wv?.props?.onMessage;
+              if (typeof handler === 'function') handler(event);
+            } catch {}
+          },
         }}
         initialPlayerParams={{
           showClosedCaptions: false, // cc_load_policy:0 — 네이티브 자막 비활성화

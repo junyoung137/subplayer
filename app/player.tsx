@@ -236,6 +236,26 @@ export default function PlayerScreen() {
   }, [cacheKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
+    const srtUri = pendingSubtitleRef.current;
+    if (!srtUri) return;
+    pendingSubtitleRef.current = null;
+    (async () => {
+      try {
+        const content = await FileSystem.readAsStringAsync(srtUri);
+        const segments = parseSrt(content);
+        if (segments.length > 0) {
+          setSubtitles(segments);
+          setSubtitlePhase("done");
+          setSubtitleProgress(1);
+          setTranslationEverCompleted(true);
+        }
+      } catch (e) {
+        console.warn("[player.tsx] Failed to load SRT:", e);
+      }
+    })();
+  }, [cacheKey]); // re-run when video changes
+
+  useEffect(() => {
     if (bgStatus?.status !== "done" || !cacheKey || bgResultApplied.current) return;
     (async () => {
       const result = await loadBgResult(cacheKey);
@@ -635,9 +655,8 @@ export default function PlayerScreen() {
         </View>
       )}
 
-      {/* 컨트롤 바 (2행) */}
+      {/* 컨트롤 바 */}
       <View style={styles.controlBar}>
-        {/* 행 1 */}
         <View style={styles.controlRow}>
           <TouchableOpacity style={styles.playBtn} onPress={() => setPlaying(!isPlaying)} activeOpacity={0.75}>
             <Text style={styles.playBtnText}>{isPlaying ? "⏸" : "▶"}</Text>
@@ -668,29 +687,13 @@ export default function PlayerScreen() {
                 : <Camera size={14} color="#ccc" />}
             </TouchableOpacity>
           )}
+          {showSaveBtn && (
+            <TouchableOpacity style={[styles.chipBtn, styles.chipBtnSave]} onPress={() => setSaveModalVisible(true)}>
+              <Download size={13} color="#86efac" />
+              <Text style={[styles.chipBtnText, styles.chipBtnSaveText]}>{t("player.save")}</Text>
+            </TouchableOpacity>
+          )}
         </View>
-
-        {/* 행 2 (조건부) */}
-        {(Platform.OS === "android" || showSaveBtn) && (
-          <View style={styles.controlRow2}>
-            {Platform.OS === "android" && (
-              <TouchableOpacity
-                style={[styles.chipBtn, styles.chipBtnFlex, isBgRunning && styles.chipBtnBgActive]}
-                onPress={handleSendToBackground} activeOpacity={0.75}
-              >
-                <Text style={styles.chipBtnText} numberOfLines={1}>
-                  {isBgRunning ? t("player.bgInProgress") : t("player.background")}
-                </Text>
-              </TouchableOpacity>
-            )}
-            {showSaveBtn && (
-              <TouchableOpacity style={[styles.chipBtn, styles.chipBtnSave]} onPress={() => setSaveModalVisible(true)}>
-                <Download size={13} color="#86efac" />
-                <Text style={[styles.chipBtnText, styles.chipBtnSaveText]}>{t("player.save")}</Text>
-              </TouchableOpacity>
-            )}
-          </View>
-        )}
       </View>
 
       {isRetranslating && (

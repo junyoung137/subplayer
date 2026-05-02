@@ -313,7 +313,7 @@ export function UrlInputModal({
                     placeholderTextColor="#444"
                     autoCorrect={false}
                     autoCapitalize="none"
-                    selectionColor="#2563eb"
+                    selectionColor="#2a3f6f"
                     returnKeyType="go"
                     onSubmitEditing={confirmUrl}
                   />
@@ -329,7 +329,7 @@ export function UrlInputModal({
 
                 {parsedId && urlInput.length > 0 && (
                   <View style={styles.parsedRow}>
-                    <Check size={16} color="#22c55e" />
+                    <Check size={16} color="#3d7a5a" />
                     <Text style={styles.parsedText}>{t("url.idDetected", { id: parsedId })}</Text>
                   </View>
                 )}
@@ -403,7 +403,7 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     alignItems: "center",
   },
-  tabActive:     { backgroundColor: "#2563eb" },
+  tabActive:     { backgroundColor: "#2a3f6f" },
   tabText:       { color: "#555", fontSize: 13, fontWeight: "600" },
   tabTextActive: { color: "#fff" },
 
@@ -430,12 +430,12 @@ const styles = StyleSheet.create({
     backgroundColor: "#1a1a1a",
     borderRadius: 12,
     borderWidth: 1.5,
-    borderColor: "#2563eb",
+    borderColor: "#2a3f6f",
     paddingHorizontal: 12,
     gap: 8,
   },
-  inputRowValid: { borderColor: "#22c55e" },
-  inputRowError: { borderColor: "#ef4444" },
+  inputRowValid: { borderColor: "#3d7a5a" },
+  inputRowError: { borderColor: "#8b3a3a" },
   input: {
     flex: 1,
     color: "#fff",
@@ -449,16 +449,16 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 6,
   },
-  parsedText: { color: "#22c55e", fontSize: 12, fontWeight: "600" },
+  parsedText: { color: "#3d7a5a", fontSize: 12, fontWeight: "600" },
 
   errorText: {
-    color: "#ef4444",
+    color: "#8b3a3a",
     fontSize: 12,
     lineHeight: 18,
   },
 
   confirmBtn: {
-    backgroundColor: "#2563eb",
+    backgroundColor: "#2a3f6f",
     borderRadius: 12,
     paddingVertical: 14,
     alignItems: "center",
@@ -478,8 +478,8 @@ const styles = StyleSheet.create({
     borderColor: "#2a2a2a",
   },
   genrePillActive: {
-    backgroundColor: "#2563eb",
-    borderColor: "#2563eb",
+    backgroundColor: "#2a3f6f",
+    borderColor: "#2a3f6f",
   },
   genrePillText:       { color: "#666", fontSize: 13, fontWeight: "600" },
   genrePillTextActive: { color: "#fff" },
