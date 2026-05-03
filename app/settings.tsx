@@ -443,6 +443,13 @@ export default function SettingsScreen() {
       {/* ── Support ─────────────────────────────────────────────────────────── */}
       <TouchableOpacity
         style={styles.supportBtn}
+        onPress={() => router.push('/about')}
+        activeOpacity={0.8}
+      >
+        <Text style={[styles.supportBtnText, { color: '#ccc' }]}>앱 정보</Text>
+      </TouchableOpacity>
+      <TouchableOpacity
+        style={styles.supportBtn}
         onPress={() => router.push("/support")}
         activeOpacity={0.8}
       >

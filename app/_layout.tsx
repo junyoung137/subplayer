@@ -132,15 +132,13 @@ export default function RootLayout() {
           name="index"
           options={{
             headerTitle: () => (
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 2 }}>
-                <Text style={{ fontSize: 20, fontWeight: "700", color: "#fff" }}>
-                  Realtime<Text style={{ color: "#60a5fa" }}>Sub</Text>
+              <View style={{ flexDirection: "row", alignItems: "center" }}>
+                <Text style={{ fontSize: 20, fontWeight: "700", color: "#dde3ee" }}>
+                  Realtime
                 </Text>
-                <Image
-                  source={require("../assets/header_icon.png")}
-                  style={{ width: 36, height: 36, borderRadius: 8 }}
-                  resizeMode="contain"
-                />
+                <Text style={{ fontSize: 20, fontWeight: "700", color: "#93c5fd", opacity: 0.85 }}>
+                  Sub
+                </Text>
               </View>
             ),
           }}
@@ -152,6 +150,7 @@ export default function RootLayout() {
         <Stack.Screen name="gemmaModels"  options={{ title: "Gemma 모델 관리" }} />
         <Stack.Screen name="youtube-player" options={{ headerShown: false }} />
         <Stack.Screen name="support"        options={{ title: "피드백", headerShown: false }} />
+        <Stack.Screen name="about"          options={{ headerShown: false }} />
         <Stack.Screen name="login"          options={{ headerShown: false }} />
         <Stack.Screen name="signup"         options={{ headerShown: false }} />
         <Stack.Screen name="pricing"        options={{ headerShown: false }} />
