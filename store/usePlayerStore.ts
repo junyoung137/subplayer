@@ -61,6 +61,9 @@ interface PlayerStore {
   pendingGenre: string | null;
   setPendingGenre: (genre: string | null) => void;
 
+  isDirectMode: boolean;
+  setDirectMode: (value: boolean) => void;
+
   setYoutubeVideo: (videoId: string, name: string) => void;
   setUrlVideo: (url: string, name: string) => void;
   updateUrlProcessing: (patch: Partial<UrlProcessingState>) => void;
@@ -102,8 +105,10 @@ export const usePlayerStore = create<PlayerStore>((set) => ({
   rawUrl: null,
   urlProcessing: INITIAL_URL_PROCESSING,
   pendingGenre: null,
+  isDirectMode: false,
 
   setPendingGenre: (genre) => set({ pendingGenre: genre }),
+  setDirectMode: (isDirectMode) => set({ isDirectMode }),
 
   setVideo: (uri, name) =>
     set({

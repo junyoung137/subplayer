@@ -609,7 +609,14 @@ export const YouTubePlayer = React.forwardRef<
         }}
         webViewProps={{
           androidLayerType: "hardware",
+          userAgent:
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+          "AppleWebKit/537.36 (KHTML, like Gecko) " +
+          "Chrome/124.0.0.0 Safari/537.36",   
           injectedJavaScript: hideSubtitleScript,
+          mediaPlaybackRequiresUserAction: false,
+          allowsInlineMediaPlayback: true,
+          allowsFullscreenVideo: true,
           onMessage: (event: any) => {
             // Handle getCurrentQuality response from injectJavaScript
             try {
@@ -646,7 +653,7 @@ export const YouTubePlayer = React.forwardRef<
         - 내부에서 play/pause 직접 호출 완전 제거 → 상태 충돌 방지
       */}
       <View
-        style={StyleSheet.absoluteFillObject}
+        style={[StyleSheet.absoluteFillObject, { bottom: 80 }]}
         onStartShouldSetResponder={() => true}
         onResponderGrant={(e) => {
           pressStartRef.current  = Date.now();

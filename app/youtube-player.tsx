@@ -268,6 +268,7 @@ export default function YoutubePlayerScreen() {
   const setCurrentTime  = usePlayerStore((s) => s.setCurrentTime);
   const bumpSeek        = usePlayerStore((s) => s.bumpSeek);
   const setPendingGenre = usePlayerStore((s) => s.setPendingGenre);
+  const isDirectMode    = usePlayerStore((s) => s.isDirectMode);
 
   const _initialGenre = usePlayerStore.getState().pendingGenre ?? "general";
 
@@ -317,6 +318,7 @@ export default function YoutubePlayerScreen() {
   const ytPlayerRef            = useRef<YouTubePlayerHandle>(null);
   const gemmaLoadedRef         = useRef(false);
   const cancelledRef           = useRef(false);
+  const isDirectModeRef        = useRef(false);
   const audioServerAbortRef    = useRef<AbortController | null>(null);
   const lastFetchResult        = useRef<SubtitleFetchResult | null>(null);
   const allSegmentsRef         = useRef<SubtitleFetchResult | null>(null);
@@ -369,6 +371,10 @@ export default function YoutubePlayerScreen() {
   useEffect(() => {
     bgStatusRef.current = bgStatus;
   }, [bgStatus]);
+
+  useEffect(() => {
+    isDirectModeRef.current = isDirectMode;
+  }, [isDirectMode]);
 
   // Unified progress high-water mark
   const highWaterProgressRef = useRef(0);
@@ -470,6 +476,7 @@ export default function YoutubePlayerScreen() {
       if (youtubeVideoId) {
         AsyncStorage.removeItem(`fg_fetched_subtitles_${youtubeVideoId}`).catch(() => {});
       }
+      usePlayerStore.getState().setDirectMode(false);
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1067,6 +1074,11 @@ export default function YoutubePlayerScreen() {
     genreOverride?: string,
     existingTranslations?: Map<string, string> | null,
   ) => {
+    if (isDirectModeRef.current) {
+      console.log('[TRANSLATE] Direct mode active, skipping translation pipeline');
+      return;
+    }
+
     if (bgResultApplied.current) {
       console.log('[TRANSLATE] BG result already applied, skipping FG translation');
       return;
@@ -1479,6 +1491,7 @@ export default function YoutubePlayerScreen() {
     segments: TimedTextSegment[],
     language: string,
   ) => {
+    if (isDirectModeRef.current) return;
     if (srtModeActiveRef.current) return;
 
     if (bgResultApplied.current) {
@@ -1558,6 +1571,12 @@ export default function YoutubePlayerScreen() {
       } catch (e) {
         console.warn("[SRT] Failed to load SRT in handlePlayerReady:", e);
       }
+      return;
+    }
+
+    if (isDirectModeRef.current) {
+      // Direct mode: skip all translation, just play
+      setPhase('done');
       return;
     }
 
@@ -2376,12 +2395,6 @@ export default function YoutubePlayerScreen() {
         >
           <Text style={styles.chipBtnText}>{speedLabel(playbackRate)}</Text>
         </TouchableOpacity>
-
-        <View style={styles.chipBtn}>
-          <Text style={styles.chipBtnText}>
-            {QUALITY_LABELS[currentQuality] ?? currentQuality}
-          </Text>
-        </View>
 
         <TouchableOpacity
           style={[styles.chipBtn, styles.chipBtnFlex]}

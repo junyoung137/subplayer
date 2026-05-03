@@ -631,6 +631,7 @@ export default function HomeScreen() {
   const setVideo = usePlayerStore((s) => s.setVideo);
   const setYoutubeVideo = usePlayerStore((s) => s.setYoutubeVideo);
   const setPendingGenre = usePlayerStore((s) => s.setPendingGenre);
+  const setDirectMode = usePlayerStore((s) => s.setDirectMode);
   const pendingFileRef = useRef<{ uri: string; name: string } | null>(null);
 
   const [resumeDialog, setResumeDialog] = useState<{
@@ -910,6 +911,7 @@ export default function HomeScreen() {
     } else {
       pendingSubtitleRef.current = null;
     }
+    setDirectMode(true);
     setYoutubeVideo(videoId, title);
     setTimeout(() => router.push("/youtube-player"), 0);
   };
