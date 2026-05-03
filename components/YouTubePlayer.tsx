@@ -146,6 +146,11 @@ export const YouTubePlayer = React.forwardRef<
   const onOverlayVisibilityChangeRef = useRef(onOverlayVisibilityChange);
   useEffect(() => { onOverlayVisibilityChangeRef.current = onOverlayVisibilityChange; }, [onOverlayVisibilityChange]);
 
+  const setCurrentTime = usePlayerStore((s) => s.setCurrentTime);
+  const setDuration    = usePlayerStore((s) => s.setDuration);
+  const setPlaying     = usePlayerStore((s) => s.setPlaying);
+  const isPlaying      = usePlayerStore((s) => s.isPlaying);
+
   // Use a ref to always access latest isFullscreen value inside callbacks
   const isFullscreenRef = useRef(isFullscreen);
   useEffect(() => { isFullscreenRef.current = isFullscreen; }, [isFullscreen]);
@@ -234,11 +239,6 @@ export const YouTubePlayer = React.forwardRef<
       `window.player && window.player.setPlaybackRate(${currentRate}); true;`
     );
   }, [currentRate, isReady]);
-
-  const setCurrentTime = usePlayerStore((s) => s.setCurrentTime);
-  const setDuration    = usePlayerStore((s) => s.setDuration);
-  const setPlaying     = usePlayerStore((s) => s.setPlaying);
-  const isPlaying      = usePlayerStore((s) => s.isPlaying);
 
   // ── timedtext 상태 ────────────────────────────────────────────────────────
   const loadedSegmentsRef  = useRef<TimedTextSegment[]>([]);

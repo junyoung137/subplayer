@@ -879,3 +879,24 @@ export function makeDeterministicYtKey(
   const last  = Math.round(segments[segments.length - 1].end * 1000);
   return `${stableId}_yt_${segments.length}_${first}_${last}`;
 }
+
+/**
+ * serverTranslateYoutubeSegments
+ * Translate-only path for YouTube videos that have manual subtitles.
+ * Called when timedtext track exists — no audio extraction, no Whisper STT.
+ * GPU billing applies (Standard/Pro plans only — caller must enforce plan gate).
+ */
+export async function serverTranslateYoutubeSegments(
+  segments: Array<{ start: number; end: number; text: string }>,
+  targetLanguage: string,
+  videoId: string,
+  reservedSeconds: number,
+): Promise<ServerTranslateResponse> {
+  // Reuse existing serverTranslate — same billing contract, same semaphore
+  return serverTranslate({
+    segments,
+    targetLanguage,
+    videoId,
+    reservedSeconds,
+  });
+}

@@ -50,9 +50,11 @@ import { SubtitleSegment } from '../store/usePlayerStore';
 import {
   serverTranscribe,
   serverTranslate,
+  serverTranslateYoutubeSegments,
   fetchCompletedBatches,
   loadServerBridgeConfig,
   makeStableVideoId,
+  makeDeterministicYtKey,
   cancelAllInflight,
   classifyServerError,
   safeRecordUsage,
@@ -67,6 +69,7 @@ import { ProcessingProgress } from '../services/videoProcessor';
 import { getVideoDuration, extractSingleChunkAt, clearChunkDir } from '../services/audioChunker';
 import * as FileSystem from 'expo-file-system/legacy';
 import { getLanguageByCode } from '../constants/languages';
+import { extractChunkViaCpuServer, CpuExtractError } from '../services/cpuServerService';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useTranslation } from 'react-i18next';
 
@@ -561,11 +564,312 @@ export function useServerBridge() {
     }
   }, [recordUsage, tier, t]);
 
+  const processYoutubeServer = useCallback(async (
+    youtubeVideoId: string,
+    segments: Array<{ start: number; end: number; text: string }>,
+    targetLanguage: string,
+    onProgress?: (completed: number, total: number) => void,
+    isCancelled?: () => boolean,
+  ): Promise<{
+    segments: Array<{ start: number; end: number; text: string; translated: string }>;
+    usageSeconds: number;
+  }> => {
+
+    // GUARD: GPU billing only for Standard/Pro
+    if (tier !== 'standard' && tier !== 'pro') {
+      throw new Error('[processYoutubeServer] GPU translation requires Standard or Pro plan. tier=' + tier);
+    }
+
+    const config = await loadServerBridgeConfig();
+    if (!config) throw new Error('[processYoutubeServer] ServerBridge not configured');
+
+    if (!segments || segments.length === 0) {
+      return { segments: [], usageSeconds: 0 };
+    }
+
+    // effectiveDurationSecs: sum of actual subtitle segment durations
+    const effectiveDurationSecs = segments.reduce(
+      (acc, seg) => acc + Math.max(0, seg.end - seg.start),
+      0,
+    );
+
+    // remainingQuotaSeconds from plan store
+    const currentPlanState = usePlanStore.getState();
+    const remainingQuotaSeconds = Math.max(
+      currentPlanState.tier === 'free'
+        ? (currentPlanState.limits.dailyCapMinutes - currentPlanState.usedMinutes) * 60
+        : (currentPlanState.limits.monthlyCapMinutes - currentPlanState.usedMinutes) * 60,
+      0,
+    );
+
+    const reservedSeconds = calcReservedSeconds(
+      effectiveDurationSecs,
+      remainingQuotaSeconds,
+      false, // YouTube: no batch split, single pass
+    );
+
+    // Deterministic jobKey — same segments always produce same key (RULE 13)
+    const jobKey = makeDeterministicYtKey(
+      youtubeVideoId,
+      segments.map(s => ({ start: s.start, end: s.end })),
+    );
+
+    console.log(
+      `[processYoutubeServer] videoId=${youtubeVideoId}, ` +
+      `segments=${segments.length}, effectiveDuration=${effectiveDurationSecs.toFixed(1)}s, ` +
+      `reserved=${reservedSeconds}s, remaining=${remainingQuotaSeconds.toFixed(1)}s`,
+    );
+
+    if (isCancelled?.()) return { segments: [], usageSeconds: 0 };
+
+    const result = await serverTranslateYoutubeSegments(
+      segments,
+      targetLanguage,
+      jobKey,
+      reservedSeconds,
+    );
+
+    // BILLING: single call site — safeRecordUsage dedup prevents double billing
+    await safeRecordUsage(
+      jobKey,
+      result.usageSeconds,
+      recordUsage,
+      recordGpuSeconds,
+      tier,
+    ).catch(e => {
+      console.error('[processYoutubeServer] safeRecordUsage error:', e);
+    });
+
+    console.log(
+      `[processYoutubeServer] done: usageSeconds=${result.usageSeconds}, ` +
+      `segments=${result.segments.length}`,
+    );
+
+    return {
+      segments: result.segments,
+      usageSeconds: result.usageSeconds,
+    };
+
+  }, [recordUsage, tier]);
+
+  const processYoutubeAudioServer = useCallback(async (
+    youtubeVideoId: string,
+    sourceLanguage: string,
+    targetLanguage: string,
+    totalDurationSecs: number,
+    onProgress?: (p: import('../services/videoProcessor').ProcessingProgress) => void,
+    isCancelled?: () => boolean,
+  ): Promise<{
+    subtitles: SubtitleSegment[];
+    usageSeconds: number;
+  }> => {
+
+    // GUARD: Standard/Pro only — Free must never reach this
+    if (tier !== 'standard' && tier !== 'pro') {
+      throw new Error('[processYoutubeAudioServer] Requires Standard or Pro plan');
+    }
+
+    const config = await loadServerBridgeConfig();
+    if (!config) throw new Error('[processYoutubeAudioServer] ServerBridge not configured');
+
+    const stableId    = youtubeVideoId; // already stable for YouTube
+    const totalChunks = Math.ceil(totalDurationSecs / 30);
+    const langMeta    = (await import('../constants/languages')).getLanguageByCode(targetLanguage);
+    const langName    = langMeta?.name ?? targetLanguage;
+
+    const allSubtitles: SubtitleSegment[] = [];
+    let offset      = 0;
+    let chunkIndex  = 0;
+    let batchIndex  = 0;
+    let skippedChunks = 0;
+    let cpuBotBlocked = false; // session-level bot_403 block
+
+    // Reuse same batch structure as processVideoServer (CHUNKS_PER_BATCH=6, CHUNK_DURATION_SECS=30)
+    while (offset < totalDurationSecs) {
+      if (isCancelled?.()) return { subtitles: [], usageSeconds: 0 };
+      if (cpuBotBlocked) {
+        console.warn('[processYoutubeAudioServer] bot_403 — stopping pipeline');
+        break;
+      }
+
+      batchIndex++;
+      const batchJobKey = `${stableId}_audio_batch_${batchIndex}`;
+
+      // Quota check
+      const currentPlanState = usePlanStore.getState();
+      const remainingQuotaSeconds = Math.max(
+        currentPlanState.tier === 'free'
+          ? (currentPlanState.limits.dailyCapMinutes - currentPlanState.usedMinutes) * 60
+          : (currentPlanState.limits.monthlyCapMinutes - currentPlanState.usedMinutes) * 60,
+        0,
+      );
+
+      if (remainingQuotaSeconds < HARD_MIN_EXECUTE_SECS) {
+        console.warn('[processYoutubeAudioServer] Quota below hard min — stopping');
+        break;
+      }
+
+      const isLastPartialBatch = remainingQuotaSeconds < MIN_QUOTA_TO_PROCESS_SECS;
+
+      // Phase A: extract chunks via CPU server
+      const batchRawSegments: Array<{ start: number; end: number; text: string }> = [];
+      let chunksThisBatch = 0;
+      let batchPlannedDurationSecs = 0;
+      let batchActualDurationSecs  = 0;
+
+      while (chunksThisBatch < CHUNKS_PER_BATCH && offset < totalDurationSecs) {
+        if (isCancelled?.()) return { subtitles: [], usageSeconds: 0 };
+
+        const chunkDur = Math.min(30, totalDurationSecs - offset);
+        batchPlannedDurationSecs += chunkDur;
+
+        try {
+          const cpuChunk = await extractChunkViaCpuServer(
+            stableId,
+            offset,
+            chunkDur,
+            sourceLanguage,
+          );
+
+          const tr = await serverTranscribe({
+            audioBase64:   cpuChunk.audioBase64,
+            sourceLanguage,
+            chunkStartSec: cpuChunk.chunkStartSec,
+          });
+
+          batchRawSegments.push(...tr.segments);
+          batchActualDurationSecs += chunkDur;
+
+        } catch (e: any) {
+          if (e instanceof CpuExtractError && e.type === 'bot_403') {
+            cpuBotBlocked = true;
+            console.warn('[processYoutubeAudioServer] bot_403 — session blocked');
+            break;
+          }
+          // timeout/network: skip chunk, continue
+          skippedChunks++;
+          console.warn(
+            `[processYoutubeAudioServer] chunk ${chunkIndex} skip ` +
+            `(${e?.type ?? e?.message ?? 'unknown'})`
+          );
+        }
+
+        offset += chunkDur;
+        chunkIndex++;
+        chunksThisBatch++;
+
+        onProgress?.({
+          step:    'transcribing',
+          current: chunkIndex,
+          total:   totalChunks,
+          percent: Math.min(Math.round(5 + (chunkIndex / totalChunks) * 45), 50),
+          message: `음성 인식 중... (${chunkIndex}/${totalChunks})`,
+        });
+      }
+
+      if (cpuBotBlocked) break;
+
+      if (batchRawSegments.length === 0) {
+        if (isLastPartialBatch) break;
+        continue;
+      }
+
+      if (isCancelled?.()) return { subtitles: [], usageSeconds: 0 };
+
+      // Phase B: translate via RunPod
+      const effectiveDurationSecs = getEffectiveBatchDuration(
+        batchPlannedDurationSecs,
+        batchActualDurationSecs,
+        isLastPartialBatch,
+      );
+
+      const reservedSeconds = calcReservedSeconds(
+        effectiveDurationSecs,
+        remainingQuotaSeconds,
+        isLastPartialBatch,
+      );
+
+      let translateResult: Awaited<ReturnType<typeof serverTranslate>> | undefined;
+
+      for (let attempt = 0; attempt <= 1; attempt++) {
+        try {
+          translateResult = await serverTranslate({
+            segments:        batchRawSegments,
+            targetLanguage:  langName,
+            videoId:         batchJobKey,
+            reservedSeconds,
+          });
+          break;
+        } catch (err: any) {
+          if (isCancelled?.()) return { subtitles: [], usageSeconds: 0 };
+          const ec = classifyServerError(err);
+          if (ec === 'auth' || ec === 'validation') throw err;
+          if (attempt === 0) {
+            await new Promise(r => setTimeout(r, BATCH_RETRY_DELAY_MS));
+          }
+        }
+      }
+
+      if (!translateResult) {
+        if (isLastPartialBatch) break;
+        continue;
+      }
+
+      // BILLING: single call site
+      if (translateResult.completed) {
+        await safeRecordUsage(
+          batchJobKey,
+          translateResult.usageSeconds,
+          recordUsage,
+          recordGpuSeconds,
+          tier,
+        ).catch(e => console.error('[processYoutubeAudioServer] safeRecordUsage:', e));
+      }
+
+      const batchSubtitles: SubtitleSegment[] = translateResult.segments
+        .filter(seg => seg.translated && seg.translated.trim().length > 2)
+        .map(seg => ({
+          id:         makeSegmentId(seg.start, seg.end),
+          startTime:  seg.start,
+          endTime:    seg.end,
+          original:   seg.text,
+          translated: seg.translated,
+        }));
+
+      allSubtitles.push(...batchSubtitles);
+
+      onProgress?.({
+        step:    'translating',
+        current: allSubtitles.length,
+        total:   totalChunks * 5,
+        percent: Math.min(Math.round(50 + (offset / totalDurationSecs) * 49), 99),
+        message: `번역 중... (배치 ${batchIndex})`,
+      });
+
+      if (isLastPartialBatch) break;
+    }
+
+    // If bot blocked and no subtitles at all — throw so caller handles as failure
+    if (cpuBotBlocked && allSubtitles.length === 0) {
+      throw new Error('CPU_SERVER_BOT_BLOCKED');
+    }
+
+    const totalUsage = allSubtitles.reduce(
+      (acc, s) => acc + Math.max(0, s.endTime - s.startTime), 0
+    );
+
+    return {
+      subtitles: allSubtitles.sort((a, b) => a.startTime - b.startTime),
+      usageSeconds: totalUsage,
+    };
+
+  }, [recordUsage, tier, t]);
+
   const cancel = useCallback(() => {
     cancelledRef.current = true;
     cancelAllInflight();
     // TODO: 서버 cancel API 연동
   }, []);
 
-  return { processVideoServer, cancel };
+  return { processVideoServer, processYoutubeServer, processYoutubeAudioServer, cancel };
 }

@@ -70,6 +70,7 @@ import { LANGUAGES, getLanguageByCode } from "../constants/languages";
 import { useRetranslate } from "../hooks/useRetranslate";
 import { Settings, Check, CheckCircle2, XCircle, AlertTriangle, Mic, Search, Loader2, Globe, CheckCircle, AlertCircle, Radio, RotateCcw, Brain, Clock, Minimize2 } from 'lucide-react-native';
 import { useBackgroundTranslation } from '../hooks/useBackgroundTranslation';
+import { useServerBridge } from '../hooks/useServerBridge';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from "expo-file-system/legacy";
 import { pendingSubtitleRef } from "../utils/pendingSubtitle";
@@ -90,14 +91,12 @@ import {
 } from "../services/subtitleDB";
 import { usePlanStore } from '../store/usePlanStore';
 import {
-  serverTranslate,
   fetchCompletedBatches,
   loadServerBridgeConfig,
   makeStableVideoId,
   makeDeterministicYtKey,
   classifyServerError,
   safeRecordUsage,
-  calcReservedSeconds,
   _usageRecorded,
 } from '../services/serverBridgeService';
 import type { ServerCompletedBatchesResponse } from '../services/serverBridgeService';
@@ -274,6 +273,7 @@ export default function YoutubePlayerScreen() {
 
   const subtitleMode   = useSettingsStore((s) => s.subtitleMode);
   const targetLanguage = useSettingsStore((s) => s.targetLanguage);
+  const sourceLanguage = useSettingsStore((s) => s.sourceLanguage);
   const update         = useSettingsStore((s) => s.update);
 
   // ── 훅 ───────────────────────────────────────────────────────────────────
@@ -311,10 +311,13 @@ export default function YoutubePlayerScreen() {
     clearResult:         clearBgResult,
   } = useBackgroundTranslation(youtubeVideoId ?? undefined);
 
+  const { processYoutubeServer, processYoutubeAudioServer } = useServerBridge();
+
   // ── Refs ─────────────────────────────────────────────────────────────────
   const ytPlayerRef            = useRef<YouTubePlayerHandle>(null);
   const gemmaLoadedRef         = useRef(false);
   const cancelledRef           = useRef(false);
+  const audioServerAbortRef    = useRef<AbortController | null>(null);
   const lastFetchResult        = useRef<SubtitleFetchResult | null>(null);
   const allSegmentsRef         = useRef<SubtitleFetchResult | null>(null);
   const translationCacheRef    = useRef<Map<string, string>>(new Map());
@@ -508,23 +511,195 @@ export default function YoutubePlayerScreen() {
     setRemainingSecs(null);
   }, [youtubeVideoId, targetLanguage, selectedGenre]);
 
-  // ── no_subtitles → Whisper 전환 ──────────────────────────────────────────
+  // ── Smooth progress bar animation ─────────────────────────────────────────
+  const animateTo = useCallback((target: number) => {
+    animTargetRef.current = target;
+    if (animFrameRef.current !== null) return;
+
+    const duration  = 400;
+    const startVal  = animProgressRef.current;
+    const startTime = performance.now();
+
+    function frame(now: number) {
+      const t = Math.min((now - startTime) / duration, 1);
+      const eased = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
+      const value = animProgressRef.current
+        + (animTargetRef.current - animProgressRef.current) * eased;
+      animProgressRef.current = value;
+      setSubtitleProgress(value);
+      if (t < 1) {
+        animFrameRef.current = requestAnimationFrame(frame);
+      } else {
+        animProgressRef.current = animTargetRef.current;
+        setSubtitleProgress(animTargetRef.current);
+        animFrameRef.current = null;
+      }
+    }
+    animFrameRef.current = requestAnimationFrame(frame);
+  }, []);
+
+  // ── Segmented progress crawl ───────────────────────────────────────────────
+  const startCrawl = useCallback((
+    fromVal: number,
+    toVal: number,
+    duration: number,
+    jobId: number,
+    onComplete?: () => void,
+  ) => {
+    const crawlStart = performance.now();
+    let crawlLastRender = 0;
+    const effectiveStart = Math.max(fromVal, animProgressRef.current);
+
+    const crawlFrame = () => {
+      const now     = performance.now();
+      const elapsed = now - crawlStart;
+      const t       = Math.min(elapsed / duration, 1);
+
+      if (jobId !== jobIdRef.current)             return;
+      if (animProgressRef.current > toVal)        return;
+      if (t >= 1)                                 { onComplete?.(); return; }
+
+      const value = effectiveStart + (toVal - effectiveStart) * t;
+
+      if (value > animProgressRef.current && now - crawlLastRender >= 200) {
+        animProgressRef.current = value;
+        setSubtitleProgress(value);
+        crawlLastRender = now;
+      }
+
+      requestAnimationFrame(crawlFrame);
+    };
+    requestAnimationFrame(crawlFrame);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── CPU server audio pipeline (Standard/Pro, no_subtitles path) ──────────
+  const processYoutubeAudioPipeline = useCallback(async () => {
+    // Only for Standard/Pro — Free falls through to existing Whisper flow
+    if (planTier !== 'standard' && planTier !== 'pro') return false;
+    if (!youtubeVideoId) return false;
+
+    // duration이 있으면 사용, 없으면 store에서 읽기
+    const totalDurationSecs = usePlayerStore.getState().duration;
+    if (totalDurationSecs <= 0) {
+      console.warn('[YT_AUDIO] duration unknown — cannot start audio pipeline');
+      return false;
+    }
+
+    const myJobId = ++jobIdRef.current;
+    cancelledRef.current = false;
+
+    setPhase('translating');
+    setSubtitleProgress(0);
+    setLoadingLabel('오디오 추출 중...');
+
+    try {
+      const result = await processYoutubeAudioServer(
+        youtubeVideoId,
+        sourceLanguage === 'auto' ? 'en' : sourceLanguage,
+        targetLanguage,
+        totalDurationSecs,
+        (p) => {
+          if (myJobId !== jobIdRef.current) return;
+          animateTo(p.percent / 100);
+          setLoadingLabel(p.message);
+        },
+        () => cancelledRef.current,
+      );
+
+      if (myJobId !== jobIdRef.current) return true;
+
+      if (result.subtitles.length === 0) {
+        console.warn('[YT_AUDIO] No subtitles produced from audio pipeline');
+        return false; // caller will fall through to existing no_subtitles flow
+      }
+
+      setSubtitles(result.subtitles);
+      setPhase('done');
+      animateTo(1);
+      setSubtitleProgress(1);
+      setTotalSegments(result.subtitles.length);
+      setTranslatedCount(result.subtitles.length);
+      setTranslationEverCompleted(true);
+      setLoadingLabel('');
+
+      // Save to SQLite cache — same as translateFromResult final save
+      saveSubtitles(
+        youtubeVideoId,
+        targetLanguage,
+        selectedGenre,
+        result.subtitles,
+      ).catch(() => {});
+
+      console.log(
+        `[YT_AUDIO] Pipeline complete: ${result.subtitles.length} subtitles, ` +
+        `${result.usageSeconds.toFixed(1)}s billed`
+      );
+
+      return true; // success
+
+    } catch (e: any) {
+      if (myJobId !== jobIdRef.current) return true;
+      console.warn('[YT_AUDIO] Audio pipeline failed:', e?.message ?? e);
+      return false; // caller falls through to existing no_subtitles flow
+    }
+  }, [
+    youtubeVideoId, planTier, sourceLanguage, targetLanguage, selectedGenre,
+    processYoutubeAudioServer, setSubtitles, setPhase, animateTo, setLoadingLabel,
+  ]);
+
+  // ── no_subtitles → CPU audio pipeline (Standard/Pro) or Whisper (Free) ──
   useEffect(() => {
     if (subtitlePhase !== "no_subtitles") return;
     if (usingWhisper) return;
     if (whisperStartedRef.current) return;
 
+    // Standard/Pro: try CPU server audio pipeline first
+    if (planTier === 'standard' || planTier === 'pro') {
+      processYoutubeAudioPipeline().then((success) => {
+        if (success) return; // pipeline handled it — done
+        // Pipeline failed or returned no subtitles
+        // Fall through to existing Whisper flow for Standard
+        // (Pro gets error state — no on-device fallback)
+        if (planTier === 'pro') {
+          setPhase('error');
+          return;
+        }
+        // Standard: fall through to Whisper
+        whisperStartedRef.current = true;
+        setUsingWhisper(true);
+        setPhase('fallback_whisper');
+        Alert.alert(
+          t("player.noSubtitlesTitle"),
+          t("player.noSubtitlesMessage"),
+          [{ text: t("player.noSubtitlesConfirm") }]
+        );
+        if (modelLoaded) startWhisper();
+      }).catch(() => {
+        if (planTier === 'pro') {
+          setPhase('error');
+        } else {
+          // Standard fallback
+          whisperStartedRef.current = true;
+          setUsingWhisper(true);
+          setPhase('fallback_whisper');
+          if (modelLoaded) startWhisper();
+        }
+      });
+      return;
+    }
+
+    // Free: existing Whisper flow unchanged
     whisperStartedRef.current = true;
     setUsingWhisper(true);
     setPhase("fallback_whisper");
-
     Alert.alert(
       t("player.noSubtitlesTitle"),
       t("player.noSubtitlesMessage"),
       [{ text: t("player.noSubtitlesConfirm") }]
     );
     if (modelLoaded) startWhisper();
-  }, [subtitlePhase]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  }, [subtitlePhase, planTier, processYoutubeAudioPipeline]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── bg done 배너 자동 숨김 ───────────────────────────────────────────────
   useEffect(() => {
@@ -885,67 +1060,6 @@ export default function YoutubePlayerScreen() {
     });
   }, [setSubtitles]);
 
-  // ── Smooth progress bar animation ─────────────────────────────────────────
-  const animateTo = useCallback((target: number) => {
-    animTargetRef.current = target;
-    if (animFrameRef.current !== null) return;
-
-    const duration  = 400;
-    const startVal  = animProgressRef.current;
-    const startTime = performance.now();
-
-    function frame(now: number) {
-      const t = Math.min((now - startTime) / duration, 1);
-      const eased = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
-      const value = animProgressRef.current
-        + (animTargetRef.current - animProgressRef.current) * eased;
-      animProgressRef.current = value;
-      setSubtitleProgress(value);
-      if (t < 1) {
-        animFrameRef.current = requestAnimationFrame(frame);
-      } else {
-        animProgressRef.current = animTargetRef.current;
-        setSubtitleProgress(animTargetRef.current);
-        animFrameRef.current = null;
-      }
-    }
-    animFrameRef.current = requestAnimationFrame(frame);
-  }, []);
-
-  // ── Segmented progress crawl ───────────────────────────────────────────────
-  const startCrawl = useCallback((
-    fromVal: number,
-    toVal: number,
-    duration: number,
-    jobId: number,
-    onComplete?: () => void,
-  ) => {
-    const crawlStart = performance.now();
-    let crawlLastRender = 0;
-    const effectiveStart = Math.max(fromVal, animProgressRef.current);
-
-    const crawlFrame = () => {
-      const now     = performance.now();
-      const elapsed = now - crawlStart;
-      const t       = Math.min(elapsed / duration, 1);
-
-      if (jobId !== jobIdRef.current)             return;
-      if (animProgressRef.current > toVal)        return;
-      if (t >= 1)                                 { onComplete?.(); return; }
-
-      const value = effectiveStart + (toVal - effectiveStart) * t;
-
-      if (value > animProgressRef.current && now - crawlLastRender >= 200) {
-        animProgressRef.current = value;
-        setSubtitleProgress(value);
-        crawlLastRender = now;
-      }
-
-      requestAnimationFrame(crawlFrame);
-    };
-    requestAnimationFrame(crawlFrame);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
   // ── 번역 파이프라인 ──────────────────────────────────────────────────────
   const translateFromResult = useCallback(async (
     result: SubtitleFetchResult,
@@ -1098,51 +1212,23 @@ export default function YoutubePlayerScreen() {
       if (useServer) {
         // ── Server path (Standard/Pro) ────────────────────────────────────
         try {
-          const serverConfig = await loadServerBridgeConfig();
-          if (!serverConfig) throw new Error('Server not configured');
-
-          const stableId = makeStableVideoId(youtubeVideoId ?? 'yt_default');
-          // RULE 13: compute batchKey ONCE before try — never regenerate on retry
-          const batchKey = makeDeterministicYtKey(stableId, translateInput);
-
-          // ── [v19.2 FIX] remainingQuotaSeconds 계산 ─────────────────────
-          // YouTube는 오디오 없음 — 세그먼트 재생 시간 합산을 effectiveDuration으로 사용
-          const effectiveDurationSecs = inputFiltered.reduce(
-            (acc, seg) => acc + Math.max(0, seg.end - seg.start),
-            0,
-          );
-
-          const currentPlanState = usePlanStore.getState();
-          const remainingQuotaSeconds = Math.max(
-            currentPlanState.tier === 'free'
-              ? (currentPlanState.limits.dailyCapMinutes  - currentPlanState.usedMinutes) * 60
-              : (currentPlanState.limits.monthlyCapMinutes - currentPlanState.usedMinutes) * 60,
-            0,
-          );
-
-          const reservedSeconds = calcReservedSeconds(
-            effectiveDurationSecs,
-            remainingQuotaSeconds,
-            false, // YouTube는 배치 분할 없음 — 전체를 한 번에 처리
-          );
-
-          const serverResult = await serverTranslate({
-            segments: translateInput.map(s => ({ start: s.start, end: s.end, text: s.text })),
-            targetLanguage: langName,
-            videoId: batchKey,
-            reservedSeconds,          // [v19.2 FIX] 추가
-          });
-
-          // ── [BILLING] safeRecordUsage ─────────────────────────────────
-          if (serverResult.completed) {
-            safeRecordUsage(batchKey, serverResult.usageSeconds, recordUsage, recordGpuSeconds, planTier).catch(e => {
-              console.error('[YT_SCREEN] safeRecordUsage error:', e);
-            });
+          // Explicit plan guard (defensive — useServer already implies paid tier)
+          if (planTier !== 'standard' && planTier !== 'pro') {
+            throw new Error('[YT_SCREEN] GPU call blocked: tier=' + planTier);
           }
+
+          const ytServerResult = await processYoutubeServer(
+            youtubeVideoId ?? 'yt_default',
+            translateInput.map(s => ({ start: s.start, end: s.end, text: s.text })),
+            langName,
+            undefined,
+            () => cancelledRef.current,
+          );
+          // Billing is handled inside processYoutubeServer — do NOT call safeRecordUsage here
 
           // RULE 8: ±300ms tolerance matching (NOT index-based)
           translated = translateInput.map((item) => {
-            const match = serverResult.segments.find(
+            const match = ytServerResult.segments.find(
               s => Math.abs(s.start - item.start) < 0.3 && Math.abs(s.end - item.end) < 0.3
             );
             return { ...item, translated: match?.translated ?? item.text };
