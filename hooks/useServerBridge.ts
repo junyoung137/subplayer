@@ -111,6 +111,22 @@ function makeSegmentId(startSecs: number, endSecs: number): string {
   return `${Math.round(startSecs * 1000)}_${Math.round(endSecs * 1000)}`;
 }
 
+function getRemainingQuotaSeconds(): number {
+  const state = usePlanStore.getState();
+  const cap   = state.tier === 'free'
+    ? state.limits.dailyCapMinutes
+    : state.limits.monthlyCapMinutes;
+  return Math.max((cap - state.usedMinutes) * 60, 0);
+}
+
+function clampReservedSeconds(
+  requested: number,
+  remaining: number,
+): number {
+  const safe = Math.max(0, Math.min(requested, remaining));
+  return isFinite(safe) ? safe : 0;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // [CHECKPOINT]
 // ─────────────────────────────────────────────────────────────────────────────
@@ -272,13 +288,7 @@ export function useServerBridge() {
         }
 
         // ── remainingQuotaSeconds 계산 ────────────────────────────────────
-        const currentPlanState   = usePlanStore.getState();
-        const remainingQuotaSeconds = Math.max(
-          currentPlanState.tier === 'free'
-            ? (currentPlanState.limits.dailyCapMinutes  - currentPlanState.usedMinutes) * 60
-            : (currentPlanState.limits.monthlyCapMinutes - currentPlanState.usedMinutes) * 60,
-          0,
-        );
+        const remainingQuotaSeconds = getRemainingQuotaSeconds();
 
         // [LOG-1] batch 진입 시 quota 상태 로그 — quota 소진 흐름 추적
         console.log(
@@ -379,10 +389,13 @@ export function useServerBridge() {
           isLastPartialBatch,
         );
 
-        const reservedSeconds = calcReservedSeconds(
-          effectiveDurationSecs,
+        const reservedSeconds = clampReservedSeconds(
+          calcReservedSeconds(
+            effectiveDurationSecs,
+            remainingQuotaSeconds,
+            isLastPartialBatch,
+          ),
           remainingQuotaSeconds,
-          isLastPartialBatch,
         );
 
         const dynamicRatio = isLastPartialBatch
@@ -576,8 +589,8 @@ export function useServerBridge() {
   }> => {
 
     // GUARD: GPU billing only for Standard/Pro
-    if (tier !== 'standard' && tier !== 'pro') {
-      throw new Error('[processYoutubeServer] GPU translation requires Standard or Pro plan. tier=' + tier);
+    if (tier !== 'lite' && tier !== 'standard' && tier !== 'pro') {
+      throw new Error('[processYoutubeServer] GPU translation requires Lite, Standard or Pro plan. tier=' + tier);
     }
 
     const config = await loadServerBridgeConfig();
@@ -594,18 +607,15 @@ export function useServerBridge() {
     );
 
     // remainingQuotaSeconds from plan store
-    const currentPlanState = usePlanStore.getState();
-    const remainingQuotaSeconds = Math.max(
-      currentPlanState.tier === 'free'
-        ? (currentPlanState.limits.dailyCapMinutes - currentPlanState.usedMinutes) * 60
-        : (currentPlanState.limits.monthlyCapMinutes - currentPlanState.usedMinutes) * 60,
-      0,
-    );
+    const remainingQuotaSeconds = getRemainingQuotaSeconds();
 
-    const reservedSeconds = calcReservedSeconds(
-      effectiveDurationSecs,
+    const reservedSeconds = clampReservedSeconds(
+      calcReservedSeconds(
+        effectiveDurationSecs,
+        remainingQuotaSeconds,
+        false, // YouTube: no batch split, single pass
+      ),
       remainingQuotaSeconds,
-      false, // YouTube: no batch split, single pass
     );
 
     // Deterministic jobKey — same segments always produce same key (RULE 13)
@@ -665,8 +675,8 @@ export function useServerBridge() {
   }> => {
 
     // GUARD: Standard/Pro only — Free must never reach this
-    if (tier !== 'standard' && tier !== 'pro') {
-      throw new Error('[processYoutubeAudioServer] Requires Standard or Pro plan');
+    if (tier !== 'lite' && tier !== 'standard' && tier !== 'pro') {
+      throw new Error('[processYoutubeAudioServer] Requires Lite, Standard or Pro plan');
     }
 
     const config = await loadServerBridgeConfig();
@@ -696,13 +706,7 @@ export function useServerBridge() {
       const batchJobKey = `${stableId}_audio_batch_${batchIndex}`;
 
       // Quota check
-      const currentPlanState = usePlanStore.getState();
-      const remainingQuotaSeconds = Math.max(
-        currentPlanState.tier === 'free'
-          ? (currentPlanState.limits.dailyCapMinutes - currentPlanState.usedMinutes) * 60
-          : (currentPlanState.limits.monthlyCapMinutes - currentPlanState.usedMinutes) * 60,
-        0,
-      );
+      const remainingQuotaSeconds = getRemainingQuotaSeconds();
 
       if (remainingQuotaSeconds < HARD_MIN_EXECUTE_SECS) {
         console.warn('[processYoutubeAudioServer] Quota below hard min — stopping');
@@ -783,10 +787,13 @@ export function useServerBridge() {
         isLastPartialBatch,
       );
 
-      const reservedSeconds = calcReservedSeconds(
-        effectiveDurationSecs,
+      const reservedSeconds = clampReservedSeconds(
+        calcReservedSeconds(
+          effectiveDurationSecs,
+          remainingQuotaSeconds,
+          isLastPartialBatch,
+        ),
         remainingQuotaSeconds,
-        isLastPartialBatch,
       );
 
       let translateResult: Awaited<ReturnType<typeof serverTranslate>> | undefined;

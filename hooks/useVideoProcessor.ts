@@ -29,6 +29,7 @@ import { saveSubtitles } from "../services/subtitleDB";
 import { cancelFgInference } from "../services/gemmaTranslationService";
 import { pendingSubtitleRef } from "../utils/pendingSubtitle";
 import { usePlanStore, PlanTier } from '../store/usePlanStore';
+import { usePurchaseStore } from '../store/usePurchaseStore';
 import { useServerBridge } from './useServerBridge';
 import { useTranslation } from 'react-i18next';
 import { getVideoDuration } from '../services/audioChunker';
@@ -190,6 +191,11 @@ export function useVideoProcessor() {
       };
 
       await syncFromSettings();
+      // Revalidate plan with RevenueCat if stale (> 6h) — fire-and-forget.
+      // Does not block processing — plan correction happens in background.
+      // Trade-off: tampered plan remains usable for up to 6 hours maximum,
+      // then corrected automatically. UX-first, not hard enforcement.
+      usePurchaseStore.getState().revalidatePlanIfStale().catch(() => {});
 
       // ── 2단계 gating ───────────────────────────────────────────────────────
 
@@ -266,7 +272,7 @@ export function useVideoProcessor() {
       const { sourceLanguage: src, targetLanguage: tgt, thermalProtection: tp } = settingsRef.current;
 
       try {
-        const useServer = planState.tier === 'standard' || planState.tier === 'pro';
+        const useServer = planState.tier === 'lite' || planState.tier === 'standard' || planState.tier === 'pro';
 
         const { subtitles, translationSkipped } = useServer
           ? await processVideoServer(

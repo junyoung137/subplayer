@@ -222,6 +222,7 @@ export function classifyServerError(err: any): ServerErrorClass {
 
 const USAGE_DEDUP_KEY   = 'usage_dedup_v1';
 const DEDUP_TTL_MS      = 72 * 60 * 60 * 1000;
+const CHECKPOINT_TTL_MS = 72 * 60 * 60 * 1000; // 72h — must match useServerBridge.ts
 const DEDUP_MAX_ENTRIES = 5000;
 
 /**
@@ -281,6 +282,74 @@ export async function hydrateUsageDedup(): Promise<void> {
     console.warn('[UsageDedup] Hydrate failed (non-fatal):', e);
   } finally {
     _hydrated = true;
+  }
+}
+
+/**
+ * ensureUsageDedupHydrated — eager hydration entry point.
+ * Call at app startup before any billing can occur.
+ * Fully idempotent — safe to call multiple times.
+ */
+export async function ensureUsageDedupHydrated(): Promise<void> {
+  if (_hydrated) return;
+
+  if (!_hydratePromise) {
+    _hydratePromise = hydrateUsageDedup(); // store Promise; hydrateUsageDedup() does not set it internally
+  }
+
+  await _hydratePromise; // always await — no second if-check
+}
+
+/**
+ * purgeExpiredCheckpoints — proactive TTL scan for batch checkpoints.
+ *
+ * loadBatchCheckpoint() enforces TTL at read time (lazy).
+ * This function enforces TTL at startup time (eager) so stale entries
+ * never accumulate when the app is not reopened after a crash.
+ *
+ * Safe to call multiple times — fully idempotent.
+ * Fire-and-forget: call with .catch(() => {}) at app startup.
+ *
+ * Key pattern: `server_batch_ckpt_*`
+ * TTL: CHECKPOINT_TTL_MS (72 hours) — must stay in sync with
+ *      useServerBridge.ts CHECKPOINT_TTL_MS constant.
+ */
+export async function purgeExpiredCheckpoints(): Promise<void> {
+  try {
+    const allKeys = await AsyncStorage.getAllKeys();
+    const ckptKeys = allKeys.filter(k => k.startsWith('server_batch_ckpt_'));
+    if (ckptKeys.length === 0) return;
+
+    const pairs = await AsyncStorage.multiGet(ckptKeys);
+    const now = Date.now();
+    const toDelete: string[] = [];
+
+    for (const [key, raw] of pairs) {
+      if (raw === null) {
+        toDelete.push(key);
+        continue;
+      }
+      try {
+        const parsed = JSON.parse(raw) as { completedAt?: number };
+        const completedAt = parsed?.completedAt;
+        if (
+          typeof completedAt !== 'number' ||
+          completedAt <= 0 ||
+          now - completedAt > CHECKPOINT_TTL_MS
+        ) {
+          toDelete.push(key);
+        }
+      } catch {
+        toDelete.push(key); // unparseable → treat as expired
+      }
+    }
+
+    if (toDelete.length > 0) {
+      await AsyncStorage.multiRemove(toDelete);
+      console.log(`[CheckpointPurge] Removed ${toDelete.length} expired entries`);
+    }
+  } catch (e) {
+    console.warn('[CheckpointPurge] purgeExpiredCheckpoints failed (non-fatal):', e);
   }
 }
 
@@ -407,6 +476,25 @@ const RETRY_DELAY_BASE_MS = 1000;
  * RATE_LIMIT_MAX_DELAY_MS — 429 Retry-After 상한 [FIX-14 v14]
  */
 const RATE_LIMIT_MAX_DELAY_MS = 30_000;
+
+/**
+ * RETRY_JITTER_FACTOR — jitter range as a fraction of base delay [FIX-17]
+ * Full-jitter: actual delay = base * random(1 - FACTOR, 1 + FACTOR)
+ * 0.3 → ±30% of computed delay — enough to desync clients, small enough
+ * to stay within the same order of magnitude as the intended delay.
+ */
+const RETRY_JITTER_FACTOR = 0.3;
+
+/**
+ * addJitter — applies full-jitter to a computed delay value.
+ * Result is always positive and capped at RATE_LIMIT_MAX_DELAY_MS.
+ * @param delayMs — base delay before jitter
+ * @returns jittered delay in milliseconds
+ */
+function addJitter(delayMs: number): number {
+  const factor = 1 + (Math.random() * 2 - 1) * RETRY_JITTER_FACTOR;
+  return Math.min(Math.max(0, Math.round(delayMs * factor)), RATE_LIMIT_MAX_DELAY_MS);
+}
 
 let _config: ServerBridgeConfig | null = null;
 
@@ -647,7 +735,7 @@ async function fetchWithRetry(
         const retryAfterSecs   = retryAfterHeader ? parseFloat(retryAfterHeader) : NaN;
         const retryDelayMs = !isNaN(retryAfterSecs)
           ? Math.min(retryAfterSecs * 1000, RATE_LIMIT_MAX_DELAY_MS)
-          : Math.min(RETRY_DELAY_BASE_MS * Math.pow(2, attempt), RATE_LIMIT_MAX_DELAY_MS);
+          : addJitter(Math.min(RETRY_DELAY_BASE_MS * Math.pow(2, attempt), RATE_LIMIT_MAX_DELAY_MS));
         console.warn(
           `[ServerBridge] 429 rate limit — waiting ${retryDelayMs}ms ` +
           `(Retry-After: ${retryAfterHeader ?? 'none'})`,
@@ -685,7 +773,7 @@ async function fetchWithRetry(
     }
 
     if (attempt < retries) {
-      await new Promise(r => setTimeout(r, RETRY_DELAY_BASE_MS * Math.pow(2, attempt)));
+      await new Promise(r => setTimeout(r, addJitter(RETRY_DELAY_BASE_MS * Math.pow(2, attempt))));
     }
   }
   throw lastError;

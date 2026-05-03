@@ -19,7 +19,7 @@ import { onAuthStateChanged } from "../services/authService";
 import { firestore } from "../services/firebase";
 import { useAuthStore } from "../store/useAuthStore";
 import { usePlanStore } from '../store/usePlanStore';
-import { hydrateUsageDedup } from '../services/serverBridgeService';
+import { hydrateUsageDedup, ensureUsageDedupHydrated, purgeExpiredCheckpoints } from '../services/serverBridgeService';
 
 export default function RootLayout() {
   const { t } = useTranslation();
@@ -32,6 +32,8 @@ export default function RootLayout() {
   const isLoading  = useAuthStore((s) => s.isLoading);
 
   useEffect(() => {
+    ensureUsageDedupHydrated().catch(() => {});
+    purgeExpiredCheckpoints().catch(() => {});
     hydrate().then(() => {
       // Warming order — do not reorder:
       // 1. hydrateUsageDedup: restore dedup Map from disk (fire-and-forget).
@@ -72,10 +74,10 @@ export default function RootLayout() {
         // isConfigured:true — so PricingScreen poll won't fire prematurely.
         await purchaseStore.configure(REVENUECAT_ANDROID_API_KEY);
 
-        // Sync subscriber status on every app launch (after configure is complete)
-        Purchases.getCustomerInfo()
-          .then(info => purchaseStore.syncPlanFromCustomerInfo(info))
-          .catch(() => {});
+        // Revalidate plan if lastVerifiedAt is stale (> 6h) or null (new install).
+        // Replaces the previous unconditional getCustomerInfo() call —
+        // revalidatePlanIfStale() fetches only when needed, avoiding duplicate API calls.
+        purchaseStore.revalidatePlanIfStale().catch(() => {});
       } catch (e) {
         // configure() can throw if the API key is invalid or the native module
         // is not linked. Log clearly so the cause is immediately visible.

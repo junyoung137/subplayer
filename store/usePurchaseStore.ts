@@ -30,6 +30,7 @@ interface PurchaseStore {
   purchasePackage: (pkg: PurchasesPackage) => Promise<void>;
   restorePurchases: () => Promise<void>;
   syncPlanFromCustomerInfo: (info: CustomerInfo) => void;
+  revalidatePlanIfStale: () => Promise<void>;
   clearError: () => void;
 }
 
@@ -212,10 +213,55 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
     useSettingsStore.getState().update({
       plan: resolvedTier,
       planExpiresAt: expiryMs,
+      lastVerifiedAt: Date.now(),
     });
 
     if (__DEV__) {
       console.log("[RevenueCat] syncPlan →", resolvedTier, "expiryMs:", expiryMs);
+    }
+  },
+
+  revalidatePlanIfStale: async () => {
+    // Revalidate plan with RevenueCat if lastVerifiedAt is stale or missing.
+    //
+    // Stale conditions (either triggers a fetch):
+    //   - lastVerifiedAt === null  → never verified (cold start, new install)
+    //   - age > 6 hours            → verified too long ago
+    //
+    // This function consolidates the startup getCustomerInfo() call that
+    // previously ran unconditionally — fetching only when needed avoids
+    // duplicate API calls on every app launch.
+    //
+    // Fire-and-forget safe — never throws, never blocks the caller.
+    // Security note: plan tampering is corrected within 6 hours maximum.
+    // Hard enforcement is the server's responsibility, not the client's.
+    try {
+      if (!get().isConfigured) return;
+
+      const lastVerifiedAt = useSettingsStore.getState().lastVerifiedAt;
+      const PLAN_REVALIDATE_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 hours
+
+      const isStale =
+        lastVerifiedAt === null ||
+        Date.now() - lastVerifiedAt > PLAN_REVALIDATE_INTERVAL_MS;
+
+      if (!isStale) {
+        console.log('[RevenueCat] plan fresh — skipping revalidation');
+        return;
+      }
+
+      console.log(
+        '[RevenueCat] plan stale or never verified — revalidating. ' +
+        `lastVerifiedAt: ${lastVerifiedAt ?? 'null'}`,
+      );
+
+      const info = await Purchases.getCustomerInfo();
+      get().syncPlanFromCustomerInfo(info);
+
+      console.log('[RevenueCat] revalidatePlanIfStale complete');
+    } catch (e) {
+      // Non-fatal — stale plan is better than crashing
+      console.warn('[RevenueCat] revalidatePlanIfStale failed (non-fatal):', e);
     }
   },
 

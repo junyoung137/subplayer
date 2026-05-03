@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Localization from "expo-localization";
+import * as SecureStore from 'expo-secure-store';
 
 export type SubtitleStyleType = "outline" | "pill" | "bar";
 
@@ -27,6 +28,13 @@ export interface Settings {
   planExpiresAt: number | null;
   monthlyUsedMinutes: number;
   monthlyResetAt: number | null;
+  /** Timestamp (ms) of last successful RevenueCat server verification.
+   *  MUST be updated by the caller (syncPlanFromCustomerInfo) alongside
+   *  plan/planExpiresAt on every successful CustomerInfo fetch.
+   *  Example: update({ plan: 'pro', planExpiresAt: expiry, lastVerifiedAt: Date.now() })
+   *  Downstream logic should treat plan as stale if now - lastVerifiedAt > threshold.
+   */
+  lastVerifiedAt: number | null;
 }
 
 interface SettingsStore extends Settings {
@@ -61,9 +69,45 @@ const DEFAULTS: Settings = {
   planExpiresAt: null,
   monthlyUsedMinutes: 0,
   monthlyResetAt: null,
+  lastVerifiedAt: null,
 };
 
 const STORAGE_KEY = "realtimesub_settings";
+
+// ── Secure storage — plan fields only ────────────────────────────────────────
+// plan, planExpiresAt, lastVerifiedAt are stored ONLY in SecureStore (encrypted).
+// They are NEVER written to AsyncStorage — this is intentional and must not change.
+// monthlyUsedMinutes and monthlyResetAt remain in AsyncStorage (usage cache only).
+//
+// Security posture: protects against low-effort attacks (direct AsyncStorage
+// read/write, adb backup). Does NOT protect against runtime patching (Frida etc.)
+// or JS bundle modification. Server-side revalidation via RevenueCat remains the
+// true security boundary — lastVerifiedAt enables staleness detection for that purpose.
+const SECURE_PLAN_KEY = 'secure_plan_info';
+
+interface SecurePlanData {
+  plan: Settings['plan'];
+  planExpiresAt: number | null;
+  lastVerifiedAt: number | null;
+}
+
+async function loadSecurePlan(): Promise<SecurePlanData | null> {
+  try {
+    const raw = await SecureStore.getItemAsync(SECURE_PLAN_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw) as SecurePlanData;
+  } catch {
+    return null;
+  }
+}
+
+async function saveSecurePlan(data: SecurePlanData): Promise<void> {
+  try {
+    await SecureStore.setItemAsync(SECURE_PLAN_KEY, JSON.stringify(data));
+  } catch (e) {
+    console.warn('[SecurePlan] saveSecurePlan failed (non-fatal):', e);
+  }
+}
 
 export const useSettingsStore = create<SettingsStore>((set, get) => ({
   ...DEFAULTS,
@@ -72,40 +116,91 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   hydrate: async () => {
     try {
       const raw = await AsyncStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        const saved = JSON.parse(raw) as Partial<Settings>;
-        set({ ...DEFAULTS, ...saved, timingOffset: 0, hydrated: true });
-      } else {
-        set({ hydrated: true });
+      const saved = raw ? (JSON.parse(raw) as Partial<Settings>) : {};
+
+      // Load plan fields from SecureStore — SecureStore is authoritative.
+      // Fall back to AsyncStorage values for first-run migration only
+      // (existing installs that have not yet written to SecureStore).
+      const securePlan = await loadSecurePlan();
+
+      // One-time migration: if SecureStore is empty but AsyncStorage has plan data,
+      // write it to SecureStore now so all subsequent reads use SecureStore only.
+      // Condition uses 'in' operator — checks KEY EXISTENCE, not value truthiness.
+      // This is intentional: plan: 'free' is valid and must also be migrated.
+      if (securePlan === null && 'plan' in saved) {
+        saveSecurePlan({
+          plan:           saved.plan!,
+          planExpiresAt:  'planExpiresAt' in saved ? (saved.planExpiresAt ?? null) : null,
+          lastVerifiedAt: null,
+        });
       }
+
+      set({
+        ...DEFAULTS,
+        ...saved,
+        // SecureStore is authoritative — fallback to AsyncStorage only for migration
+        plan:           securePlan?.plan           ?? saved.plan           ?? DEFAULTS.plan,
+        planExpiresAt:  securePlan?.planExpiresAt  ?? saved.planExpiresAt  ?? DEFAULTS.planExpiresAt,
+        lastVerifiedAt: securePlan?.lastVerifiedAt ?? null,
+        timingOffset: 0,
+        hydrated: true,
+      });
     } catch {
-      set({ hydrated: true });
+      // On any error: apply safe defaults and mark hydrated so the app
+      // does not block on a failed storage read.
+      set({ ...DEFAULTS, hydrated: true });
     }
   },
 
   update: (partial) => {
     set(partial);
     const current = get();
-    const toSave: Settings = {
-      whisperModel: current.whisperModel,
-      sourceLanguage: current.sourceLanguage,
-      targetLanguage: current.targetLanguage,
-      chunkDuration: current.chunkDuration,
-      subtitleFontSize: current.subtitleFontSize,
-      subtitleColor: current.subtitleColor,
-      subtitleOpacity: current.subtitleOpacity,
-      showOriginal: current.showOriginal,
-      subtitleMode: current.subtitleMode,
-      timingOffset: current.timingOffset,
+
+    // Persist plan fields to SecureStore whenever any plan field changes.
+    // Uses 'in' operator (not ??) to correctly handle explicit null assignments
+    // e.g. update({ planExpiresAt: null }) for lifetime purchases must write null,
+    // not be silently skipped.
+    // Partial values take priority over current state to avoid race conditions
+    // when update() is called multiple times in rapid succession (e.g. purchase flow).
+    if (
+      'plan' in partial ||
+      'planExpiresAt' in partial ||
+      'lastVerifiedAt' in partial
+    ) {
+      saveSecurePlan({
+        plan:           'plan'           in partial ? partial.plan!                  : current.plan,
+        planExpiresAt:  'planExpiresAt'  in partial ? (partial.planExpiresAt  ?? null) : current.planExpiresAt,
+        lastVerifiedAt: 'lastVerifiedAt' in partial ? (partial.lastVerifiedAt ?? null) : current.lastVerifiedAt,
+      });
+    }
+
+    // AsyncStorage stores NON-plan settings only.
+    // plan, planExpiresAt, lastVerifiedAt are intentionally EXCLUDED —
+    // they live in SecureStore only. Do NOT add them back here.
+    const toSave = {
+      whisperModel:        current.whisperModel,
+      sourceLanguage:      current.sourceLanguage,
+      targetLanguage:      current.targetLanguage,
+      chunkDuration:       current.chunkDuration,
+      subtitleFontSize:    current.subtitleFontSize,
+      subtitleColor:       current.subtitleColor,
+      subtitleOpacity:     current.subtitleOpacity,
+      showOriginal:        current.showOriginal,
+      subtitleMode:        current.subtitleMode,
+      timingOffset:        current.timingOffset,
       subtitlePositionPct: current.subtitlePositionPct,
-      thermalProtection: current.thermalProtection,
-      subtitleStyle: current.subtitleStyle,
-      interfaceLanguage: current.interfaceLanguage,
-      plan: current.plan,
-      planExpiresAt: current.planExpiresAt,
-      monthlyUsedMinutes: current.monthlyUsedMinutes,
-      monthlyResetAt: current.monthlyResetAt,
+      thermalProtection:   current.thermalProtection,
+      subtitleStyle:       current.subtitleStyle,
+      interfaceLanguage:   current.interfaceLanguage,
+      monthlyUsedMinutes:  current.monthlyUsedMinutes,
+      monthlyResetAt:      current.monthlyResetAt,
+      // plan, planExpiresAt, lastVerifiedAt intentionally NOT included
     };
-    AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ ...toSave, ...partial }));
+
+    // Strip plan fields from partial before spreading into AsyncStorage write.
+    // Prevents plan data from leaking back into AsyncStorage even if partial
+    // contains them (e.g. during purchase flow).
+    const { plan: _p, planExpiresAt: _pe, lastVerifiedAt: _lv, ...safePartial } = partial as any;
+    AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ ...toSave, ...safePartial }));
   },
 }));
