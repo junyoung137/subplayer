@@ -29,6 +29,7 @@ import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
 import { parseYoutubeId } from "../utils/youtubeUtils";
 import { FolderOpen, X, Check } from 'lucide-react-native';
+import { getThumbnailAsync } from 'expo-video-thumbnails';
 
 // ── 파일 URI 안정화 ───────────────────────────────────────────────────────────
 async function ensureStableFileUri(uri: string, filename: string): Promise<string | null> {
@@ -65,7 +66,7 @@ async function ensureStableFileUri(uri: string, filename: string): Promise<strin
 interface UrlInputModalProps {
   visible: boolean;
   onClose: () => void;
-  onLocalFilePicked: (uri: string, name: string, genre: string, subtitleUri?: string) => void;
+  onLocalFilePicked: (uri: string, name: string, genre: string, subtitleUri?: string, duration?: number) => void;
   onUrlPicked: (videoId: string, title: string, isYoutube: boolean, genre?: string, subtitleUri?: string) => void;
 }
 
@@ -114,8 +115,19 @@ export function UrlInputModal({
         Alert.alert(t("url.error"), t("url.fileCopyError"));
         return;
       }
+      let probedDuration: number | undefined;
+      try {
+        // expo-video-thumbnails throws if requested time exceeds duration.
+        // Probe at 600s (10 min) + 1ms to determine if video is longer than 10 min.
+        await getThumbnailAsync(stableUri, { time: 600001 });
+        // If we reach here, video is longer than 10 minutes
+        probedDuration = 601;
+      } catch {
+        // Video is 10 minutes or shorter — no restriction
+        probedDuration = undefined;
+      }
       onClose();
-      onLocalFilePicked(stableUri, file.name, selectedGenre, subtitleUri ?? undefined);
+      onLocalFilePicked(stableUri, file.name, selectedGenre, subtitleUri ?? undefined, probedDuration);
     } catch (e) {
       Alert.alert(t("url.error"), t("url.fileOpenError") + String(e));
     } finally {
@@ -309,7 +321,7 @@ export function UrlInputModal({
                     style={styles.input}
                     value={urlInput}
                     onChangeText={(v) => { setUrlInput(v); setUrlError(null); }}
-                    placeholder="https://youtube.com/watch?v=..."
+                    placeholder=""
                     placeholderTextColor="#444"
                     autoCorrect={false}
                     autoCapitalize="none"

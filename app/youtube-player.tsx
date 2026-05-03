@@ -437,6 +437,47 @@ export default function YoutubePlayerScreen() {
   const videoHeight  = Math.round(screenWidth * (9 / 16));
   const playerHeight = isLandscape ? screenHeight : videoHeight;
 
+  // ── Free plan: YouTube 10-minute duration gate ─────────────────────────────
+  useEffect(() => {
+    if (duration <= 0) return;                         // not yet loaded
+    if (isDirectMode) return;                          // direct mode: no restriction
+    const currentTier = usePlanStore.getState().tier;
+    if (currentTier !== 'free') return;               // only free plan
+    if (duration <= 600) return;                      // 10 min or under: allowed
+
+    // duration > 600s on free plan → block
+    Alert.alert(
+      t('pricing.freeDurationLimitTitle'),
+      t('pricing.freeDurationLimitMsg'),
+      [
+        {
+          text: t('common.cancel'),
+          style: 'cancel',
+          onPress: () => {
+            jobIdRef.current++;
+            cancelledRef.current = true;
+            cancelFgInference();
+            clearSubtitles();
+            setPlaying(false);
+            router.back();
+          },
+        },
+        {
+          text: t('plan.viewPlans'),
+          onPress: () => {
+            jobIdRef.current++;
+            cancelledRef.current = true;
+            cancelFgInference();
+            clearSubtitles();
+            setPlaying(false);
+            router.replace('/pricing');
+          },
+        },
+      ],
+      { cancelable: false }
+    );
+  }, [duration, isDirectMode]);
+
   // ── 라우팅 가드 ────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!youtubeVideoId) router.back();

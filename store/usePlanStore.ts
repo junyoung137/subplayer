@@ -18,7 +18,7 @@ if (__DEV__) {
 }
 
 // ── TYPES ───────────────────────────────────────────
-export type PlanTier = 'free' | 'standard' | 'pro';
+export type PlanTier = 'free' | 'lite' | 'standard' | 'pro';
 
 export interface PlanLimits {
   dailyCapMinutes: number;
@@ -29,7 +29,8 @@ export interface PlanLimits {
 
 // readonly 제거 (타입 충돌 방지)
 const PLAN_LIMITS: Record<PlanTier, PlanLimits> = {
-  free:     { dailyCapMinutes: 20,   monthlyCapMinutes: 0,    useServerGpu: false, maxConcurrentJobs: 1 },
+  free:     { dailyCapMinutes: 60,   monthlyCapMinutes: 0,    useServerGpu: false, maxConcurrentJobs: 1 },
+  lite:     { dailyCapMinutes: 0,    monthlyCapMinutes: 600,  useServerGpu: true,  maxConcurrentJobs: 1 },
   standard: { dailyCapMinutes: 0,    monthlyCapMinutes: 1200, useServerGpu: true,  maxConcurrentJobs: 1 },
   pro:      { dailyCapMinutes: 0,    monthlyCapMinutes: 2400, useServerGpu: true,  maxConcurrentJobs: 1 },
 };

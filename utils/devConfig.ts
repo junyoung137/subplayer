@@ -18,7 +18,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const KEY = '__dev__config_v1';
 
-export type DevPlanOverride = 'free' | 'standard' | 'pro' | null;
+export type DevPlanOverride = 'free' | 'lite' | 'standard' | 'pro' | null;
 
 export interface DevConfigState {
   devModeEnabled: boolean;
@@ -98,7 +98,7 @@ export const DevConfig = {
 
   // ── Getter aliases — called by DevModePanel and usePlanStore ─────────────────
 
-  getDevPlan(): 'free' | 'standard' | 'pro' | null {
+  getDevPlan(): 'free' | 'lite' | 'standard' | 'pro' | null {
     if (!__DEV__) return null;
     return _state.planOverride ?? null;
   },

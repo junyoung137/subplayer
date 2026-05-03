@@ -25,6 +25,7 @@ import { pendingSubtitleRef } from "../utils/pendingSubtitle";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { usePlayerStore } from "../store/usePlayerStore";
 import { useSettingsStore } from "../store/useSettingsStore";
+import { usePlanStore } from "../store/usePlanStore";
 import { LANGUAGES } from "../constants/languages";
 import { UrlInputModal } from "../components/UrlInputModal";
 import { DirectPlayModal } from "../components/DirectPlayModal";
@@ -818,7 +819,20 @@ export default function HomeScreen() {
   }, []);
 
   // ── 번역 모드: 로컬 파일 선택 후 처리 ────────────────────────────────────
-  const handleLocalFilePicked = async (stableUri: string, name: string, genre: string, subtitleUri?: string) => {
+  const handleLocalFilePicked = async (stableUri: string, name: string, genre: string, subtitleUri?: string, duration?: number) => {
+    // Free plan: block videos longer than 10 minutes in translate mode
+    const currentTier = usePlanStore.getState().tier;
+    if (currentTier === 'free' && duration != null && duration > 600) {
+      Alert.alert(
+        t('pricing.freeDurationLimitTitle'),
+        t('pricing.freeDurationLimitMsg'),
+        [
+          { text: t('common.cancel'), style: 'cancel' },
+          { text: t('plan.viewPlans'), onPress: () => router.push('/pricing') },
+        ]
+      );
+      return;
+    }
     const fileSize = await getFileSize(stableUri);
     const thumbUri = (await fetchThumbnail(stableUri, undefined)) ?? undefined;
     const autoCategory =
@@ -944,6 +958,19 @@ export default function HomeScreen() {
     setVideo(stableUri, file.name);
     pendingFileRef.current = { uri: stableUri, name: file.name };
     pendingSubtitleRef.current = null;
+    // Free plan: block videos longer than 10 minutes in translate mode
+    const currentTier = usePlanStore.getState().tier;
+    if (currentTier === 'free' && file.duration != null && file.duration > 600) {
+      Alert.alert(
+        t('pricing.freeDurationLimitTitle'),
+        t('pricing.freeDurationLimitMsg'),
+        [
+          { text: t('common.cancel'), style: 'cancel' },
+          { text: t('plan.viewPlans'), onPress: () => router.push('/pricing') },
+        ]
+      );
+      return;
+    }
     setLangModalVisible(true);
   };
 

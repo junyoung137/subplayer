@@ -12,7 +12,7 @@ import { useTranslation } from "react-i18next";
 import { ChevronLeft, Check } from "lucide-react-native";
 import { useCurrentPlan } from "../store/usePlanStore";
 
-type PlanId = "free" | "standard" | "pro";
+type PlanId = "free" | "lite" | "standard" | "pro";
 
 interface Plan {
   id: PlanId;
@@ -35,6 +35,15 @@ export default function PricingScreen() {
       features: [
         t("pricing.freeF1"),
         t("pricing.freeF2"),
+      ],
+    },
+    {
+      id: "lite",
+      labelKey: "Lite",
+      price: "$4.99",
+      features: [
+        t("pricing.liteF1"),
+        t("pricing.liteF2"),
       ],
     },
     {
@@ -84,6 +93,7 @@ export default function PricingScreen() {
             style={[
               styles.card,
               isActive && plan.id === "free"      && styles.cardActiveFree,
+              isActive && plan.id === "lite"      && styles.cardActiveLite,
               isActive && plan.id === "standard"  && styles.cardActiveStandard,
               isActive && plan.id === "pro"       && styles.cardActivePro,
             ]}
@@ -104,6 +114,7 @@ export default function PricingScreen() {
                     color={
                       !isActive ? "#555"
                       : plan.id === "free"     ? "#2d7a5e"
+                      : plan.id === "lite"     ? "#6a5aaa"
                       : plan.id === "standard" ? "#5a82b0"
                       : "#9a7a3a"
                     }
@@ -117,13 +128,14 @@ export default function PricingScreen() {
               style={[
                 styles.actionBtn,
                 isActive && plan.id === "free"      && styles.actionBtnActiveFree,
+                isActive && plan.id === "lite"      && styles.actionBtnActiveLite,
                 isActive && plan.id === "standard"  && styles.actionBtnActiveStandard,
                 isActive && plan.id === "pro"       && styles.actionBtnActivePro,
               ]}
               onPress={() => handleSelect(plan)}
               disabled={isActive}
             >
-              <Text style={[styles.actionBtnText, isActive && plan.id === "free" && styles.actionBtnTextActiveFree, isActive && plan.id === "standard" && styles.actionBtnTextActiveStandard, isActive && plan.id === "pro" && styles.actionBtnTextActivePro]}>
+              <Text style={[styles.actionBtnText, isActive && plan.id === "free" && styles.actionBtnTextActiveFree, isActive && plan.id === "lite" && styles.actionBtnTextActiveLite, isActive && plan.id === "standard" && styles.actionBtnTextActiveStandard, isActive && plan.id === "pro" && styles.actionBtnTextActivePro]}>
                 {isActive
                   ? t("pricing.currentPlan")
                   : plan.id === "free"
@@ -164,6 +176,7 @@ const styles = StyleSheet.create({
     gap: 14,
   },
   cardActiveFree:     { borderColor: "#2d7a5e", backgroundColor: "#0a1510" },
+  cardActiveLite:     { borderColor: "#6a5aaa", backgroundColor: "#0e0b1a" },
   cardActiveStandard: { borderColor: "#5a82b0", backgroundColor: "#0b1525" },
   cardActivePro:      { borderColor: "#9a7a3a", backgroundColor: "#141000" },
 
@@ -188,10 +201,12 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   actionBtnActiveFree:     { backgroundColor: "#0c1a12", borderWidth: 1, borderColor: "#2d7a5e" },
+  actionBtnActiveLite:     { backgroundColor: "#130f20", borderWidth: 1, borderColor: "#6a5aaa" },
   actionBtnActiveStandard: { backgroundColor: "#0c1a30", borderWidth: 1, borderColor: "#5a82b0" },
   actionBtnActivePro:      { backgroundColor: "#181200", borderWidth: 1, borderColor: "#9a7a3a" },
   actionBtnText: { color: "#fff", fontWeight: "600", fontSize: 14 },
   actionBtnTextActiveFree:     { color: "#2d7a5e" },
+  actionBtnTextActiveLite:     { color: "#6a5aaa" },
   actionBtnTextActiveStandard: { color: "#5a82b0" },
   actionBtnTextActivePro:      { color: "#9a7a3a" },
 

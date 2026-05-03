@@ -98,7 +98,7 @@ function DevModePanelInner() {
       endpointOverride: endpointInput.trim() || null,
       apiKeyOverride: apiKeyInput.trim() || null,
     });
-    Alert.alert('Dev Mode', 'Server config saved. Reload the app if config was already cached.');
+    Alert.alert('개발 모드', '서버 설정이 저장되었습니다. 설정이 캐시된 경우 앱을 재시작하세요.');
   }, [DevConfig, endpointInput, apiKeyInput]);
 
   const simulateExpired = useCallback(async () => {
@@ -126,7 +126,7 @@ function DevModePanelInner() {
   if (!devState) {
     return (
       <View style={s.container}>
-        <Text style={s.loadingText}>Loading dev config...</Text>
+        <Text style={s.loadingText}>개발 설정 불러오는 중...</Text>
       </View>
     );
   }
@@ -139,15 +139,15 @@ function DevModePanelInner() {
     ? devState.expiresAtOverride
     : planExpiresAt;
 
-  const planColors: Record<string, string> = { free: '#64748b', standard: '#6366f1', pro: '#f59e0b' };
+  const planColors: Record<string, string> = { free: '#64748b', lite: '#7a5ab0', standard: '#6366f1', pro: '#f59e0b' };
 
   return (
     <ScrollView style={s.container} showsVerticalScrollIndicator={false}>
       {/* ── Header ── */}
       <View style={s.header}>
-        <Text style={s.headerTitle}>🛠 Developer Test Mode</Text>
+        <Text style={s.headerTitle}>🛠 개발자 테스트 모드</Text>
         <View style={s.headerRow}>
-          <Text style={s.headerSub}>v2 — triple production lock active</Text>
+          <Text style={s.headerSub}>v2 — 프로덕션 삼중 잠금 활성</Text>
           <Switch
             value={devState.devModeEnabled}
             onValueChange={toggleDevMode}
@@ -159,33 +159,33 @@ function DevModePanelInner() {
 
       {/* ── [STATUS] Current state ── */}
       <View style={s.section}>
-        <Text style={s.sectionTitle}>STATUS</Text>
+        <Text style={s.sectionTitle}>현황</Text>
         <View style={s.statusGrid}>
           <StatusCell label="Plan" value={tier.toUpperCase()} color={planColors[tier] ?? '#888'} />
           <StatusCell label="Used" value={`${effectiveUsed.toFixed(1)} min`} color="#22c55e" />
           <StatusCell
-            label={tier === 'free' ? 'Daily Cap' : 'Monthly Cap'}
+            label={tier === 'free' ? '일일 한도' : '월 한도'}
             value={tier === 'free' ? `${limits.dailyCapMinutes} min` : `${limits.monthlyCapMinutes / 60} h`}
             color="#94a3b8"
           />
           <StatusCell
-            label="Expires"
+            label="만료"
             value={effectiveExpires
-              ? (Date.now() > effectiveExpires ? 'EXPIRED' : new Date(effectiveExpires).toLocaleDateString())
-              : 'Never'}
+              ? (Date.now() > effectiveExpires ? '만료됨' : new Date(effectiveExpires).toLocaleDateString())
+              : '없음'}
             color={effectiveExpires && Date.now() > effectiveExpires ? '#ef4444' : '#94a3b8'}
           />
         </View>
         {!devState.devModeEnabled && (
-          <Text style={s.disabledNote}>Enable dev mode above to activate overrides</Text>
+          <Text style={s.disabledNote}>위에서 개발 모드를 켜면 오버라이드가 활성화됩니다</Text>
         )}
       </View>
 
       {/* ── [PLAN] Plan override ── */}
       <View style={s.section}>
-        <Text style={s.sectionTitle}>PLAN OVERRIDE</Text>
+        <Text style={s.sectionTitle}>플랜 오버라이드</Text>
         <View style={s.chipRow}>
-          {(['free', 'standard', 'pro', null] as const).map(plan => (
+          {(['free', 'lite', 'standard', 'pro', null] as const).map(plan => (
             <TouchableOpacity
               key={String(plan)}
               style={[s.chip, devState.planOverride === plan && s.chipActive]}
@@ -193,7 +193,7 @@ function DevModePanelInner() {
               disabled={!devState.devModeEnabled}
             >
               <Text style={[s.chipText, devState.planOverride === plan && s.chipTextActive]}>
-                {plan === null ? 'Real' : plan.charAt(0).toUpperCase() + plan.slice(1)}
+                {plan === null ? '실제' : plan.charAt(0).toUpperCase() + plan.slice(1)}
               </Text>
             </TouchableOpacity>
           ))}
@@ -202,13 +202,13 @@ function DevModePanelInner() {
 
       {/* ── [USAGE] Usage simulator ── */}
       <View style={s.section}>
-        <Text style={s.sectionTitle}>USAGE SIMULATOR</Text>
+        <Text style={s.sectionTitle}>사용량 시뮬레이터</Text>
         <View style={s.row}>
           <TextInput
             style={[s.input, s.inputFlex]}
             value={usageInput}
             onChangeText={setUsageInput}
-            placeholder="minutes (e.g. 19.5)"
+            placeholder="분 단위 (예: 19.5)"
             placeholderTextColor="#555"
             keyboardType="numeric"
             editable={devState.devModeEnabled}
@@ -218,71 +218,71 @@ function DevModePanelInner() {
             onPress={applyUsageOverride}
             disabled={!devState.devModeEnabled}
           >
-            <Text style={s.btnText}>Set</Text>
+            <Text style={s.btnText}>설정</Text>
           </TouchableOpacity>
           <TouchableOpacity
             style={[s.btn, s.btnSecondary, !devState.devModeEnabled && s.btnDisabled]}
             onPress={async () => { await DevConfig?.set({ usageMinutesOverride: null }); setUsageInput(''); }}
             disabled={!devState.devModeEnabled}
           >
-            <Text style={s.btnText}>Clear</Text>
+            <Text style={s.btnText}>초기화</Text>
           </TouchableOpacity>
         </View>
-        <Text style={s.hint}>Override shown in STATUS. Real store unchanged.</Text>
+        <Text style={s.hint}>STATUS에 표시됨. 실제 저장소는 변경되지 않음.</Text>
       </View>
 
       {/* ── [RESET] Monthly reset simulator ── */}
       <View style={s.section}>
-        <Text style={s.sectionTitle}>MONTHLY RESET SIMULATOR</Text>
+        <Text style={s.sectionTitle}>월간 리셋 시뮬레이터</Text>
         <View style={s.row}>
           <TouchableOpacity
             style={[s.btn, !devState.devModeEnabled && s.btnDisabled]}
             onPress={simulateReset}
             disabled={!devState.devModeEnabled}
           >
-            <Text style={s.btnText}>Trigger Reset</Text>
+            <Text style={s.btnText}>리셋 실행</Text>
           </TouchableOpacity>
           <TouchableOpacity
             style={[s.btn, s.btnSecondary, !devState.devModeEnabled && s.btnDisabled]}
             onPress={clearReset}
             disabled={!devState.devModeEnabled}
           >
-            <Text style={s.btnText}>Clear</Text>
+            <Text style={s.btnText}>초기화</Text>
           </TouchableOpacity>
         </View>
-        <Text style={s.hint}>Sets resetAt to past — canProcess() will call resetMonthlyUsage().</Text>
+        <Text style={s.hint}>resetAt을 과거로 설정 — canProcess()가 resetMonthlyUsage()를 호출합니다.</Text>
       </View>
 
       {/* ── [EXPIRY] Subscription expiry simulator ── */}
       <View style={s.section}>
-        <Text style={s.sectionTitle}>EXPIRY SIMULATOR</Text>
+        <Text style={s.sectionTitle}>만료 시뮬레이터</Text>
         <View style={s.row}>
           <TouchableOpacity
             style={[s.btn, s.btnDanger, !devState.devModeEnabled && s.btnDisabled]}
             onPress={simulateExpired}
             disabled={!devState.devModeEnabled}
           >
-            <Text style={s.btnText}>Simulate Expired</Text>
+            <Text style={s.btnText}>만료 시뮬레이션</Text>
           </TouchableOpacity>
           <TouchableOpacity
             style={[s.btn, s.btnSecondary, !devState.devModeEnabled && s.btnDisabled]}
             onPress={clearExpiry}
             disabled={!devState.devModeEnabled}
           >
-            <Text style={s.btnText}>Clear</Text>
+            <Text style={s.btnText}>초기화</Text>
           </TouchableOpacity>
         </View>
-        <Text style={s.hint}>canProcess() will return subscriptionExpired for non-free plans.</Text>
+        <Text style={s.hint}>무료 플랜 외에서 canProcess()가 subscriptionExpired를 반환합니다.</Text>
       </View>
 
       {/* ── [SERVER] GPU server config override ── */}
       <View style={s.section}>
-        <Text style={s.sectionTitle}>GPU SERVER CONFIG</Text>
+        <Text style={s.sectionTitle}>GPU 서버 설정</Text>
         <TextInput
           style={s.input}
           value={endpointInput}
           onChangeText={setEndpointInput}
-          placeholder="Endpoint base URL (optional)"
+          placeholder="엔드포인트 URL (선택)"
           placeholderTextColor="#555"
           autoCapitalize="none"
           autoCorrect={false}
@@ -292,7 +292,7 @@ function DevModePanelInner() {
           style={[s.input, { marginTop: 6 }]}
           value={apiKeyInput}
           onChangeText={setApiKeyInput}
-          placeholder="API Key override (optional)"
+          placeholder="API 키 오버라이드 (선택)"
           placeholderTextColor="#555"
           autoCapitalize="none"
           autoCorrect={false}
@@ -304,21 +304,21 @@ function DevModePanelInner() {
           onPress={applyServerConfig}
           disabled={!devState.devModeEnabled}
         >
-          <Text style={s.btnText}>Save Server Config</Text>
+          <Text style={s.btnText}>서버 설정 저장</Text>
         </TouchableOpacity>
-        <Text style={s.hint}>Injected into loadServerBridgeConfig() when dev mode active.</Text>
+        <Text style={s.hint}>개발 모드 활성 시 loadServerBridgeConfig()에 주입됩니다.</Text>
       </View>
 
       {/* ── [LOG] Live event log ── */}
       <View style={s.section}>
         <View style={s.sectionHeaderRow}>
-          <Text style={s.sectionTitle}>EVENT LOG ({logEvents.length})</Text>
+          <Text style={s.sectionTitle}>{`이벤트 로그 (${logEvents.length})`}</Text>
           <TouchableOpacity onPress={() => DevLogger?.clear()}>
-            <Text style={s.clearBtn}>Clear</Text>
+            <Text style={s.clearBtn}>지우기</Text>
           </TouchableOpacity>
         </View>
         {logEvents.length === 0 ? (
-          <Text style={s.emptyLog}>No events yet. Enable dev mode and process a video.</Text>
+          <Text style={s.emptyLog}>이벤트 없음. 개발 모드를 켜고 영상을 처리해 보세요.</Text>
         ) : (
           logEvents.slice(0, 50).map(ev => (
             <View key={ev.id} style={s.logRow}>
@@ -335,7 +335,7 @@ function DevModePanelInner() {
 
       {/* ── Reset all ── */}
       <TouchableOpacity style={[s.btn, s.btnDanger, s.resetAllBtn]} onPress={resetAll}>
-        <Text style={s.btnText}>Reset All Dev Overrides</Text>
+        <Text style={s.btnText}>모든 개발 오버라이드 초기화</Text>
       </TouchableOpacity>
 
       <View style={{ height: 40 }} />

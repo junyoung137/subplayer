@@ -288,7 +288,7 @@ export function DirectPlayModal({
                     style={styles.input}
                     value={urlInput}
                     onChangeText={(v) => { setUrlInput(v); setUrlError(null); }}
-                    placeholder="https://youtube.com/watch?v=..."
+                    placeholder=""
                     placeholderTextColor="#444"
                     autoCorrect={false}
                     autoCapitalize="none"

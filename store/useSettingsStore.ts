@@ -23,7 +23,7 @@ export interface Settings {
   subtitleStyle: SubtitleStyleType;
   /** UI display language code, e.g. "ko", "en", "ja". */
   interfaceLanguage: string;
-  plan: 'free' | 'standard' | 'pro';
+  plan: 'free' | 'lite' | 'standard' | 'pro';
   planExpiresAt: number | null;
   monthlyUsedMinutes: number;
   monthlyResetAt: number | null;
