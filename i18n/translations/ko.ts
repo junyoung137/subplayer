@@ -396,6 +396,7 @@
     startFree: "시작하기",
     subscribe: "구독하기",
     note: "• 유료 플랜은 서버 GPU를 사용하여 더 빠르고 정확한 번역을 제공합니다\n• 구독은 언제든지 취소할 수 있습니다",
+    errorTitle: "결제 오류",
   },
   subtitleEdit: {
     title: "자막 수정",

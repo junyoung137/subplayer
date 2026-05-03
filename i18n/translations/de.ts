@@ -396,6 +396,7 @@
     startFree: "Kostenlos starten",
     subscribe: "Abonnieren",
     note: "• Bezahlte Pläne nutzen Server-GPU für schnellere und genauere Übersetzung\n• Abonnement jederzeit kündbar",
+    errorTitle: "Zahlungsfehler",
   },
   subtitleEdit: {
     title: "Untertitel bearbeiten",

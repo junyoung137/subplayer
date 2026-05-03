@@ -113,7 +113,8 @@ export const usePlanStore = create<PlanStore>((set, get) => ({
         ? 0
         : effectiveUsed;
 
-    if (tier !== 'free' && effectiveExpires && Date.now() > effectiveExpires) {
+    // null planExpiresAt means lifetime purchase — never treat as expired
+    if (tier !== 'free' && effectiveExpires !== null && Date.now() > effectiveExpires) {
       return { allowed: false, reason: i18n.t('plan.subscriptionExpired') };
     }
 

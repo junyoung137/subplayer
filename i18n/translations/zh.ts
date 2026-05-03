@@ -396,6 +396,7 @@
     startFree: "免费开始",
     subscribe: "订阅",
     note: "• 付费方案使用服务器GPU，翻译更快、更准确\n• 可随时取消订阅",
+    errorTitle: "支付错误",
   },
   subtitleEdit: {
     title: "编辑字幕",

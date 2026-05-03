@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useRef } from "react";
 import {
   View,
   Text,
@@ -11,6 +11,8 @@ import { router } from "expo-router";
 import { useTranslation } from "react-i18next";
 import { ChevronLeft, Check } from "lucide-react-native";
 import { useCurrentPlan } from "../store/usePlanStore";
+import { usePurchaseStore, usePurchaseLoading, usePurchaseError } from "../store/usePurchaseStore";
+import { PRODUCT_ID_MAP } from "../utils/revenueCatConfig";
 
 type PlanId = "free" | "lite" | "standard" | "pro";
 
@@ -25,6 +27,9 @@ interface Plan {
 export default function PricingScreen() {
   const { t } = useTranslation();
   const currentPlan = useCurrentPlan();
+  const isLoading = usePurchaseLoading();
+  const purchaseError = usePurchaseError();
+  const purchasingRef = useRef(false);
 
   const plans: Plan[] = [
     {
@@ -66,9 +71,27 @@ export default function PricingScreen() {
     },
   ];
 
+  useEffect(() => {
+    if (purchaseError) {
+      Alert.alert("Payment Error", purchaseError);
+      usePurchaseStore.getState().clearError();
+    }
+  }, [purchaseError]);
+
   const handleSelect = (plan: Plan) => {
     if (plan.id === "free") return;
-    Alert.alert(plan.labelKey, t("pricing.comingSoon"));
+    if (isLoading || purchasingRef.current) return;
+    const { offerings, purchasePackage } = usePurchaseStore.getState();
+    const productId = PRODUCT_ID_MAP[plan.id as "lite" | "standard" | "pro"];
+    const match = offerings.find(pkg => pkg.product.identifier === productId);
+    if (!match) {
+      Alert.alert(plan.labelKey, t("pricing.comingSoon"));
+      return;
+    }
+    purchasingRef.current = true;
+    purchasePackage(match).finally(() => {
+      purchasingRef.current = false;
+    });
   };
 
   return (
@@ -133,7 +156,7 @@ export default function PricingScreen() {
                 isActive && plan.id === "pro"       && styles.actionBtnActivePro,
               ]}
               onPress={() => handleSelect(plan)}
-              disabled={isActive}
+              disabled={isActive || isLoading}
             >
               <Text style={[styles.actionBtnText, isActive && plan.id === "free" && styles.actionBtnTextActiveFree, isActive && plan.id === "lite" && styles.actionBtnTextActiveLite, isActive && plan.id === "standard" && styles.actionBtnTextActiveStandard, isActive && plan.id === "pro" && styles.actionBtnTextActivePro]}>
                 {isActive

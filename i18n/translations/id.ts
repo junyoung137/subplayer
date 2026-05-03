@@ -396,6 +396,7 @@
     startFree: "Mulai Gratis",
     subscribe: "Berlangganan",
     note: "• Paket berbayar menggunakan GPU server untuk terjemahan yang lebih cepat dan akurat\n• Batalkan langganan kapan saja",
+    errorTitle: "Kesalahan pembayaran",
   },
   subtitleEdit: {
     title: "Edit subtitle",

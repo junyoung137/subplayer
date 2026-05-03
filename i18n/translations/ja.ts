@@ -396,6 +396,7 @@
     startFree: "無料で始める",
     subscribe: "登録する",
     note: "• 有料プランはサーバーGPUを使用し、より高速・高精度な翻訳を提供します\n• サブスクリプションはいつでもキャンセルできます",
+    errorTitle: "支払いエラー",
   },
   subtitleEdit: {
     title: "字幕を編集",

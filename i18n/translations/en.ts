@@ -396,6 +396,7 @@
     startFree: "Get Started",
     subscribe: "Subscribe",
     note: "• Paid plans use server GPU for faster, more accurate translation\n• Cancel your subscription anytime",
+    errorTitle: "Payment Error",
   },
   subtitleEdit: {
     title: "Edit Subtitle",

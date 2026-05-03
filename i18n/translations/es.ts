@@ -396,6 +396,7 @@
     startFree: "Comenzar gratis",
     subscribe: "Suscribirse",
     note: "• Los planes de pago usan GPU del servidor para una traducción más rápida y precisa\n• Cancela tu suscripción cuando quieras",
+    errorTitle: "Error de pago",
   },
   subtitleEdit: {
     title: "Editar subtítulo",

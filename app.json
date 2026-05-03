@@ -8,7 +8,7 @@
     "icon": "./assets/icon.png",
 
     "userInterfaceStyle": "dark",
-    "newArchEnabled": true,
+    "newArchEnabled": false,
 
     "splash": {
       "image": "./assets/adaptive_foreground.png",

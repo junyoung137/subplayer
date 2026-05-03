@@ -1,5 +1,8 @@
 import "../i18n";
 import { useEffect } from "react";
+import { usePurchaseStore } from "../store/usePurchaseStore";
+import { REVENUECAT_ANDROID_API_KEY } from "../utils/revenueCatConfig";
+import Purchases from "react-native-purchases";
 import { AppRegistry, Text, View, Image } from "react-native";
 import SplashAnimScreen from "./splash";
 import { Stack, router } from "expo-router";
@@ -58,6 +61,29 @@ export default function RootLayout() {
       const { backgroundTranslationTask } = await import('../services/backgroundTranslationTask');
       await backgroundTranslationTask({ ...taskData, isHeadlessContext: true });
     });
+
+    // RevenueCat initialization
+    (async () => {
+      try {
+        const purchaseStore = usePurchaseStore.getState();
+
+        // Await configure so offerings are ready before getCustomerInfo runs.
+        // configure() internally calls fetchOfferings(true) before setting
+        // isConfigured:true — so PricingScreen poll won't fire prematurely.
+        await purchaseStore.configure(REVENUECAT_ANDROID_API_KEY);
+
+        // Sync subscriber status on every app launch (after configure is complete)
+        Purchases.getCustomerInfo()
+          .then(info => purchaseStore.syncPlanFromCustomerInfo(info))
+          .catch(() => {});
+      } catch (e) {
+        // configure() can throw if the API key is invalid or the native module
+        // is not linked. Log clearly so the cause is immediately visible.
+        console.error('[RevenueCat] configure() failed:', e instanceof Error ? e.message : String(e));
+        // Do NOT rethrow — app must remain functional for free-tier users
+        // even if RevenueCat initialization fails.
+      }
+    })();
 
     // Auth state listener
     const unsubscribe = onAuthStateChanged(async (user) => {

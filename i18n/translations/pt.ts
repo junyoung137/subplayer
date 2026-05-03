@@ -396,6 +396,7 @@
     startFree: "Começar grátis",
     subscribe: "Assinar",
     note: "• Os planos pagos usam GPU do servidor para traduções mais rápidas e precisas\n• Cancele sua assinatura a qualquer momento",
+    errorTitle: "Erro de pagamento",
   },
   subtitleEdit: {
     title: "Editar legenda",

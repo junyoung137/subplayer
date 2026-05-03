@@ -396,6 +396,7 @@
     startFree: "Bắt đầu miễn phí",
     subscribe: "Đăng ký",
     note: "• Các gói trả phí sử dụng GPU máy chủ để dịch nhanh hơn và chính xác hơn\n• Hủy đăng ký bất cứ lúc nào",
+    errorTitle: "Lỗi thanh toán",
   },
   subtitleEdit: {
     title: "Chỉnh sửa phụ đề",
