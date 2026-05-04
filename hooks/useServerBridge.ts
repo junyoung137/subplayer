@@ -107,6 +107,9 @@ const MIN_QUOTA_TO_PROCESS_SECS = 10;
  */
 const HARD_MIN_EXECUTE_SECS = 3;
 
+let _logSeq = 0;
+const _logTs = () => `seq=${++_logSeq}, ts=${Date.now()}`;
+
 function makeSegmentId(startSecs: number, endSecs: number): string {
   return `${Math.round(startSecs * 1000)}_${Math.round(endSecs * 1000)}`;
 }
@@ -207,6 +210,13 @@ export function useServerBridge() {
       const stableId    = makeStableVideoId(videoUri);
       const totalChunks = Math.ceil(totalDuration / CHUNK_DURATION_SECS);
 
+      const _pipelineStartMs = Date.now();
+      console.log(
+        `[SB-PIPELINE-START] totalDuration=${totalDuration.toFixed(1)}s, ` +
+        `stableId=${stableId}, src=${sourceLanguage}, tgt=${targetLanguage}, ` +
+        `${_logTs()}`,
+      );
+
       const allSubtitles: SubtitleSegment[] = [];
       let offset = 0, chunkIndex = 0, batchIndex = 0;
       let earlyPlaybackFired = false, lastEmittedEndTime = 0, skippedChunks = 0;
@@ -265,6 +275,15 @@ export function useServerBridge() {
         }
       }
 
+      console.log(
+        `[SB-RESUME-STATE] ` +
+        `serverBatches=${serverCompleted.completedBatchIndices.length}, ` +
+        `resumedFromBatch=${batchIndex}, ` +
+        `resumedSubtitles=${allSubtitles.length}, ` +
+        `resumeOffsetSecs=${offset.toFixed(1)}, ` +
+        `${_logTs()}`,
+      );
+
       // ── [BATCH] main loop ─────────────────────────────────────────────────
 
       while (offset < totalDuration) {
@@ -275,6 +294,7 @@ export function useServerBridge() {
 
         if (serverCompletedIndices.has(batchIndex)) {
           const n = Math.min(CHUNKS_PER_BATCH, Math.ceil((totalDuration - offset) / CHUNK_DURATION_SECS));
+          console.log(`[SB-CKPT-SKIP] batch=${batchIndex}, reason=server_completed, n=${n}, ${_logTs()}`);
           offset += n * CHUNK_DURATION_SECS; chunkIndex += n; continue;
         }
 
@@ -284,6 +304,11 @@ export function useServerBridge() {
           const n = Math.min(CHUNKS_PER_BATCH, Math.ceil((totalDuration - offset) / CHUNK_DURATION_SECS));
           offset += n * CHUNK_DURATION_SECS; chunkIndex += n;
           if (!_usageRecorded.has(batchJobKey)) _usageRecorded.set(batchJobKey, Date.now());
+          console.log(
+            `[SB-CKPT-SKIP] batch=${batchIndex}, reason=client_checkpoint, ` +
+            `restoredSubtitles=${existingCkpt.subtitles.length}, ` +
+            `${_logTs()}`,
+          );
           continue;
         }
 
@@ -327,12 +352,24 @@ export function useServerBridge() {
           );
         }
 
+        console.log(
+          `[SB-BATCH-START] batch=${batchIndex}, ` +
+          `isLastPartial=${isLastPartialBatch}, ` +
+          `chunkIndex=${chunkIndex}, totalChunks=${totalChunks}, ` +
+          `elapsed=${Date.now() - _pipelineStartMs}ms, ` +
+          `${_logTs()}`,
+        );
+
         // Phase A: transcribe
         const batchRawSegments: Array<{ start: number; end: number; text: string }> = [];
         let chunksThisBatch = 0;
 
         let batchPlannedDurationSecs = 0;
         let batchActualDurationSecs  = 0;
+
+        let _batchExtractMs = 0;
+        let _batchSttMs = 0;
+        const _batchStartMs = Date.now();
 
         while (chunksThisBatch < CHUNKS_PER_BATCH && offset < totalDuration) {
           if (isCancelled()) return { subtitles: [], translationSkipped: false };
@@ -342,18 +379,38 @@ export function useServerBridge() {
 
           let chunkSucceeded = false;
           try {
+            const _chunkStartMs = Date.now();
+            console.log(
+              `[SB-CHUNK-START] batch=${batchIndex}, chunk=${chunkIndex}, ` +
+              `offset=${offset.toFixed(1)}s, chunkDur=${chunkDur.toFixed(1)}s, ` +
+              `${_logTs()}`,
+            );
             const chunk = await extractSingleChunkAt(videoUri, offset, chunkDur, chunkIndex);
+            const _extractDoneMs = Date.now(); _batchExtractMs += _extractDoneMs - _chunkStartMs;
             const audioBase64 = await FileSystem.readAsStringAsync(
               chunk.filePath, { encoding: FileSystem.EncodingType.Base64 },
             );
             const tr = await serverTranscribe({ audioBase64, sourceLanguage, chunkStartSec: chunk.startTime });
+            _batchSttMs += Date.now() - _extractDoneMs;
             batchRawSegments.push(...tr.segments);
+            console.log(
+              `[SB-TRANSCRIBE-OK] batch=${batchIndex}, chunk=${chunkIndex}, ` +
+              `segments=${tr.segments.length}, ` +
+              `chunkStart=${chunk.startTime.toFixed(1)}s, ` +
+              `chunkMs=${Date.now() - _chunkStartMs}, ` +
+              `${_logTs()}`,
+            );
             await FileSystem.deleteAsync(chunk.filePath, { idempotent: true }).catch(() => {});
             chunkSucceeded = tr.segments.length > 0;
           } catch (e: any) {
             if (!(e?.code === 'SILENT_CHUNK' || e?.message?.includes('SILENT_CHUNK'))) {
               skippedChunks++;
               console.warn(`[ServerBridge] chunk ${chunkIndex} error (${skippedChunks} skips):`, e);
+              console.log(
+                `[SB-CHUNK-SKIP] batch=${batchIndex}, chunk=${chunkIndex}, ` +
+                `skippedTotal=${skippedChunks}, ` +
+                `${_logTs()}`,
+              );
             }
           }
 
@@ -422,6 +479,16 @@ export function useServerBridge() {
         let lastErr: any;
         let unknownRetried = false;
 
+        const _translateStartMs = Date.now();
+        console.log(
+          `[SB-TRANSLATE-START] batch=${batchIndex}, ` +
+          `segments=${batchRawSegments.length}, ` +
+          `reservedSeconds=${reservedSeconds.toFixed(1)}, ` +
+          `effectiveDuration=${effectiveDurationSecs.toFixed(1)}s, ` +
+          `elapsed=${Date.now() - _pipelineStartMs}ms, ` +
+          `${_logTs()}`,
+        );
+
         for (let attempt = 0; attempt <= 1; attempt++) {
           try {
             translateResult = await serverTranslate({
@@ -430,6 +497,14 @@ export function useServerBridge() {
               videoId: batchJobKey,
               reservedSeconds,
             });
+            console.log(
+              `[SB-TRANSLATE-OK] batch=${batchIndex}, attempt=${attempt + 1}, ` +
+              `usageSeconds=${translateResult.usageSeconds}, ` +
+              `completed=${translateResult.completed}, ` +
+              `segments=${translateResult.segments.length}, ` +
+              `translateMs=${Date.now() - _translateStartMs}, ` +
+              `${_logTs()}`,
+            );
             break;
           } catch (err: any) {
             lastErr = err;
@@ -486,6 +561,21 @@ export function useServerBridge() {
             `billed=${billed}, ` +
             `isLastPartial=${isLastPartialBatch}`,
           );
+          console.log(
+            `[SB-BILLING-DONE] batch=${batchIndex}, ` +
+            `billedResult=${billed}, ` +
+            `usageSeconds=${translateResult.usageSeconds}, ` +
+            `cumulativeSubtitles=${allSubtitles.length + translateResult.segments.length}, ` +
+            `${_logTs()}`,
+          );
+          console.log(
+            `[SB-QUOTA-DELTA] batch=${batchIndex}, ` +
+            `reserved=${translateResult.reservedSeconds}, ` +
+            `actual=${translateResult.usageSeconds}, ` +
+            `delta=${(translateResult.usageSeconds - translateResult.reservedSeconds).toFixed(1)}, ` +
+            `overrun=${translateResult.usageSeconds > translateResult.reservedSeconds}, ` +
+            `${_logTs()}`,
+          );
         }
 
         const batchSubtitles: SubtitleSegment[] = translateResult.segments
@@ -504,6 +594,24 @@ export function useServerBridge() {
           completedAt: Date.now(),
         });
         allSubtitles.push(...batchSubtitles);
+
+        console.log(
+          `[SB-TIMING] batch=${batchIndex}, ` +
+          `extractMs=${_batchExtractMs}, ` +
+          `sttMs=${_batchSttMs}, ` +
+          `translateMs=${Date.now() - _translateStartMs}, ` +
+          `totalBatchMs=${Date.now() - _batchStartMs}, ` +
+          `${_logTs()}`,
+        );
+        console.log(
+          `[SB-BATCH-DONE] batch=${batchIndex}, ` +
+          `batchSubtitles=${batchSubtitles.length}, ` +
+          `allSubtitles=${allSubtitles.length}, ` +
+          `isLastPartial=${isLastPartialBatch}, ` +
+          `offset=${offset.toFixed(1)}s / ${totalDuration.toFixed(1)}s, ` +
+          `batchMs=${Date.now() - _pipelineStartMs}ms, ` +
+          `${_logTs()}`,
+        );
 
         // ── [PLAYBACK] early playback + streaming ─────────────────────────
         if (!earlyPlaybackFired && onEarlyPlaybackReady) {
@@ -566,6 +674,15 @@ export function useServerBridge() {
         step: 'done', current: allSubtitles.length, total: allSubtitles.length,
         percent: 100, message: t('serverBridge.processingDone'),
       });
+
+      console.log(
+        `[SB-PIPELINE-SUMMARY] totalBatches=${batchIndex}, ` +
+        `totalSubtitles=${allSubtitles.length}, ` +
+        `totalDuration=${totalDuration.toFixed(1)}s, ` +
+        `totalMs=${Date.now() - _pipelineStartMs}, ` +
+        `skippedChunks=${skippedChunks}, ` +
+        `${_logTs()}`,
+      );
 
       return {
         subtitles: allSubtitles.sort((a, b) => a.startTime - b.startTime),
@@ -682,6 +799,16 @@ export function useServerBridge() {
     const config = await loadServerBridgeConfig();
     if (!config) throw new Error('[processYoutubeAudioServer] ServerBridge not configured');
 
+    const _ytAudioPipelineStartMs = Date.now();
+    let _ytAudioCpuFailCount = 0;
+    let _ytAudioGpuFailCount = 0;
+    console.log(
+      `[YA-ENTRY] videoId=${youtubeVideoId}, ` +
+      `src=${sourceLanguage}, tgt=${targetLanguage}, ` +
+      `totalDurationSecs=${totalDurationSecs.toFixed(1)}s, ` +
+      `${_logTs()}`,
+    );
+
     const stableId    = youtubeVideoId; // already stable for YouTube
     const totalChunks = Math.ceil(totalDurationSecs / 30);
     const langMeta    = (await import('../constants/languages')).getLanguageByCode(targetLanguage);
@@ -710,16 +837,36 @@ export function useServerBridge() {
 
       if (remainingQuotaSeconds < HARD_MIN_EXECUTE_SECS) {
         console.warn('[processYoutubeAudioServer] Quota below hard min — stopping');
+        console.warn(
+          `[YA-QUOTA-STOP] batch=${batchIndex}, ` +
+          `remainingQuotaSeconds=${remainingQuotaSeconds.toFixed(1)}, ` +
+          `hardMin=${HARD_MIN_EXECUTE_SECS}, ` +
+          `elapsed=${Date.now() - _ytAudioPipelineStartMs}ms, ` +
+          `${_logTs()}`,
+        );
         break;
       }
 
       const isLastPartialBatch = remainingQuotaSeconds < MIN_QUOTA_TO_PROCESS_SECS;
+
+      console.log(
+        `[YA-BATCH-START] batch=${batchIndex}, ` +
+        `isLastPartial=${isLastPartialBatch}, ` +
+        `chunkIndex=${chunkIndex}, totalChunks=${totalChunks}, ` +
+        `remainingQuota=${remainingQuotaSeconds.toFixed(1)}s, ` +
+        `elapsed=${Date.now() - _ytAudioPipelineStartMs}ms, ` +
+        `${_logTs()}`,
+      );
 
       // Phase A: extract chunks via CPU server
       const batchRawSegments: Array<{ start: number; end: number; text: string }> = [];
       let chunksThisBatch = 0;
       let batchPlannedDurationSecs = 0;
       let batchActualDurationSecs  = 0;
+
+      let _yaBatchExtractMs = 0;
+      let _yaBatchSttMs = 0;
+      const _yaBatchStartMs = Date.now();
 
       while (chunksThisBatch < CHUNKS_PER_BATCH && offset < totalDurationSecs) {
         if (isCancelled?.()) return { subtitles: [], usageSeconds: 0 };
@@ -728,26 +875,49 @@ export function useServerBridge() {
         batchPlannedDurationSecs += chunkDur;
 
         try {
+          const _ytChunkStartMs = Date.now();
+          console.log(
+            `[YA-CPU-START] batch=${batchIndex}, chunk=${chunkIndex}, ` +
+            `offset=${offset.toFixed(1)}s, chunkDur=${chunkDur.toFixed(1)}s, ` +
+            `${_logTs()}`,
+          );
           const cpuChunk = await extractChunkViaCpuServer(
             stableId,
             offset,
             chunkDur,
             sourceLanguage,
+            undefined,
+            tier,
           );
+          const _yaExtractDoneMs = Date.now(); _yaBatchExtractMs += _yaExtractDoneMs - _ytChunkStartMs;
 
           const tr = await serverTranscribe({
             audioBase64:   cpuChunk.audioBase64,
             sourceLanguage,
             chunkStartSec: cpuChunk.chunkStartSec,
           });
+          _yaBatchSttMs += Date.now() - _yaExtractDoneMs;
 
           batchRawSegments.push(...tr.segments);
+          console.log(
+            `[YA-CPU-OK] batch=${batchIndex}, chunk=${chunkIndex}, ` +
+            `cpuKB=${(cpuChunk.audioBase64.length * 0.75 / 1024).toFixed(1)}, ` +
+            `segments=${tr.segments.length}, ` +
+            `chunkMs=${Date.now() - _ytChunkStartMs}, ` +
+            `${_logTs()}`,
+          );
           batchActualDurationSecs += chunkDur;
 
         } catch (e: any) {
           if (e instanceof CpuExtractError && e.type === 'bot_403') {
             cpuBotBlocked = true;
             console.warn('[processYoutubeAudioServer] bot_403 — session blocked');
+            console.warn(
+              `[YA-CPU-BOT-BLOCK] batch=${batchIndex}, chunk=${chunkIndex}, ` +
+              `cpuFailTotal=${++_ytAudioCpuFailCount}, ` +
+              `elapsed=${Date.now() - _ytAudioPipelineStartMs}ms, ` +
+              `${_logTs()}`,
+            );
             break;
           }
           // timeout/network: skip chunk, continue
@@ -755,6 +925,13 @@ export function useServerBridge() {
           console.warn(
             `[processYoutubeAudioServer] chunk ${chunkIndex} skip ` +
             `(${e?.type ?? e?.message ?? 'unknown'})`
+          );
+          console.warn(
+            `[YA-CPU-SKIP] batch=${batchIndex}, chunk=${chunkIndex}, ` +
+            `errorType=${e?.type ?? 'unknown'}, ` +
+            `cpuFailTotal=${++_ytAudioCpuFailCount}, ` +
+            `skippedTotal=${skippedChunks}, ` +
+            `${_logTs()}`,
           );
         }
 
@@ -797,6 +974,17 @@ export function useServerBridge() {
       );
 
       let translateResult: Awaited<ReturnType<typeof serverTranslate>> | undefined;
+      let lastErr: any;
+
+      const _ytTranslateStartMs = Date.now();
+      console.log(
+        `[YA-GPU-START] batch=${batchIndex}, ` +
+        `segments=${batchRawSegments.length}, ` +
+        `reservedSeconds=${reservedSeconds.toFixed(1)}, ` +
+        `effectiveDuration=${effectiveDurationSecs.toFixed(1)}s, ` +
+        `elapsed=${Date.now() - _ytAudioPipelineStartMs}ms, ` +
+        `${_logTs()}`,
+      );
 
       for (let attempt = 0; attempt <= 1; attempt++) {
         try {
@@ -806,9 +994,18 @@ export function useServerBridge() {
             videoId:         batchJobKey,
             reservedSeconds,
           });
+          console.log(
+            `[YA-GPU-OK] batch=${batchIndex}, attempt=${attempt + 1}, ` +
+            `usageSeconds=${translateResult.usageSeconds}, ` +
+            `completed=${translateResult.completed}, ` +
+            `segments=${translateResult.segments.length}, ` +
+            `gpuMs=${Date.now() - _ytTranslateStartMs}, ` +
+            `${_logTs()}`,
+          );
           break;
         } catch (err: any) {
           if (isCancelled?.()) return { subtitles: [], usageSeconds: 0 };
+          lastErr = err;
           const ec = classifyServerError(err);
           if (ec === 'auth' || ec === 'validation') throw err;
           if (attempt === 0) {
@@ -818,6 +1015,15 @@ export function useServerBridge() {
       }
 
       if (!translateResult) {
+        _ytAudioGpuFailCount++;
+        console.warn(
+          `[YA-GPU-FAIL] batch=${batchIndex}, ` +
+          `gpuFailCount=${_ytAudioGpuFailCount}, ` +
+          `lastErrClass=${classifyServerError(lastErr ?? {})}, ` +
+          `isLastPartial=${isLastPartialBatch}, ` +
+          `elapsed=${Date.now() - _ytAudioPipelineStartMs}ms, ` +
+          `${_logTs()}`,
+        );
         if (isLastPartialBatch) break;
         continue;
       }
@@ -843,7 +1049,32 @@ export function useServerBridge() {
           translated: seg.translated,
         }));
 
+      console.log(
+        `[YA-BILLING-DONE] batch=${batchIndex}, ` +
+        `usageSeconds=${translateResult.usageSeconds}, ` +
+        `allSubtitles=${allSubtitles.length + batchSubtitles.length}, ` +
+        `${_logTs()}`,
+      );
+
       allSubtitles.push(...batchSubtitles);
+
+      console.log(
+        `[YA-TIMING] batch=${batchIndex}, ` +
+        `extractMs=${_yaBatchExtractMs}, ` +
+        `sttMs=${_yaBatchSttMs}, ` +
+        `gpuMs=${Date.now() - _ytTranslateStartMs}, ` +
+        `totalBatchMs=${Date.now() - _yaBatchStartMs}, ` +
+        `${_logTs()}`,
+      );
+      console.log(
+        `[YA-BATCH-DONE] batch=${batchIndex}, ` +
+        `batchSubtitles=${batchSubtitles.length}, ` +
+        `allSubtitles=${allSubtitles.length}, ` +
+        `isLastPartial=${isLastPartialBatch}, ` +
+        `offset=${offset.toFixed(1)}s / ${totalDurationSecs.toFixed(1)}s, ` +
+        `batchMs=${Date.now() - _ytAudioPipelineStartMs}ms, ` +
+        `${_logTs()}`,
+      );
 
       onProgress?.({
         step:    'translating',
@@ -860,6 +1091,17 @@ export function useServerBridge() {
     if (cpuBotBlocked && allSubtitles.length === 0) {
       throw new Error('CPU_SERVER_BOT_BLOCKED');
     }
+
+    console.log(
+      `[YA-PIPELINE-SUMMARY] totalBatches=${batchIndex}, ` +
+      `totalSubtitles=${allSubtitles.length}, ` +
+      `totalDurationSecs=${totalDurationSecs.toFixed(1)}s, ` +
+      `cpuFailCount=${_ytAudioCpuFailCount}, ` +
+      `gpuFailCount=${_ytAudioGpuFailCount}, ` +
+      `cpuBotBlocked=${cpuBotBlocked}, ` +
+      `totalMs=${Date.now() - _ytAudioPipelineStartMs}, ` +
+      `${_logTs()}`,
+    );
 
     const totalUsage = allSubtitles.reduce(
       (acc, s) => acc + Math.max(0, s.endTime - s.startTime), 0

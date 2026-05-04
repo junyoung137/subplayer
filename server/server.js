@@ -64,6 +64,9 @@ function getCached(key) {
   return entry;
 }
 
+let _ytdlpSeq = 0;
+const _ytdlpTs = () => `seq=${++_ytdlpSeq}, ts=${Date.now()}`;
+
 // ── Startup network health-check ─────────────────────────────────────────────
 // Runs once on boot. Makes DNS / YouTube reachability failures visible
 // immediately in logs instead of only on the first subtitle request.
@@ -96,18 +99,15 @@ function getCached(key) {
   }
 
   console.log(
-    `[SERVER] network-check: dns=${dnsOk ? "ok" : "fail"} youtube=${youtubeOk ? "ok" : "fail"}`
+    `[YTDLP-NETWORK-CHECK] dns=${dnsOk ? "ok" : "fail"} youtube=${youtubeOk ? "ok" : "fail"}, ${_ytdlpTs()}`
   );
   if (!dnsOk) {
     console.error(
-      "[SERVER] DNS resolution for www.youtube.com FAILED — yt-dlp will not work. " +
-      "Check server network/DNS configuration. Set YTDLP_PROXY env var to route " +
-      "yt-dlp through a proxy that has YouTube access."
+      `[YTDLP-NETWORK-FAIL] reason=dns_fail, detail="DNS resolution for www.youtube.com FAILED — yt-dlp will not work. Check server network/DNS configuration. Set YTDLP_PROXY env var to route yt-dlp through a proxy that has YouTube access.", ${_ytdlpTs()}`
     );
   } else if (!youtubeOk) {
     console.warn(
-      "[SERVER] www.youtube.com is DNS-resolvable but HTTPS connection failed — " +
-      "yt-dlp may still fail depending on network policy."
+      `[YTDLP-NETWORK-FAIL] reason=https_fail, detail="www.youtube.com is DNS-resolvable but HTTPS connection failed — yt-dlp may still fail depending on network policy.", ${_ytdlpTs()}`
     );
   }
 })();
@@ -1462,6 +1462,9 @@ async function runYtDlp(videoId, lang) {
   console.log(`[yt-dlp] cmd: python3.11 ${scriptPath} ${videoId} ${lang ?? "en"} ${outputTemplate}`);
   console.log(`[yt-dlp] videoId=${videoId} lang=${lang}`);
 
+  const _ytdlpSpawnMs = Date.now();
+  console.log(`[YTDLP-SPAWN] videoId=${videoId}, lang=${lang ?? "en"}, ${_ytdlpTs()}`);
+
   return new Promise((resolve) => {
     const proc = spawn(process.env.PYTHON_PATH || "C:\\Program Files\\Python311\\python.exe", [
       "-u",
@@ -1487,6 +1490,7 @@ async function runYtDlp(videoId, lang) {
     // Cleared immediately when the process closes normally.
     const killTimer = setTimeout(() => {
       console.error("[yt-dlp] hard timeout 120s — killing process");
+      console.error(`[YTDLP-KILL-TIMEOUT] videoId=${videoId}, elapsedMs=${Date.now() - _ytdlpSpawnMs}, ${_ytdlpTs()}`);
       proc.kill("SIGKILL");
     }, 120_000);
 
@@ -1504,10 +1508,12 @@ async function runYtDlp(videoId, lang) {
         pyResult = JSON.parse(stdout.trim());
       } catch (e) {
         console.warn(`[yt-dlp] stdout JSON parse error: ${e.message} raw="${stdout.substring(0, 200)}"`);
+        console.warn(`[YTDLP-STDOUT-PARSE-FAIL] videoId=${videoId}, errMsg=${String(e.message).slice(0, 100)}, elapsedMs=${Date.now() - _ytdlpSpawnMs}, ${_ytdlpTs()}`);
       }
       if (pyResult && !pyResult.success) {
         const detail = pyResult.error ?? `yt-dlp exited with code ${code}`;
         console.error(`[yt-dlp] Python script reported failure: "${detail}"`);
+        console.error(`[YTDLP-PY-FAIL] videoId=${videoId}, exitCode=${code}, detail=${String(detail).slice(0, 200)}, elapsedMs=${Date.now() - _ytdlpSpawnMs}, ${_ytdlpTs()}`);
         resolve({ ytdlpError: true, detail });
         return;
       }
@@ -1516,6 +1522,7 @@ async function runYtDlp(videoId, lang) {
       if (code !== 0) {
         const firstLine = stderr.split("\n").find(l => l.trim().length > 0) ?? `yt-dlp exited with code ${code}`;
         console.error(`[yt-dlp] non-zero exit — network or yt-dlp error: "${firstLine}"`);
+        console.error(`[YTDLP-NONZERO-EXIT] videoId=${videoId}, exitCode=${code}, firstStderr=${String(firstLine).slice(0, 200)}, elapsedMs=${Date.now() - _ytdlpSpawnMs}, ${_ytdlpTs()}`);
         resolve({ ytdlpError: true, detail: firstLine });
         return;
       }
@@ -1530,6 +1537,7 @@ async function runYtDlp(videoId, lang) {
 
         if (subFiles.length === 0) {
           console.log(`[yt-dlp] no subtitle files found (videoId=${videoId})`);
+          console.log(`[YTDLP-NO-FILES] videoId=${videoId}, elapsedMs=${Date.now() - _ytdlpSpawnMs}, ${_ytdlpTs()}`);
           resolve(null);
           return;
         }
@@ -1556,6 +1564,15 @@ async function runYtDlp(videoId, lang) {
         // 최종 선택
         const chosenJson3 = langJson3File ?? enJson3File ?? enOrigFile ?? json3Files[0] ?? null;
         const chosenVtt   = langVttFile   ?? enVttFile   ?? vttFiles[0]  ?? null;
+
+        console.log(
+          `[YTDLP-FILE-SELECT] videoId=${videoId}, ` +
+          `json3=${chosenJson3?.split(/[/\\]/).pop() ?? "none"}, ` +
+          `vtt=${chosenVtt?.split(/[/\\]/).pop() ?? "none"}, ` +
+          `totalFiles=${subFiles.length}, ` +
+          `elapsedMs=${Date.now() - _ytdlpSpawnMs}, ` +
+          `${_ytdlpTs()}`
+        );
 
         if (!chosenJson3 && !chosenVtt) {
           console.log(`[yt-dlp] no usable subtitle files (videoId=${videoId})`);
@@ -1637,8 +1654,17 @@ async function runYtDlp(videoId, lang) {
             }
 
             if (json3Segs && json3Segs.length === 0) json3Segs = null;
+            console.log(
+              `[YTDLP-SEGMENT-PIPELINE] videoId=${videoId}, ` +
+              `isASR=${isASR}, ` +
+              `isManual=${isManualCaption}, ` +
+              `json3Segs=${json3Segs?.length ?? 0}, ` +
+              `elapsedMs=${Date.now() - _ytdlpSpawnMs}, ` +
+              `${_ytdlpTs()}`
+            );
           } catch (e) {
             console.warn(`[yt-dlp] JSON3 parse error: ${e}`);
+            console.warn(`[YTDLP-JSON3-PARSE-FAIL] videoId=${videoId}, err=${String(e).slice(0, 150)}, elapsedMs=${Date.now() - _ytdlpSpawnMs}, ${_ytdlpTs()}`);
           }
         }
 
@@ -1684,6 +1710,7 @@ async function runYtDlp(videoId, lang) {
         }
 
         if (!finalSegments || finalSegments.length === 0) {
+          console.log(`[YTDLP-SEGMENT-EMPTY] videoId=${videoId}, json3Segs=${json3Segs?.length ?? 0}, vttSegs=${vttSegs?.length ?? 0}, elapsedMs=${Date.now() - _ytdlpSpawnMs}, ${_ytdlpTs()}`);
           resolve(null);
           return;
         }
@@ -1692,6 +1719,7 @@ async function runYtDlp(videoId, lang) {
         resolve({ segments: finalSegments, language: detectedLang, source: "yt-dlp" });
       } catch (e) {
         console.error(`[yt-dlp] file handling error: ${e}`);
+        console.error(`[YTDLP-FILE-IO-ERROR] videoId=${videoId}, err=${String(e).slice(0, 200)}, elapsedMs=${Date.now() - _ytdlpSpawnMs}, ${_ytdlpTs()}`);
         resolve(null);
       }
     });
@@ -1701,6 +1729,7 @@ async function runYtDlp(videoId, lang) {
 // ── Routes ────────────────────────────────────────────────────────────────────
 app.get("/subtitles", async (req, res) => {
   const { videoId, lang = "en" } = req.query;
+  const userPlan = req.headers['x-user-plan'] ?? null;
 
   if (!videoId || typeof videoId !== "string" || !/^[a-zA-Z0-9_-]{11}$/.test(videoId)) {
     return res.status(400).json({ error: "Missing or invalid videoId" });
@@ -1712,11 +1741,23 @@ app.get("/subtitles", async (req, res) => {
   const cached   = getCached(cacheKey);
 
   if (cached) {
+    console.log(`[YTDLP-CACHE-HIT] videoId=${videoId}, lang=${safeLang}, segments=${cached.segments?.length ?? 0}, ${_ytdlpTs()}`);
     console.log(`[SUBTITLE] cache hit: videoId=${videoId} lang=${safeLang}`);
     return res.json({ segments: cached.segments, language: cached.language, source: cached.source });
   }
 
   console.log(`[SUBTITLE] yt-dlp fetch: videoId=${videoId} lang=${safeLang}`);
+  console.log(
+    `[YTDLP-PLAN-GATE] videoId=${videoId}, plan=${userPlan ?? "none"}, ` +
+    `lang=${safeLang}, ${_ytdlpTs()}`
+  );
+  if (!userPlan) {
+    console.warn(
+      `[YTDLP-PLAN-MISSING] videoId=${videoId}, lang=${safeLang}, ` +
+      `reason=untagged_free_or_bg, note=missing_header_does_not_imply_free_only, ` +
+      `${_ytdlpTs()}`
+    );
+  }
 
   try {
     const result = await runYtDlp(videoId, safeLang);

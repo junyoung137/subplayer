@@ -92,7 +92,8 @@ export class RateLimitError extends Error {
 // ── Main entry point ──────────────────────────────────────────────────────────
 export async function fetchYoutubeSubtitles(
   videoId?: string,
-  preferLang = "en"
+  preferLang = "en",
+  plan?: string,
 ): Promise<FetchSubtitlesResult | null> {
   if (!videoId) return null;
 
@@ -122,7 +123,12 @@ export async function fetchYoutubeSubtitles(
 
   let res: Response;
   try {
-    res = await fetch(url, { signal: controller.signal });
+    res = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        ...(plan ? { 'x-user-plan': plan } : {}),
+      },
+    });
   } catch (e) {
     console.log(`[SUBTITLE] proxy failed: network error — ${e} url=${url}`);
     return null;

@@ -2139,6 +2139,7 @@ export default function YoutubePlayerScreen() {
           ref={ytPlayerRef}
           videoId={youtubeVideoId}
           height={playerHeight}
+          plan={planTier}
           style={isLandscape ? { width: screenWidth } : undefined}
           playbackRate={playbackRate}
           onReady={handlePlayerReady}

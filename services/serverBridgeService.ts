@@ -61,6 +61,9 @@ if (__DEV__) {
   import('../utils/devLogger').then(m => { _DevLogger = m.DevLogger; }).catch(() => {});
 }
 
+let _sbsSeq = 0;
+const _sbsTs = () => `seq=${++_sbsSeq}, ts=${Date.now()}`;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
@@ -701,6 +704,14 @@ async function fetchWithRetry(
       );
     }
 
+    const _httpAttemptMs = Date.now();
+    console.log(
+      `[SBS-HTTP-ATTEMPT] attempt=${attempt + 1}/${retries + 1}, ` +
+      `endpoint=${url.split('/').pop()?.split('?')[0] ?? url}, ` +
+      `timeout=${effectiveTimeout}ms, ` +
+      `${_sbsTs()}`,
+    );
+
     try {
       const response = await fetch(url, { ...options, signal: controller.signal });
 
@@ -719,6 +730,13 @@ async function fetchWithRetry(
       }
 
       if (response.ok) return response;
+
+      console.warn(
+        `[SBS-HTTP-FAIL] attempt=${attempt + 1}, status=${response.status}, ` +
+        `endpoint=${url.split('/').pop()?.split('?')[0] ?? url}, ` +
+        `attemptMs=${Date.now() - _httpAttemptMs}, ` +
+        `${_sbsTs()}`,
+      );
 
       const errClass = classifyServerError({ status: response.status });
       const text     = await response.text().catch(() => '');
@@ -740,6 +758,14 @@ async function fetchWithRetry(
           `[ServerBridge] 429 rate limit — waiting ${retryDelayMs}ms ` +
           `(Retry-After: ${retryAfterHeader ?? 'none'})`,
         );
+        console.warn(
+          `[SBS-HTTP-BACKOFF] attempt=${attempt + 1}/${retries + 1}, ` +
+          `status=429, ` +
+          `retryAfterHeader=${retryAfterHeader ?? 'none'}, ` +
+          `backoffMs=${retryDelayMs}, ` +
+          `source=${retryAfterHeader ? 'header' : 'jitter'}, ` +
+          `${_sbsTs()}`,
+        );
         lastError = new Error(`Rate limited (429): ${text}`);
         (lastError as any).status = 429;
         clearTimeout(timer);
@@ -758,6 +784,13 @@ async function fetchWithRetry(
           { detail: url.split('/').pop() ?? url, durationMs: Date.now() - _t0 },
         );
       }
+      console.warn(
+        `[SBS-HTTP-ERROR] attempt=${attempt + 1}, ` +
+        `name=${(e as any)?.name ?? 'unknown'}, ` +
+        `message=${String((e as any)?.message ?? '').slice(0, 120)}, ` +
+        `attemptMs=${Date.now() - _httpAttemptMs}, ` +
+        `${_sbsTs()}`,
+      );
       if (e?.status === 401 || e?.status === 403 || e?.status === 400 || e?.status === 422) {
         throw e;
       }
@@ -773,7 +806,15 @@ async function fetchWithRetry(
     }
 
     if (attempt < retries) {
-      await new Promise(r => setTimeout(r, addJitter(RETRY_DELAY_BASE_MS * Math.pow(2, attempt))));
+      const _retryDelayMs = addJitter(RETRY_DELAY_BASE_MS * Math.pow(2, attempt));
+      console.warn(
+        `[SBS-HTTP-BACKOFF] attempt=${attempt + 1}/${retries + 1}, ` +
+        `status=non-429, ` +
+        `backoffMs=${_retryDelayMs}, ` +
+        `source=exponential_jitter, ` +
+        `${_sbsTs()}`,
+      );
+      await new Promise(r => setTimeout(r, _retryDelayMs));
     }
   }
   throw lastError;
@@ -823,6 +864,12 @@ export async function serverTranscribe(
   const config = await loadServerBridgeConfig();
   if (!config) throw new Error('[ServerBridge] Not configured.');
 
+  const _transcribeQueuedMs = Date.now();
+  console.log(
+    `[SBS-TRANSCRIBE-QUEUE] chunkStart=${request.chunkStartSec}s, ` +
+    `audioKB=${(request.audioBase64.length * 0.75 / 1024).toFixed(1)}, ` +
+    `${_sbsTs()}`,
+  );
   await _transcribeSemaphore.acquire();
   try {
     const url = `${config.runpodEndpointBase.replace(/\/$/, '')}/transcribe`;
@@ -845,6 +892,11 @@ export async function serverTranscribe(
     return data as ServerTranscribeResponse;
   } finally {
     _transcribeSemaphore.release();
+    console.log(
+      `[SBS-TRANSCRIBE-RELEASE] chunkStart=${request.chunkStartSec}s, ` +
+      `totalMs=${Date.now() - _transcribeQueuedMs}, ` +
+      `${_sbsTs()}`,
+    );
   }
 }
 
@@ -884,6 +936,14 @@ async function _serverTranslateImpl(
   // [FIX-16 v15] reservedSeconds 기준 short-first 획득
   // 대기열에서 가장 짧은 job 먼저 슬롯 획득 → 평균 latency 감소
   await _translateSemaphore.acquire(request.reservedSeconds);
+
+  const _translateSlotMs = Date.now();
+  console.log(
+    `[SBS-TRANSLATE-SLOT] videoId=${request.videoId}, ` +
+    `reservedSeconds=${request.reservedSeconds}, ` +
+    `queueWaiting=${_translateSemaphore.waitingCount()}, ` +
+    `${_sbsTs()}`,
+  );
 
   if (__DEV__) {
     console.log(
@@ -934,6 +994,11 @@ async function _serverTranslateImpl(
     return data as ServerTranslateResponse;
   } finally {
     _translateSemaphore.release();
+    console.log(
+      `[SBS-TRANSLATE-RELEASE] videoId=${request.videoId}, ` +
+      `slotMs=${Date.now() - _translateSlotMs}, ` +
+      `${_sbsTs()}`,
+    );
   }
 }
 

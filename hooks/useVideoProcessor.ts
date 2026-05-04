@@ -274,6 +274,20 @@ export function useVideoProcessor() {
       try {
         const useServer = planState.tier === 'lite' || planState.tier === 'standard' || planState.tier === 'pro';
 
+        const _vpVideoId = videoUri;
+        console.log(
+          `[VP] videoUri=${_vpVideoId}, src=${src}, tgt=${tgt}, ` +
+          `tier=${planState.tier}, useServer=${useServer}`,
+        );
+        console.log(
+          `[VP-TIER-ROUTE] tier=${planState.tier}, ` +
+          `path=${useServer ? "server" : "on-device"}, ` +
+          `src=${src}, tgt=${tgt}, ` +
+          `estDurationMin=${estimatedMinutes !== null ? estimatedMinutes.toFixed(1) : "unknown"}, ` +
+          `remainingMin=${remainingMinutes === Infinity ? "unlimited" : remainingMinutes.toFixed(1)}, ` +
+          `videoId=${_vpVideoId}`
+        );
+
         const { subtitles, translationSkipped } = useServer
           ? await processVideoServer(
               videoUri, src, tgt,

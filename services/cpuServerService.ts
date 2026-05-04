@@ -7,6 +7,9 @@
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
+let _cpuSeq = 0;
+const _cpuTs = () => `seq=${++_cpuSeq}, ts=${Date.now()}`;
+
 // ── URL management ────────────────────────────────────────────────────────────
 // Mirrors the exact in-memory cache + AsyncStorage fallback pattern used in
 // youtubeTimedText.ts (setProxyBaseUrl / getProxyBaseUrl).
@@ -105,8 +108,21 @@ export async function extractChunkViaCpuServer(
   durationSec: number,
   sourceLanguage: string,
   signal?: AbortSignal,
+  plan?: string,
 ): Promise<CpuChunkResult> {
+  const _cpuExtractStartMs = Date.now();
+  console.log(
+    `[CPU-EXTRACT-START] videoId=${stableVideoId}, ` +
+    `startSec=${startSec.toFixed(1)}, durationSec=${durationSec.toFixed(1)}, ` +
+    `src=${sourceLanguage}, ` +
+    `${_cpuTs()}`,
+  );
   const base = await getCpuServerBaseUrl();
+
+  console.log(
+    `[CPU-SERVER-URL] configured=${isCpuServerConfigured(base)}, ` +
+    `${_cpuTs()}`,
+  );
 
   const internalController = new AbortController();
   const timeoutId = setTimeout(() => internalController.abort(), 90_000);
@@ -120,7 +136,10 @@ export async function extractChunkViaCpuServer(
     try {
       response = await fetch(`${base}/extract-chunk`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(plan ? { 'x-user-plan': plan } : {}),
+        },
         body: JSON.stringify({
           videoId: stableVideoId,
           startSec,
@@ -130,6 +149,14 @@ export async function extractChunkViaCpuServer(
         signal: combinedSignal,
       });
     } catch (err: any) {
+      console.warn(
+        `[CPU-FETCH-ERROR] videoId=${stableVideoId}, ` +
+        `startSec=${startSec.toFixed(1)}, ` +
+        `errName=${err?.name ?? 'unknown'}, ` +
+        `errMsg=${String(err?.message ?? '').slice(0, 100)}, ` +
+        `elapsedMs=${Date.now() - _cpuExtractStartMs}, ` +
+        `${_cpuTs()}`,
+      );
       if (err?.name === 'AbortError') {
         throw new CpuExtractError('timeout', 'CPU server chunk extraction timed out');
       }
@@ -137,6 +164,13 @@ export async function extractChunkViaCpuServer(
     }
 
     if (response.status === 403) {
+      console.warn(
+        `[CPU-BOT-403] videoId=${stableVideoId}, ` +
+        `startSec=${startSec.toFixed(1)}, ` +
+        `httpStatus=403, ` +
+        `elapsedMs=${Date.now() - _cpuExtractStartMs}, ` +
+        `${_cpuTs()}`,
+      );
       throw new CpuExtractError('bot_403', 'YouTube bot detection on CPU server');
     }
 
@@ -148,16 +182,36 @@ export async function extractChunkViaCpuServer(
     }
 
     if (json?.bot_detected === true) {
+      console.warn(
+        `[CPU-BOT-JSON] videoId=${stableVideoId}, ` +
+        `startSec=${startSec.toFixed(1)}, ` +
+        `elapsedMs=${Date.now() - _cpuExtractStartMs}, ` +
+        `${_cpuTs()}`,
+      );
       throw new CpuExtractError('bot_403', 'YouTube bot detection on CPU server');
     }
 
     if (!response.ok) {
+      console.warn(
+        `[CPU-HTTP-FAIL] videoId=${stableVideoId}, ` +
+        `startSec=${startSec.toFixed(1)}, ` +
+        `httpStatus=${response.status}, ` +
+        `elapsedMs=${Date.now() - _cpuExtractStartMs}, ` +
+        `${_cpuTs()}`,
+      );
       throw new CpuExtractError(
         'network',
         `CPU server returned HTTP ${response.status}`,
       );
     }
 
+    console.log(
+      `[CPU-EXTRACT-OK] videoId=${stableVideoId}, ` +
+      `startSec=${startSec.toFixed(1)}, ` +
+      `audioKB=${((json as CpuChunkResult).audioBase64.length * 0.75 / 1024).toFixed(1)}, ` +
+      `extractMs=${Date.now() - _cpuExtractStartMs}, ` +
+      `${_cpuTs()}`,
+    );
     return json as CpuChunkResult;
   } finally {
     clearTimeout(timeoutId);

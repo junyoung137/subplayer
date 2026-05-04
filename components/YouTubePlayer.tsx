@@ -49,6 +49,7 @@ import { AlertTriangle, Maximize2 } from 'lucide-react-native';
 export interface YouTubePlayerProps {
   videoId: string;
   height: number;
+  plan?: string;
   playbackRate?: number;
   onReady?: () => void;
   onStateChange?: (
@@ -113,6 +114,7 @@ export const YouTubePlayer = React.forwardRef<
   {
     videoId,
     height,
+    plan,
     playbackRate = 1.0,
     onReady,
     onStateChange,
@@ -292,7 +294,7 @@ export const YouTubePlayer = React.forwardRef<
       (async () => {
         try {
           console.log(`[YTPlayer v28] caption fetch 시작: ${vid}`);
-          const result = await fetchYoutubeSubtitles(vid, "en");
+          const result = await fetchYoutubeSubtitles(vid, "en", plan);
           if (cancelled) return;
 
           if (result && result.segments.length > 0) {

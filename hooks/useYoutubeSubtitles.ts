@@ -320,7 +320,11 @@ export function useYoutubeSubtitles() {
    * @param videoId     YouTube video ID
    * @param videoGenre  영상 장르 힌트 (예: "tech lecture", "comedy", "news")
    */
-  const load = useCallback(async (videoId: string, videoGenre: string = "general") => {
+  const load = useCallback(async (
+    videoId: string,
+    videoGenre: string = "general",
+    plan?: string,
+  ) => {
     cancelledRef.current    = false;
     translatedMapRef.current.clear();
     segmentIdsRef.current   = [];
@@ -339,7 +343,7 @@ export function useYoutubeSubtitles() {
       translatedCount: 0,
     });
 
-    const result = await fetchYoutubeSubtitles(videoId);
+    const result = await fetchYoutubeSubtitles(videoId, "en", plan);
     if (cancelledRef.current) return;
 
     if (!result || result.segments.length === 0) {
